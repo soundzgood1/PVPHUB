@@ -102,7 +102,9 @@ PVPHUB_SETTINGS = PVPHUB_SETTINGS or {
         }
     },
     colorTheme = "RED", -- Default theme
-    welcomeShown = false -- Track if welcome popup has been shown
+    welcomeShown = false, -- Track if welcome popup has been shown
+    mainWindowScale = 1.0, -- New: save main window scale
+    compactWindowScale = 1.0 -- New: save compact window scale
 }
 
 local addonName, PVPHUB = ...
@@ -547,6 +549,14 @@ PVPHUB.frame:SetScript("OnEvent", function(self, event, ...)
                     PVPHUB_SETTINGS.visibleColumns[column] = default
                 end
             end
+            
+            -- Initialize scale settings if they don't exist
+            if not PVPHUB_SETTINGS.mainWindowScale then
+                PVPHUB_SETTINGS.mainWindowScale = 1.0
+            end
+            if not PVPHUB_SETTINGS.compactWindowScale then
+                PVPHUB_SETTINGS.compactWindowScale = 1.0
+            end
             -- Check for first-time user and show welcome popup
             if not PVPHUB_SETTINGS.welcomeShown then
                 -- Delay the popup slightly to ensure UI is loaded
@@ -915,7 +925,8 @@ SlashCmdList["PVPHUB"] = function(msg
         }
         
         f.scaleButtons = {}
-        f.currentScale = 1.0
+        f.currentScale = PVPHUB_SETTINGS.mainWindowScale or 1.0
+        f:SetScale(f.currentScale) -- Apply saved scale
         
         for i, option in ipairs(scaleOptions) do
             local btn = CreateFrame("Button", nil, f)
@@ -977,6 +988,10 @@ SlashCmdList["PVPHUB"] = function(msg
                 -- Apply scale
                 f.currentScale = self.scaleValue
                 f:SetScale(self.scaleValue)
+                
+                -- Save scale to settings
+                PVPHUB_SETTINGS.mainWindowScale = self.scaleValue
+                
                 if f.UpdateContent then f:UpdateContent() end
             end)
             
@@ -1693,7 +1708,8 @@ function PVPHUB:CreateCompactWindow()
         }
         
         PVPHUB.compactWindow.scaleButtons = {}
-        PVPHUB.compactWindow.currentScale = 1.0
+        PVPHUB.compactWindow.currentScale = PVPHUB_SETTINGS.compactWindowScale or 1.0
+        PVPHUB.compactWindow:SetScale(PVPHUB.compactWindow.currentScale) -- Apply saved scale
         
         for i, option in ipairs(scaleOptions) do
             local btn = CreateFrame("Button", nil, PVPHUB.compactWindow)
@@ -1759,6 +1775,9 @@ function PVPHUB:CreateCompactWindow()
                 -- Apply scale
                 PVPHUB.compactWindow.currentScale = self.scaleValue
                 PVPHUB.compactWindow:SetScale(self.scaleValue)
+                
+                -- Save scale to settings
+                PVPHUB_SETTINGS.compactWindowScale = self.scaleValue
             end)
             
             table.insert(PVPHUB.compactWindow.scaleButtons, btn)
