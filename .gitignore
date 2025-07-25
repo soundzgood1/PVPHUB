@@ -1,0 +1,11 @@
+# Exclude backup files created during development
+PVPHUB_core_backup_*.lua
+
+# Exclude temporary test files
+/tmp/
+*.tmp
+
+# Exclude build artifacts and dependencies
+node_modules/
+dist/
+*.log
