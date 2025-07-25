@@ -705,6 +705,129 @@ local function UpdateAllData()
     C_Timer.After(4, UpdatePvPRatings)
 end
 
+PVPHUB.frame:RegisterEvent("PLAYER_LOGIN")
+PVPHUB.frame:RegisterEvent("CURRENCY_DISPLAY_UPDATE")
+PVPHUB.frame:RegisterEvent("PLAYER_ENTERING_WORLD")
+PVPHUB.frame:RegisterEvent("PVP_RATED_STATS_UPDATE")
+PVPHUB.frame:RegisterEvent("BAG_UPDATE_DELAYED")
+PVPHUB.frame:RegisterEvent("BAG_UPDATE")
+PVPHUB.frame:RegisterEvent("ADDON_LOADED")
+
+PVPHUB.frame:SetScript("OnEvent", function(self, event, ...)
+    print("[PVPHUB DEBUG] Event triggered:", event)
+    if event == "ADDON_LOADED" then
+        local addonName = ...
+        if addonName == "PVPHUB" then
+            -- Initialize settings if they don't exist
+            PVPHUB_SETTINGS = PVPHUB_SETTINGS or {
+                visibleColumns = {
+                    character = true,
+                    honor = true,
+                    conquest = true,
+                    bloodstones = true,
+                    rating2v2 = true,
+                    rating3v3 = true,
+                    ratingShuffle = true,
+                    ratingBlitz = true,
+                    delete = true
+                },
+                compactMode = {
+                    enabled = false,
+                    selectedChars = {},
+                    showRatings = {
+                        rating2v2 = true,
+                        rating3v3 = true,
+                        ratingShuffle = true,
+                        ratingBlitz = false
+                    }
+                },
+                colorTheme = "RED", -- Default theme
+                welcomeShown = false -- Track if welcome popup has been shown
+            }
+            -- Ensure colorTheme exists (for backwards compatibility)
+            if not PVPHUB_SETTINGS.colorTheme then
+                PVPHUB_SETTINGS.colorTheme = "RED"
+            end
+            -- Apply the selected theme
+            ApplyTheme()
+            RefreshAllWindows()
+            -- Ensure compactMode exists (for backwards compatibility)
+            if not PVPHUB_SETTINGS.compactMode then
+                PVPHUB_SETTINGS.compactMode = {
+                    enabled = false,
+                    selectedChars = {},
+                    showRatings = {
+                        rating2v2 = true,
+                        rating3v3 = true,
+                        ratingShuffle = true,
+                        ratingBlitz = false
+                    }
+                }
+            end
+            -- Ensure all columns exist in settings (for backwards compatibility)
+            local defaultColumns = {
+                character = true,
+                honor = true,
+                conquest = true,
+                bloodstones = true,
+                rating2v2 = true,
+                rating3v3 = true,
+                ratingShuffle = true,
+                ratingBlitz = true,
+                delete = true
+            }
+            for column, default in pairs(defaultColumns) do
+                if PVPHUB_SETTINGS.visibleColumns[column] == nil then
+                    PVPHUB_SETTINGS.visibleColumns[column] = default
+                end
+            end
+            -- Check for first-time user and show welcome popup
+            if not PVPHUB_SETTINGS.welcomeShown then
+                -- Delay the popup slightly to ensure UI is loaded
+                C_Timer.After(1, function()
+                    PVPHUB:ShowWelcomePopup()
+                end)
+            end
+            -- Check for first-time user (welcome popup)
+            if not PVPHUB_SETTINGS.welcomeShown then
+                PVPHUB:ShowWelcomePopup()
+            end
+        end
+    elseif event == "BAG_UPDATE" or event == "CURRENCY_DISPLAY_UPDATE" then
+        print("[PVPHUB DEBUG] Handling BAG_UPDATE or CURRENCY_DISPLAY_UPDATE")
+        UpdateCurrencyData()
+        if PVPHUB.window and PVPHUB.window:IsShown() and PVPHUB.window.UpdateContent then
+            print("[PVPHUB DEBUG] Updating main window content after currency/item update")
+            PVPHUB.window:UpdateContent()
+        end
+        if PVPHUB.compactWindow and PVPHUB.compactWindow:IsShown() and PVPHUB.UpdateCompactWindow then
+            print("[PVPHUB DEBUG] Updating compact window content after currency/item update")
+            PVPHUB:UpdateCompactWindow()
+        end
+    elseif event == "PVP_RATED_STATS_UPDATE" then
+        print("[PVPHUB DEBUG] Handling PVP_RATED_STATS_UPDATE")
+        UpdatePvPRatings()
+        if PVPHUB.window and PVPHUB.window:IsShown() and PVPHUB.window.UpdateContent then
+            print("[PVPHUB DEBUG] Updating main window content after PvP rating update")
+            PVPHUB.window:UpdateContent()
+        end
+        if PVPHUB.compactWindow and PVPHUB.compactWindow:IsShown() and PVPHUB.UpdateCompactWindow then
+            print("[PVPHUB DEBUG] Updating compact window content after PvP rating update")
+            PVPHUB:UpdateCompactWindow()
+        end
+    else
+        print("[PVPHUB DEBUG] Handling other event:", event)
+        UpdateAllData()
+        if PVPHUB.window and PVPHUB.window:IsShown() and PVPHUB.window.UpdateContent then
+            print("[PVPHUB DEBUG] Updating main window content after UpdateAllData")
+            PVPHUB.window:UpdateContent()
+        end
+        if PVPHUB.compactWindow and PVPHUB.compactWindow:IsShown() and PVPHUB.UpdateCompactWindow then
+            print("[PVPHUB DEBUG] Updating compact window content after UpdateAllData")
+            PVPHUB:UpdateCompactWindow()
+        end
+    end
+end)
 
 SLASH_PVPHUB1 = "/pvphub"
 SLASH_PVPHUB2 = "/pvphub streamer"
