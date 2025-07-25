@@ -1,0 +1,5 @@
+## v1.0 - Blitz ID Fix
+- Added support for Battleground Blitz (Solo RBG) using correct bracket ID 9
+- Fixed real-time update issues for Bloodstones
+- Updated stable build with minimap button, scale slider and right-click remove
+- Added official addon logo

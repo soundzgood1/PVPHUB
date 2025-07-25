@@ -1,0 +1,16 @@
+## Interface: 110002
+## Title: |cffff0000PVPHUB|r
+## Version: 2.1
+## Author: Soundz
+## Notes: PvP Overview for all characters - Track Honor, Conquest, Bloodstones, and Arena ratings across all your characters
+## SavedVariables: PVPHUB_DB, PVPHUB_IGNORED, PVPHUB_SETTINGS
+## IconTexture: Interface\Icons\inv_misc_gem_diamond_02
+## AddonCompartmentFunc: PVPHUB_AddonCompartmentFunc
+## AddonCompartmentFuncOnEnter: PVPHUB_AddonCompartmentFuncOnEnter
+## AddonCompartmentFuncOnLeave: PVPHUB_AddonCompartmentFuncOnLeave
+## X-Category: PvP
+## X-Website: 
+## X-Curse-Project-ID: 
+## X-WoWI-ID: 
+## X-Wago-ID: 
+PVPHUB_core.lua
