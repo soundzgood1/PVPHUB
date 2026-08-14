@@ -7,6 +7,7 @@ desktop.ini
 .vscode/
 .idea/
 *.swp
+.claude/
 
 # WoW SavedVariables (per-account/per-character, not addon code)
 *.lua.bak
