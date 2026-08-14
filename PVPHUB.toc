@@ -1,0 +1,28 @@
+## Interface: 120007, 120100
+## Title: |cffffd100PVPHUB|r
+## Version: 6.5.1
+## Author: Soundz
+## Notes: Thanks for using PVPHUB — your feedback keeps making it better ♥
+## SavedVariables: PVPHUB_DB, PVPHUB_DB_BACKUP, PVPHUB_IGNORED, PVPHUB_SETTINGS
+## IconTexture: Interface\AddOns\PVPHUB\media\PVPHUB.png
+## AddonCompartmentFunc: PVPHUB_AddonCompartmentFunc
+## AddonCompartmentFuncOnEnter: PVPHUB_AddonCompartmentFuncOnEnter
+## AddonCompartmentFuncOnLeave: PVPHUB_AddonCompartmentFuncOnLeave
+## OptionalDeps: LibSharedMedia-3.0
+## X-Category: PvP
+## X-Website: 
+## X-Curse-Project-ID: 
+## X-WoWI-ID: 
+## X-Wago-ID: 
+
+# Load modules first
+modules\themes.lua
+modules\queue_timer.lua
+modules\pvp_tracking.lua
+
+# Load main core file
+PVPHUB_core.lua
+
+# Load modules that depend on core
+modules\compact.lua
+modules\popups.lua

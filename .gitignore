@@ -1,0 +1,14 @@
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# WoW SavedVariables (per-account/per-character, not addon code)
+*.lua.bak
+WTF/
+SavedVariables/

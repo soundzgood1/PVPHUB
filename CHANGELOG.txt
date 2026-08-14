@@ -1,0 +1,134 @@
+## v6.5.1 - Season Wipe & Archive Removed
+- REMOVED: Season Wipe & Archive (added in v6.5, below)
+  • This feature has been pulled. It could archive an inaccurate recap — in some cases only counting whichever character happened to be logged in at the moment, not your whole roster — and a new season's early matches could silently wipe the old season's match history before you'd even answered the "start fresh?" prompt
+  • The Season tab now always shows your live, current-season stats. The "start fresh?" popup and the archived-seasons dropdown are both gone
+  • If you'd already archived a past season, that snapshot is still sitting in your SavedVariables but is no longer viewable in the UI
+
+## v6.5 - Season Archiving, Draggable Columns & Aurora Theme
+- NEW: Season Wipe & Archive
+  • When PVPHUB detects a new PvP season, it now offers to archive your old season's Season-tab stats and wipe the match history/ratings tracking that just piles up, keeping your characters and current MMR untouched
+  • Declining is just as supported — check "keep my data" and nothing is touched
+  • Archived seasons are viewable anytime via a dropdown at the top of the Season tab, so you can compare past seasons against the current one
+- NEW: Draggable Column Order (Characters tab)
+  • Drag any column header (Honor, Conquest, ratings, etc.) to reorder the table exactly how you like it
+  • Your custom order is remembered automatically across sessions
+- NEW: Aurora Theme
+  • A dark glass + indigo/violet color theme with a gradient window background
+  • Added a "Window Glow" toggle in Settings → Appearance to turn off the ambient glow/border around the main window
+  • Removed the Green theme
+- Improvements:
+  • Removed the flashing "NEW" badge on the Season tab
+  • The Hidden Characters window now notes that hiding a character also drops it from the Season tab's totals, not just the character list
+- Bug Fixes:
+  • Fixed stale header text/columns lingering on screen after reordering columns or switching tabs
+  • Fixed Streamer Mode showing 0 rating after respeccing away from a character's only rated spec — that spec now shows as its own pinnable row and keeps displaying its rating no matter which spec is currently active
+  • Fixed a character appearing as a duplicate row in Streamer Mode right after earning its first rated spec
+
+## v6.4 - Streamer Mode Multi-Spec Overhaul
+- NEW: Streamer Mode multi-spec rows reworked
+  • Multi-spec characters now show one plain checkbox per spec instead of splitting by bracket — ticking a spec shows it across every bracket you've enabled, instead of just one
+  • A character's rows now sort and stay grouped together instead of scattering across the list, with a small connector tying them to their anchor row
+  • 2v2/3v3/RBG aren't spec-specific, so extra rows for the same character show a small ^ placeholder instead of repeating the same number
+- NEW: /ph slash command — shortcut for /pvphub
+- Improvements:
+  • Compact window sorting ties (e.g. everyone at 0 rating) now fall back to alphabetical instead of arbitrary order
+  • Redesigned the first-install Welcome window with a card-style feature list and a softer gradient banner, matching the "What's New" popup style
+- Bug Fixes:
+  • Fixed the green "currently playing" indicator showing before the class/spec icon on some rows and after it on others
+  • Fixed a duplicate row appearing when respeccing into a spec that was already pinned in Streamer Mode
+  • Fixed a stray 0-rated pinned row that could appear after a character graduated to multi-spec tracking
+
+## v6.3 - Season Tab, Queue Timer Styles & Multi-Spec Pinning
+- NEW: Season Tab (Beta) - Account-wide season overview
+  • Combined win rate, highest rating, and roster breakdowns across every tracked character
+  • Per-bracket totals and class/spec breakdowns
+  • Note: only counts matches played since you installed PVPHUB — mid-season installs won't see earlier games from this season
+- NEW: Queue Timer Styles - Choose how the queue timer widget looks in Settings → Queue Timer
+  • PVPHUB - the original themed design (default)
+  • Detail - a clean, minimal card that also shows your last match's MMR change
+  • Compact - everything on a single line
+- NEW: Pin Multiple Specs (Streamer Mode) - Right-click a character in the Streamer Mode window to pin additional specs as their own rows, showing more than one spec's rating at once
+- Improvements:
+  • Queue Timer size slider range changed to 100%-250% (previously 50%-200%)
+- Bug Fixes:
+  • Fixed a missing icon under "Window Controls" in Streamer Mode settings
+
+## v4.0.2 - Character Groups & Major UI Improvements
+- NEW: Character Groups feature - Organize characters into custom, collapsible groups
+  • Click "+ New Group" button to create groups
+  • Right-click characters to move between groups
+  • Right-click group headers to rename or delete
+  • Groups collapse/expand with single click
+  • Newest groups appear at top, "No Group" always at bottom
+  • Enable/disable in Settings → Display
+  • Press Enter in dialogs to quickly create/rename groups
+- UI Polish:
+  • Improved dropdown button opacity for better visibility
+  • Enhanced Streamer Mode button with smooth fade animation
+  • Fixed theme colors - summary text now stays white across all themes
+  • Better visual spacing between group headers and character entries
+  • Total values now always accurate, even when groups are collapsed
+- Settings Redesign:
+  • Cleaner two-column layout (Display left, Appearance right)
+  • Better organization with logical sections
+  • Consistent styling throughout
+  • Improved spacing and readability
+- Bug Fixes:
+  • Fixed "Ungrouped" label migration to "No Group"
+  • Fixed button visibility when grouping is disabled
+  • Fixed character display overlapping with group headers
+  • Fixed theme migration for existing users
+- Updated personal note: "Thanks for using PVP HUB! See you in Midnight!"
+
+## v2.3 - Settings Overhaul & UI Improvements
+- Added comprehensive Settings tab to main window with modern tabbed interface
+- Added 3 new configurable settings:
+  • Hide Realm Names: Option to hide server names in character display (main window only)
+  • Disable Honor Cap Warnings: Toggle for 14k Honor popup warnings
+  • Hide Characters with No Ratings: Filter out characters without any PvP ratings
+- Improved main window layout and positioning for better header spacing
+- Complete overhaul of compact mode Settings window with cleaner design
+- Enhanced compact window layout with improved element positioning
+- Replaced scale buttons with smooth scale slider (75%-175% range) in both windows
+- Added dynamic header underlines that perfectly match text width
+- Elevated main window frame strata to HIGH for proper layering above spell alerts
+- Comprehensive code cleanup: removed dead code, consolidated duplicate logic
+- Implemented debug system with DebugPrint helper function
+- General UI polish and visual consistency improvements
+
+## v1.0 - Blitz ID Fix
+- Added support for Battleground Blitz (Solo RBG) using correct bracket ID 9
+- Fixed real-time update issues for Bloodstones
+- Updated stable build with minimap button, scale slider and right-click remove
+- Added official addon logo
+
+
+2.2
+
+✅ Release Checklist for PVPHUB Addon
+1. Functionality
+Main and compact windows always show the freshest data when opened.
+Sorting filter for both main and compact windows is saved and restored after reloads.
+PvP rating update delay is reduced to 0.5 seconds for faster updates.
+All columns and character rows display correctly, including the current character.
+Rating color logic matches your specification (white, green, blue, purple, orange, orange+glow).
+Deleting a character works and updates the UI immediately.
+2. UI/UX
+Fonts for row data and summary bar are modernized and readable.
+Sorting dropdowns reflect the saved filter and update instantly.
+Theme and column visibility dropdowns work as expected.
+Streamer/compact mode toggle works and compact window respects saved sort filter.
+No visual glitches in header, row, or summary bar fonts.
+3. Code Quality
+No leftover debug prints or commented-out code in user-facing areas.
+No merge conflict markers or accidental duplicate code blocks.
+All new settings (sortKey, compactSortKey) are stored in PVPHUB_SETTINGS and persist across reloads.
+4. SavedVariables
+PVPHUB_SETTINGS, PVPHUB_DB, and PVPHUB_IGNORED are still declared at the top and used consistently.
+No breaking changes to the SavedVariables structure that would cause user data loss.
+5. Performance
+No unnecessary delays or redundant refreshes.
+No infinite loops or excessive C_Timer usage.
+6. Compatibility
+No use of features or fonts that are not available in all WoW clients (ARIALN.TTF and FRIZQT__.TTF are standard).
+No taint or protected function errors in the UI code.
