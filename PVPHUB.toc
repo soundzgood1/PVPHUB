@@ -11,7 +11,7 @@
 ## OptionalDeps: LibSharedMedia-3.0
 ## X-Category: PvP
 ## X-Website: 
-## X-Curse-Project-ID: 
+## X-Curse-Project-ID: 1278845
 ## X-WoWI-ID: 
 ## X-Wago-ID: 
 
