@@ -167,6 +167,63 @@ local function CapturePreMatchSnapshot(charKey)
 end
 
 -- --------------------------------------------------------------------------
+-- Season title achievements (Legend / Strategist / Gladiator)
+-- --------------------------------------------------------------------------
+-- These are ordinary quantity achievements (e.g. "0/100 Rated Solo Shuffle
+-- rounds won while at Elite rank") — Blizzard's server computes the count and
+-- the Elite-rank gating itself, so we just read GetAchievementCriteriaInfo.
+-- IDs are season-specific and must be updated at the start of each new season.
+-- Verified against BetterBlizzFrames' live GladWinTracker implementation
+-- (Wowhead's IDs for these lag behind a pre-launch renumbering and are wrong).
+local TITLE_ACHIEVEMENTS = {
+    legend     = { id = 62932, bracketKey = "ratingShuffle" }, -- Rated Solo Shuffle rounds won at Elite rank
+    strategist = { id = 62950, bracketKey = "ratingBlitz"   }, -- Rated Battleground Blitz matches won at Elite rank
+    gladiator  = { id = 62930, bracketKey = "rating3v3"     }, -- 3v3 games won at Elite rank
+}
+
+-- Scans all criteria for the achievement rather than assuming index 1, since
+-- some achievements carry more than one criterion or none at all.
+local function GetAchievementProgress(achievementID)
+    local ok, num = pcall(GetAchievementNumCriteria, achievementID)
+    if not ok or not num then return 0, 0 end
+    for i = 1, num do
+        local ok2, _, _, _, quantity, reqQuantity = pcall(GetAchievementCriteriaInfo, achievementID, i)
+        if ok2 and reqQuantity and reqQuantity > 0 then
+            return tonumber(quantity) or 0, reqQuantity
+        end
+    end
+    return 0, 0
+end
+
+local function SaveTitleProgress(charKey)
+    if not PVPHUB_DB or not charKey then return end
+    PVPHUB_DB[charKey]               = PVPHUB_DB[charKey]               or {}
+    PVPHUB_DB[charKey].titleProgress = PVPHUB_DB[charKey].titleProgress or {}
+
+    for key, def in pairs(TITLE_ACHIEVEMENTS) do
+        local ok, id, _, _, completed, month, day, year, description, _, icon, rewardText =
+            pcall(GetAchievementInfo, def.id)
+        if ok and id then
+            local current, required = GetAchievementProgress(def.id)
+            PVPHUB_DB[charKey].titleProgress[key] = {
+                achievementID = def.id,
+                bracketKey    = def.bracketKey,
+                current       = current,
+                required      = required,
+                completed     = completed or (required > 0 and current >= required) or false,
+                earnedMonth   = month,
+                earnedDay     = day,
+                earnedYear    = year,
+                description   = description,
+                icon          = icon,
+                rewardText    = rewardText,
+                lastUpdated   = GetServerTime(),
+            }
+        end
+    end
+end
+
+-- --------------------------------------------------------------------------
 -- Dedicated event frame
 -- --------------------------------------------------------------------------
 
@@ -180,6 +237,8 @@ pvpTrackingFrame:RegisterEvent("PVP_MATCH_ACTIVE")
 pvpTrackingFrame:RegisterEvent("PVP_MATCH_INACTIVE")
 pvpTrackingFrame:RegisterEvent("PVP_MATCH_COMPLETE")
 pvpTrackingFrame:RegisterEvent("PLAYER_SPECIALIZATION_CHANGED")
+pvpTrackingFrame:RegisterEvent("CRITERIA_UPDATE")
+pvpTrackingFrame:RegisterEvent("ACHIEVEMENT_EARNED")
 
 pvpTrackingFrame:SetScript("OnEvent", function(self, event, arg1, arg2)
     -- Protect against addon conflicts and taint issues (mirrors PVPHUB.frame's
@@ -197,6 +256,7 @@ pvpTrackingFrame:SetScript("OnEvent", function(self, event, arg1, arg2)
             -- It sends a server request and fires PVP_RATED_STATS_UPDATE when data arrives.
             RequestRatedInfo()
             SaveBracketStats(key)
+            SaveTitleProgress(key)
         end)
 
     elseif event == "PLAYER_LOGIN" then
@@ -205,6 +265,7 @@ pvpTrackingFrame:SetScript("OnEvent", function(self, event, arg1, arg2)
             if not key then return end
             RequestRatedInfo()
             SaveBracketStats(key)
+            SaveTitleProgress(key)
         end)
 
     elseif event == "PLAYER_ENTERING_WORLD" then
@@ -246,6 +307,13 @@ pvpTrackingFrame:SetScript("OnEvent", function(self, event, arg1, arg2)
         local key = GetCurrentCharKey()
         if key then SaveBracketStats(key) end
 
+    elseif event == "CRITERIA_UPDATE" or event == "ACHIEVEMENT_EARNED" then
+        -- Title achievement progress changed (e.g. a rated win just landed).
+        -- No cache-readiness gate needed: achievement criteria always reflect
+        -- the currently logged-in character, unlike GetPersonalRatedInfo.
+        local key = GetCurrentCharKey()
+        if key then SaveTitleProgress(key) end
+
     elseif event == "PVP_MATCH_ACTIVE" then
         -- Rated match is starting; capture current ratings as a baseline
         -- before the server changes anything.
@@ -268,7 +336,10 @@ pvpTrackingFrame:SetScript("OnEvent", function(self, event, arg1, arg2)
         -- SaveBracketStats returns early if _pvpCacheReady is still false.
         C_Timer.After(4, function()
             local key = GetCurrentCharKey()
-            if key then SaveBracketStats(key) end
+            if key then
+                SaveBracketStats(key)
+                SaveTitleProgress(key)
+            end
         end)
 
     elseif event == "PLAYER_SPECIALIZATION_CHANGED" then
@@ -293,5 +364,7 @@ pvpTrackingFrame:SetScript("OnEvent", function(self, event, arg1, arg2)
 end)
 
 -- Expose for external callers (e.g. slash commands, manual refresh buttons)
-PVPHUB.PvPTracking.frame            = pvpTrackingFrame
-PVPHUB.PvPTracking.SaveBracketStats = SaveBracketStats
+PVPHUB.PvPTracking.frame              = pvpTrackingFrame
+PVPHUB.PvPTracking.SaveBracketStats   = SaveBracketStats
+PVPHUB.PvPTracking.SaveTitleProgress  = SaveTitleProgress
+PVPHUB.PvPTracking.TITLE_ACHIEVEMENTS = TITLE_ACHIEVEMENTS

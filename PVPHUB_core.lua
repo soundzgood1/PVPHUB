@@ -2119,6 +2119,47 @@ local function ApplyModernScrollbarStyling(scrollFrame, themeColors)
             scrollBar.Forward:GetHighlightTexture():SetVertexColor(accent[1] * 1.5, accent[2] * 1.5, accent[3] * 1.5, 0.6)
         end
     end
+
+    -- Auto-fade: leave the scrollbar in its normal (small, fixed) lane
+    -- rather than overlaying content, but fade it to a faint idle state and
+    -- back to full opacity on hover/drag, so it's unobtrusive without
+    -- covering anything. Guarded so re-styling an already-set-up scrollbar
+    -- doesn't stack duplicate OnEnter/OnLeave hooks.
+    if not scrollBar._pvphubOverlayApplied then
+        scrollBar._pvphubOverlayApplied = true
+        scrollFrame:EnableMouse(true) -- ensures OnEnter/OnLeave fire for the fade, regardless of the template's own default
+        scrollBar:SetFrameStrata("HIGH")
+
+        local IDLE_ALPHA, ACTIVE_ALPHA = 0.35, 1.0
+        scrollBar:SetAlpha(IDLE_ALPHA)
+
+        local fadeOutTimer
+        local function FadeIn()
+            if fadeOutTimer then fadeOutTimer:Cancel(); fadeOutTimer = nil end
+            UIFrameFadeIn(scrollBar, 0.15, scrollBar:GetAlpha(), ACTIVE_ALPHA)
+        end
+        local function FadeOutSoon()
+            if fadeOutTimer then fadeOutTimer:Cancel() end
+            fadeOutTimer = C_Timer.NewTimer(0.6, function()
+                fadeOutTimer = nil
+                UIFrameFadeOut(scrollBar, 0.4, scrollBar:GetAlpha(), IDLE_ALPHA)
+            end)
+        end
+
+        scrollFrame:HookScript("OnEnter", FadeIn)
+        scrollFrame:HookScript("OnLeave", FadeOutSoon)
+        scrollBar:HookScript("OnEnter", FadeIn)
+        scrollBar:HookScript("OnLeave", FadeOutSoon)
+        -- No OnValueChanged hook: newer clients' ScrollBar (MinimalScrollBar,
+        -- event-driven) isn't a Slider and doesn't support that script type
+        -- at all — hover/drag on the bar itself (below) already covers
+        -- programmatic scroll changes in practice, since the mouse has to be
+        -- over the bar or track to drive one.
+        if scrollBar.Thumb then
+            scrollBar.Thumb:HookScript("OnMouseDown", FadeIn)
+            scrollBar.Thumb:HookScript("OnMouseUp", FadeOutSoon)
+        end
+    end
 end
 
 -- ============================================================
@@ -3955,6 +3996,41 @@ local BRACKET_META = {
     { key = "ratingBlitz",   label = "Blitz",                color = {0.65, 0.50, 0.10}, icon = "Interface\\Icons\\achievement_bg_killxenemies_generalsroom" },
 }
 
+-- Season title achievements (Legend/Strategist/Gladiator) — mirrors the IDs
+-- tracked in modules/pvp_tracking.lua's TITLE_ACHIEVEMENTS. Reuses each
+-- title's parent bracket's color/icon so the cards read as a family with
+-- the per-bracket cards below them.
+-- Render order (left-to-right in the Season tab's tile row): Gladiator,
+-- Legend, Strategist.
+--
+-- reqTemplate is hardcoded rather than read live from GetAchievementInfo's
+-- description field: that field is unreliable right after login/reload
+-- (WoW doesn't always have it cached until the Blizzard Achievement UI has
+-- been opened once this session), so the tooltip would silently show
+-- nothing. The template only hardcodes the stable wording ("Win N games
+-- while at Elite rank during <season>") — the win count (%d) and season
+-- name (%s) are filled in live from tp.required and GetSeasonDisplayName,
+-- both of which are already fetched reliably elsewhere in this file.
+-- rewardText per title, all confirmed via in-game screenshots. Gladiator's
+-- mount ("Galactic Gladiator's Goredrake") is a SEPARATE achievement, not a
+-- reward of this one — this one only grants the title — so it's
+-- deliberately not mentioned here. Legend/Strategist each grant a pennant
+-- + title from their single achievement.
+local TITLE_META = {
+    { key = "gladiator",  name = "Gladiator",  bracketKey = "rating3v3",     color = {0.20, 0.45, 0.65}, icon = "Interface\\Icons\\achievement_arena_3v3_1",
+      reqTemplate = "Win %d 3v3 games while at Elite rank during %s.",
+      rewardText  = "Seasonal Character Title: Gladiator" },
+    { key = "legend",     name = "Legend",     bracketKey = "ratingShuffle", color = {0.55, 0.30, 0.65}, icon = "Interface\\Icons\\ability_dualwield",
+      reqTemplate = "Win %d Rated Solo Shuffle rounds while at Elite rank during %s.",
+      rewardText  = "Pennant & Seasonal Character Title" },
+    { key = "strategist", name = "Strategist", bracketKey = "ratingBlitz",   color = {0.65, 0.50, 0.10}, icon = "Interface\\Icons\\achievement_bg_killxenemies_generalsroom",
+      reqTemplate = "Win %d Rated Battleground Blitz matches while at Elite rank during %s.",
+      rewardText  = "Pennant & Seasonal Character Title" },
+}
+
+local TITLE_META_BY_BRACKET = {}
+for _, m in ipairs(TITLE_META) do TITLE_META_BY_BRACKET[m.bracketKey] = m end
+
 -- Human-readable season name, keyed by the raw ID C_PvP.GetUIDisplaySeason()
 -- returns (Blizzard's internal running counter — not the per-expansion
 -- season number players see, e.g. "Season 1" of a new expansion). A raw ID
@@ -3964,6 +4040,16 @@ local function GetSeasonDisplayName(rawSeason)
     if not rawSeason or rawSeason <= 0 then return nil end
     local custom = PVPHUB_SETTINGS.seasonLabels and PVPHUB_SETTINGS.seasonLabels[rawSeason]
     return custom or ("Season " .. rawSeason)
+end
+
+-- Builds the plain-text requirement line for a title tile/tooltip from its
+-- template + the live required count + the live season label. Returns nil
+-- if the required count hasn't synced yet (tile/tooltip just omits the line).
+local function GetTitleRequirementText(meta, tp)
+    if not meta.reqTemplate or not tp or not tp.required or tp.required <= 0 then return nil end
+    local rawSeason  = (C_PvP and C_PvP.GetUIDisplaySeason and C_PvP.GetUIDisplaySeason()) or 0
+    local seasonName = GetSeasonDisplayName(rawSeason) or "this season"
+    return string.format(meta.reqTemplate, tp.required, seasonName)
 end
 
 -- True if this character has any rated PvP data recorded for the current
@@ -3997,6 +4083,40 @@ local function GetStatsCharacterList()
         return a < b
     end)
     return list
+end
+
+-- Aggregates each season title's progress across every tracked character:
+-- if any character already earned it, surface that character + earn date;
+-- otherwise surface whichever character is closest, so a multi-alt player
+-- instantly knows who to keep queuing on. Returns [titleKey] = {
+--   required, current, closestChar,
+--   earned, earnedChar, earnedDate ("MM/DD/YYYY")
+-- }.
+local function BuildTitleProgressData(charList)
+    local result = {}
+    for _, meta in ipairs(TITLE_META) do
+        local entry = { current = 0, required = 0 }
+        for _, charKey in ipairs(charList) do
+            local tp = PVPHUB_DB[charKey] and PVPHUB_DB[charKey].titleProgress and PVPHUB_DB[charKey].titleProgress[meta.key]
+            if tp and tp.required and tp.required > 0 then
+                entry.required = tp.required
+                if tp.completed and not entry.earned then
+                    entry.earned     = true
+                    entry.earnedChar = charKey
+                    if tp.earnedMonth and tp.earnedDay and tp.earnedYear then
+                        -- GetAchievementInfo's year is 2-digit (e.g. 26 for 2026).
+                        local fullYear = tp.earnedYear < 100 and (2000 + tp.earnedYear) or tp.earnedYear
+                        entry.earnedDate = string.format("%02d/%02d/%04d", tp.earnedMonth, tp.earnedDay, fullYear)
+                    end
+                elseif not entry.earned and tp.current > entry.current then
+                    entry.current     = tp.current
+                    entry.closestChar = charKey
+                end
+            end
+        end
+        result[meta.key] = entry
+    end
+    return result
 end
 
 -- Pure data computation, no widgets — aggregates every tracked
@@ -4155,6 +4275,7 @@ local function BuildSeasonOverviewData(charList)
         mostPlayedClassStr = mostPlayedClassStr, mostPlayedClassSub = mostPlayedClassSub, mostPlayedClassIcon = mostPlayedClassIcon,
         mostPlayedSpecStr  = mostPlayedSpecStr,  mostPlayedSpecSub  = mostPlayedSpecSub,  mostPlayedSpecIcon  = mostPlayedSpecIcon,
         favoriteBracketStr = favoriteBracketStr, favoriteBracketSub = favoriteBracketSub, favoriteBracketIcon = favoriteBracketIcon,
+        titleProgress = BuildTitleProgressData(charList),
     }
 end
 
@@ -4648,6 +4769,27 @@ local function ShowPVPHUBRatingTooltip(anchor, charKey, bracketKey, ratingsData)
         PvPTipSpacer(3)
         PvPTipRow("Interface\\Icons\\Achievement_Arena_2v2_7", wlLine, nil, nil,
                   SP_NAME, PT_W - PT_PAD, PT_W - PT_PAD)
+    end
+
+    -- ── Season title progress (Legend / Strategist / Gladiator) ────────────
+    -- Win count only, e.g. "Gladiator: 0/50" — no requirement text here,
+    -- that only lives on the Season tab's title tiles (see AddTitleProgressTiles).
+    local titleMeta = TITLE_META_BY_BRACKET[bracketKey]
+    if titleMeta then
+        local tp = data.titleProgress and data.titleProgress[titleMeta.key]
+        if tp and tp.required and tp.required > 0 then
+            hasAnyData = true
+            PvPTipSpacer(3)
+            local line
+            if tp.completed then
+                line = "|cfffff700" .. titleMeta.name .. ":|r |cff40ff40Earned!|r"
+            else
+                local pct      = tp.current / tp.required
+                local numColor = pct >= 0.75 and "|cff40ff40" or (pct >= 0.50 and "|cffffd700" or (pct >= 0.25 and "|cffffa500" or "|cffff4040"))
+                line = "|cfffff700" .. titleMeta.name .. ":|r " .. numColor .. tp.current .. "/" .. tp.required .. "|r"
+            end
+            PvPTipRow(nil, line, nil, nil, SP_NAME, PT_W - PT_PAD, PT_W - PT_PAD)
+        end
     end
 
     -- ── Match history ───────────────────────────────────────────────────────
@@ -5742,7 +5884,7 @@ PVPHUB.frame:HookScript("OnEvent", function(self, event, ...)
                     PVPHUB:CreateCompactWindow()
                 end)
             end
-            
+
             -- Create initial backup after settings load
             C_Timer.After(3, CreateDataBackup)
 
@@ -6306,6 +6448,10 @@ SlashCmdList["PVPHUB"] = function(msg)
                 ratingShuffle = { mh(259, 3010, 3080), mh(261, 3124, 3190) },
                 ratingBlitz   = { mh(261, 3060, 3130) },
             },
+            -- Gladiator: early progress (red band, <25%)
+            titleProgress = {
+                gladiator = { achievementID=62930, bracketKey="rating3v3", current=6, required=50, completed=false, lastUpdated=ts },
+            },
         }
 
         -- 2: Cdew-Illidan – Shaman, ~2800 orange
@@ -6331,6 +6477,11 @@ SlashCmdList["PVPHUB"] = function(msg)
                 ratingShuffle = { mh(262, 2720, 2790), mh(264, 2860, 2930) },
                 ratingBlitz   = { mh(264, 2800, 2870) },
             },
+            -- Legend: earned (gold "Earned!" state, with a win date)
+            titleProgress = {
+                legend = { achievementID=62932, bracketKey="ratingShuffle", current=100, required=100, completed=true,
+                           earnedMonth=5, earnedDay=29, earnedYear=26, lastUpdated=ts },
+            },
         }
 
         -- 3: Whaazz-Kazzak – Paladin, ~2500 orange
@@ -6355,6 +6506,10 @@ SlashCmdList["PVPHUB"] = function(msg)
                 ratingRBG     = { mh(65, 2480, 2550) },
                 ratingShuffle = { mh(70, 2420, 2490), mh(65, 2540, 2610) },
                 ratingBlitz   = { mh(65, 2500, 2570) },
+            },
+            -- Strategist: near-complete (green band, >=75%)
+            titleProgress = {
+                strategist = { achievementID=62950, bracketKey="ratingBlitz", current=20, required=25, completed=false, lastUpdated=ts },
             },
         }
 
@@ -9430,7 +9585,11 @@ SlashCmdList["PVPHUB"] = function(msg)
         function f:CreateStatsFrame()
             local statsContainer = CreateFrame("Frame", nil, f)
             statsContainer:SetPoint("TOPLEFT", f, "TOPLEFT", 20, -65)
-            statsContainer:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -45, 85)
+            -- Right inset shrunk from -45: the scrollbar now overlays the
+            -- content's own right edge (see ApplyModernScrollbarStyling)
+            -- instead of needing a dedicated lane, so this can hug the
+            -- window edge like the left side does.
+            statsContainer:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -20, 85)
 
             -- Wrapped in pcall like CreateSettingsFrame: f.statsFrame only gets
             -- assigned on success, so a bad saved variable can't leave a
@@ -9460,9 +9619,13 @@ SlashCmdList["PVPHUB"] = function(msg)
             -- The season name is stated in the personalized headline at the top
             -- of the scroll content (RenderAllCharactersOverview) instead of a
             -- separate persistent banner, to avoid saying it twice.
+            -- Small fixed lane for the scrollbar (much slimmer than the old
+            -- -25) — it fades to near-invisible when idle (see
+            -- ApplyModernScrollbarStyling) but still gets its own space so
+            -- it never sits on top of card/tile content.
             local scrollFrame = CreateFrame("ScrollFrame", nil, statsContainer, "ScrollFrameTemplate")
             scrollFrame:SetPoint("TOPLEFT", statsContainer, "TOPLEFT", 0, -4)
-            scrollFrame:SetPoint("BOTTOMRIGHT", statsContainer, "BOTTOMRIGHT", -25, 0)
+            scrollFrame:SetPoint("BOTTOMRIGHT", statsContainer, "BOTTOMRIGHT", -16, 0)
             ApplyModernScrollbarStyling(scrollFrame, UI_CONSTANTS.COLORS)
             scrollFrame:EnableMouseWheel(true)
             scrollFrame:SetScript("OnMouseWheel", function(self, delta)
@@ -9582,7 +9745,13 @@ SlashCmdList["PVPHUB"] = function(msg)
                 l:SetText(label)
 
                 local v = body:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+                -- Bounded on both sides (label's right edge <-> body's right
+                -- edge) so a long value (e.g. "Most Played By" char-realm
+                -- names) wraps instead of running into the label text.
                 v:SetPoint("TOPRIGHT", body, "TOPRIGHT", -14, rowYPos)
+                v:SetPoint("TOPLEFT", l, "TOPRIGHT", 8, 0)
+                v:SetJustifyH("RIGHT")
+                v:SetWordWrap(true)
                 RegisterTrackedFont(v, 12, "OUTLINE")
                 v:SetTextColor(unpack(valueColor or {1, 1, 1, 1}))
                 v:SetText(value)
@@ -9601,7 +9770,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                 local gap = 8
                 local n = #tiles
                 local tileWidth = (containerWidth - gap * (n - 1)) / n
-                local tileHeight = 68
+                local tileHeight = 80 -- extra room vs. the old 68 so a long sub-line (char-realm names) can wrap to 2 lines instead of overflowing sideways
 
                 for i, tile in ipairs(tiles) do
                     local xOffset = (i - 1) * (tileWidth + gap)
@@ -9645,6 +9814,11 @@ SlashCmdList["PVPHUB"] = function(msg)
                     if tile.sub then
                         local subText = tileFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
                         subText:SetPoint("TOP", labelText, "BOTTOM", 0, -2)
+                        -- Width + wrap so a long char-realm name wraps onto a
+                        -- second line inside the tile instead of overflowing
+                        -- past its edges into neighboring tiles.
+                        subText:SetWidth(tileWidth - 10)
+                        subText:SetWordWrap(true)
                         RegisterTrackedFont(subText, 9, "")
                         subText:SetTextColor(0.55, 0.55, 0.55, 1)
                         subText:SetText(tile.sub)
@@ -9653,6 +9827,243 @@ SlashCmdList["PVPHUB"] = function(msg)
                 end
 
                 return tileHeight + 12
+            end
+
+            -- Row of three equal-width "progress" tiles for the season titles
+            -- (Legend/Strategist/Gladiator) — same boxed look as AddHeroTiles,
+            -- plus a color-banded fill bar (red <25%, orange <50%, yellow <75%,
+            -- green >=75% of the required win count) so a multi-alt player can
+            -- see how close the leading character is at a glance. Once earned,
+            -- the tile switches to a gold "Earned!" state with the win date.
+            -- Wrapped in its own gold-framed panel (background tint + glow +
+            -- header label) so it reads as a featured section rather than
+            -- blending into the plain KPI tile rows around it.
+            local function AddTitleProgressTiles(yPos, titleData)
+                local containerWidth = statsScrollChild:GetWidth()
+                if not containerWidth or containerWidth < 100 then containerWidth = 650 end
+                local pad        = 10
+                local headerH    = 20
+                local gap        = 8
+                local n          = #TITLE_META
+                local tileHeight = 104
+                local innerWidth = containerWidth - pad * 2
+                local tileWidth  = (innerWidth - gap * (n - 1)) / n
+                local panelHeight = pad + headerH + tileHeight + pad
+
+                local panel = CreateFrame("Frame", nil, statsScrollChild, "BackdropTemplate")
+                panel:SetSize(containerWidth, panelHeight)
+                panel:SetPoint("TOPLEFT", statsScrollChild, "TOPLEFT", 0, yPos)
+                panel:SetBackdrop({
+                    bgFile   = "Interface\\Buttons\\WHITE8x8",
+                    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+                    tile = false, tileSize = 16, edgeSize = 12,
+                    insets = {left=3, right=3, top=3, bottom=3},
+                })
+                panel:SetBackdropColor(0.18, 0.13, 0.02, 0.55)
+                panel:SetBackdropBorderColor(1, 0.82, 0, 0.55)
+
+                local glow = panel:CreateTexture(nil, "BACKGROUND")
+                glow:SetPoint("TOPLEFT",     panel, "TOPLEFT",  3, -3)
+                glow:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -3, 3)
+                glow:SetTexture("Interface\\Buttons\\WHITE8x8")
+                glow:SetGradient("VERTICAL", CreateColor(1, 0.82, 0, 0.12), CreateColor(1, 0.82, 0, 0))
+
+                local header = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+                header:SetPoint("TOP", panel, "TOP", 0, -pad + 2)
+                RegisterTrackedFont(header, 13, "OUTLINE")
+                header:SetTextColor(1, 0.82, 0, 1)
+                header:SetText("Season Titles")
+
+                table.insert(cardWidgets, panel)
+                table.insert(cardWidgets, glow)
+                table.insert(cardWidgets, header)
+
+                local function BarColor(pct)
+                    if pct >= 0.75 then return 0.20, 0.80, 0.25
+                    elseif pct >= 0.50 then return 0.90, 0.80, 0.10
+                    elseif pct >= 0.25 then return 0.95, 0.55, 0.10
+                    else return 0.85, 0.20, 0.20 end
+                end
+
+                -- Rounded "pill" bar: 2 circular end-caps + a flat middle,
+                -- instead of a StatusBar + stretched rounded_mask.tga.
+                -- rounded_mask.tga is proportioned for large square-ish
+                -- elements (windows/cards) — its corner radius is nowhere
+                -- near 50% of its own size, so stretched over a 10px-tall
+                -- bar the radius shrinks to sub-pixel and vanishes entirely.
+                -- A CIRCLE mask kept perfectly square (capSize x capSize,
+                -- never non-uniformly stretched) gives a true semicircle cap
+                -- at any bar width. Returns (container, SetFill) — SetFill
+                -- resizes/colors the fill live as progress changes.
+                local CAP_MASK = "Interface\\CHARACTERFRAME\\TempPortraitAlphaMask"
+                local function CreateCapsuleBar(parent, width, height)
+                    local capSize = height
+                    local container = CreateFrame("Frame", nil, parent)
+                    container:SetSize(width, height)
+
+                    local function MakeCap()
+                        local cap = container:CreateTexture(nil, "ARTWORK")
+                        cap:SetSize(capSize, capSize)
+                        cap:SetTexture("Interface\\Buttons\\WHITE8x8")
+                        local mask = container:CreateMaskTexture()
+                        mask:SetTexture(CAP_MASK, "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
+                        mask:SetAllPoints(cap)
+                        cap:AddMaskTexture(mask)
+                        return cap
+                    end
+
+                    local leftCap  = MakeCap()
+                    local rightCap = MakeCap()
+                    leftCap:SetPoint("TOPLEFT", container, "TOPLEFT", 0, 0)
+
+                    local mid = container:CreateTexture(nil, "ARTWORK")
+                    mid:SetHeight(height)
+                    mid:SetTexture("Interface\\Buttons\\WHITE8x8")
+
+                    local function SetFill(px, r, g, b, a)
+                        px = math.max(0, math.min(px, width))
+                        leftCap:SetVertexColor(r, g, b, a)
+                        rightCap:SetVertexColor(r, g, b, a)
+                        mid:SetVertexColor(r, g, b, a)
+                        if px <= 0 then
+                            leftCap:Hide(); rightCap:Hide(); mid:Hide()
+                            return
+                        end
+                        leftCap:Show()
+                        if px <= capSize then
+                            -- Too narrow yet for two full caps + a straight
+                            -- middle — show just the left cap so the bar
+                            -- never looks broken at very low progress.
+                            rightCap:Hide()
+                            mid:Hide()
+                        else
+                            rightCap:Show()
+                            rightCap:ClearAllPoints()
+                            rightCap:SetPoint("TOPLEFT", container, "TOPLEFT", px - capSize, 0)
+                            mid:ClearAllPoints()
+                            mid:SetPoint("TOPLEFT", container, "TOPLEFT", capSize / 2, 0)
+                            mid:SetWidth(px - capSize)
+                            mid:Show()
+                        end
+                    end
+
+                    return container, SetFill
+                end
+
+                for i, meta in ipairs(TITLE_META) do
+                    local tp = titleData[meta.key] or { current = 0, required = 0 }
+                    local xOffset = (i - 1) * (tileWidth + gap)
+
+                    local tileFrame = CreateFrame("Frame", nil, panel, "BackdropTemplate")
+                    tileFrame:SetSize(tileWidth, tileHeight)
+                    tileFrame:SetPoint("TOPLEFT", panel, "TOPLEFT", pad + xOffset, -(pad + headerH))
+                    tileFrame:SetBackdrop({
+                        bgFile   = "Interface\\Buttons\\WHITE8x8",
+                        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+                        tile = false, tileSize = 16, edgeSize = 8,
+                        insets = {left=2, right=2, top=2, bottom=2},
+                    })
+                    tileFrame:SetBackdropColor(0.11, 0.09, 0.13, 0.78)
+                    tileFrame:SetBackdropBorderColor(meta.color[1]*0.5, meta.color[2]*0.5, meta.color[3]*0.5, 0.6)
+
+                    local topStripe = tileFrame:CreateTexture(nil, "BORDER")
+                    topStripe:SetTexture("Interface\\Buttons\\WHITE8x8")
+                    topStripe:SetVertexColor(meta.color[1], meta.color[2], meta.color[3], 0.9)
+                    topStripe:SetPoint("TOPLEFT",  tileFrame, "TOPLEFT",  2, -2)
+                    topStripe:SetPoint("TOPRIGHT", tileFrame, "TOPRIGHT", -2, -2)
+                    topStripe:SetHeight(3)
+
+                    -- Real achievement icon once titleProgress has synced; the
+                    -- bracket's generic icon is shown as a placeholder until then.
+                    local iconTex = tileFrame:CreateTexture(nil, "ARTWORK")
+                    iconTex:SetSize(18, 18)
+                    iconTex:SetPoint("TOP", tileFrame, "TOP", 0, -8)
+                    iconTex:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+                    iconTex:SetTexture(tp.icon or meta.icon)
+
+                    local nameText = tileFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+                    nameText:SetPoint("TOP", tileFrame, "TOP", 0, -29)
+                    RegisterTrackedFont(nameText, 12, "OUTLINE")
+                    nameText:SetTextColor(1, 1, 1, 1)
+                    nameText:SetText(meta.name)
+
+                    local valueText = tileFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+                    valueText:SetPoint("TOP", tileFrame, "TOP", 0, -46)
+                    RegisterTrackedFont(valueText, 16, "OUTLINE")
+
+                    local subText = tileFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+                    subText:SetPoint("TOP", tileFrame, "TOP", 0, -85)
+                    subText:SetWidth(tileWidth - 12)
+                    -- Wrap (not clip) long char-realm names: SetWordWrap(false)
+                    -- doesn't actually clip a FontString's rendering to its set
+                    -- width, so a long name would still overflow past the tile.
+                    subText:SetWordWrap(true)
+                    RegisterTrackedFont(subText, 9, "")
+                    subText:SetTextColor(0.65, 0.65, 0.65, 1)
+
+                    local barWidth = tileWidth - 16 -- 8px padding each side, matches the old barBG footprint
+
+                    local trackContainer, SetTrackFill = CreateCapsuleBar(tileFrame, barWidth, 10)
+                    trackContainer:SetPoint("TOPLEFT", tileFrame, "TOPLEFT", 8, -69)
+                    SetTrackFill(barWidth, 0, 0, 0, 0.5) -- static, always full width, dark
+
+                    local fillContainer, SetBarFill = CreateCapsuleBar(tileFrame, barWidth, 10)
+                    fillContainer:SetPoint("TOPLEFT", tileFrame, "TOPLEFT", 8, -69)
+                    fillContainer:SetFrameLevel(trackContainer:GetFrameLevel() + 1)
+
+                    if tp.earned then
+                        valueText:SetTextColor(1, 0.82, 0, 1)
+                        valueText:SetText("Earned!")
+                        SetBarFill(barWidth, 1, 0.82, 0, 1)
+                        local who = tp.earnedChar and ColorCharName(tp.earnedChar) or ""
+                        subText:SetText(who .. (tp.earnedDate and ("  " .. tp.earnedDate) or ""))
+                    else
+                        local required = (tp.required and tp.required > 0) and tp.required or 1
+                        local current  = math.min(tp.current or 0, required)
+                        local pct      = current / required
+                        valueText:SetTextColor(1, 1, 1, 1)
+                        valueText:SetText((tp.required and tp.required > 0)
+                                           and (current .. "/" .. tp.required)
+                                           or "—")
+                        local cr, cg, cb = BarColor(pct)
+                        SetBarFill(barWidth * pct, cr, cg, cb, 1)
+                        subText:SetText(tp.closestChar and ColorCharName(tp.closestChar) or "No progress yet")
+                    end
+
+                    -- Mouseover tooltip: the requirement text (built from
+                    -- TITLE_META's hardcoded template, not the flaky
+                    -- GetAchievementInfo description field — see
+                    -- GetTitleRequirementText) and reward. Plain text only —
+                    -- no progress numbers, no earned/closest-character status
+                    -- (that lives on the tile itself, not the tooltip).
+                    tileFrame:EnableMouse(true)
+                    tileFrame:SetScript("OnEnter", function(self)
+                        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+                        GameTooltip:ClearLines()
+                        GameTooltip:AddLine(meta.name, 1, 0.82, 0)
+                        local reqText = GetTitleRequirementText(meta, tp)
+                        if reqText then
+                            GameTooltip:AddLine(reqText, 0.9, 0.9, 0.9, true)
+                        end
+                        if meta.rewardText and meta.rewardText ~= "" then
+                            GameTooltip:AddLine(" ")
+                            GameTooltip:AddLine("Reward: " .. meta.rewardText, 0.55, 0.80, 1, true)
+                        end
+                        GameTooltip:Show()
+                    end)
+                    tileFrame:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+                    table.insert(cardWidgets, tileFrame)
+                    table.insert(cardWidgets, topStripe)
+                    table.insert(cardWidgets, iconTex)
+                    table.insert(cardWidgets, nameText)
+                    table.insert(cardWidgets, valueText)
+                    table.insert(cardWidgets, subText)
+                    table.insert(cardWidgets, trackContainer)
+                    table.insert(cardWidgets, fillContainer)
+                end
+
+                return panelHeight + 14
             end
 
             -- Row of boxed tiles — same visual language as AddHeroTiles (backdrop
@@ -9873,6 +10284,17 @@ SlashCmdList["PVPHUB"] = function(msg)
                 disclaimerText:SetTextColor(0.6, 0.6, 0.6, 1)
                 table.insert(cardWidgets, disclaimerText)
                 yPos = yPos - 34
+
+                -- Season title progress — one row of three equal-width tiles
+                -- (Legend/Strategist/Gladiator), placed first and set apart in
+                -- its own gold-framed panel so it reads as the featured section
+                -- rather than just another row of KPI tiles. Shows the earning
+                -- character + date once earned; otherwise the account's closest
+                -- character and a color-banded fill bar.
+                do
+                    local consumed = AddTitleProgressTiles(yPos, overviewData.titleProgress)
+                    yPos = yPos - consumed
+                end
 
                 -- Hero KPI tile row — the dashboard's headline numbers -------------
                 do
