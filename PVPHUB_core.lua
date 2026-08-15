@@ -4151,6 +4151,170 @@ local function BuildTitleProgressData(charList)
     return result
 end
 
+-- --------------------------------------------------------------------------
+-- Floating title tracker — a small, borderless, movable overlay showing
+-- progress for whichever Season Titles the user has ticked "track" on (see
+-- the checkbox on each tile in AddTitleProgressTiles). Deliberately kept
+-- minimal (no toolbar, no close button, no border) so it reads as a subtle
+-- HUD element rather than another window — drag the background to move it.
+-- Auto-hides itself when no titles are tracked instead of exposing a
+-- separate show/hide control.
+-- --------------------------------------------------------------------------
+function PVPHUB:UpdateTitleTracker()
+    PVPHUB_SETTINGS.trackedTitles = PVPHUB_SETTINGS.trackedTitles or {}
+    local tracked = PVPHUB_SETTINGS.trackedTitles
+
+    local activeMetas = {}
+    for _, meta in ipairs(TITLE_META) do
+        if tracked[meta.key] then table.insert(activeMetas, meta) end
+    end
+
+    if #activeMetas == 0 then
+        if PVPHUB.titleTracker then PVPHUB.titleTracker:Hide() end
+        return
+    end
+
+    if not PVPHUB.titleTracker then
+        local t = CreateFrame("Frame", "PVPHUBTitleTracker", UIParent, "BackdropTemplate")
+        t:SetFrameStrata("MEDIUM")
+        t:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8x8", tile = false })
+        t:SetBackdropColor(0.05, 0.05, 0.08, 0.55)
+        t:SetMovable(true)
+        t:EnableMouse(true)
+        t:RegisterForDrag("LeftButton")
+        t:SetClampedToScreen(true)
+        t:SetScript("OnDragStart", t.StartMoving)
+        t:SetScript("OnDragStop", function(self)
+            self:StopMovingOrSizing()
+            local point, _, relativePoint, x, y = self:GetPoint()
+            PVPHUB_SETTINGS.titleTrackerPos = { point = point, relativePoint = relativePoint, x = x, y = y }
+        end)
+
+        if PVPHUB_SETTINGS.titleTrackerPos then
+            local pos = PVPHUB_SETTINGS.titleTrackerPos
+            t:SetPoint(pos.point or "CENTER", UIParent, pos.relativePoint or "CENTER", pos.x or 0, pos.y or 250)
+        else
+            t:SetPoint("CENTER", UIParent, "CENTER", 0, 250)
+        end
+
+        t.rowPool = {} -- persistent widgets, updated in place — see below
+        PVPHUB.titleTracker = t
+
+        -- Poll while shown instead of relying solely on the SaveTitleProgress
+        -- hook: that only fires for the normal live-progress path, so
+        -- anything that writes titleProgress a different way (the /pvphub
+        -- test dummy data, a DB restore, etc.) would otherwise leave the
+        -- overlay showing stale numbers until something else happened to
+        -- trigger a rebuild. Rows are pooled (below), so this doesn't create
+        -- any new frames/textures on each tick — only Set* calls on widgets
+        -- that already exist.
+        C_Timer.NewTicker(2, function()
+            if PVPHUB.titleTracker and PVPHUB.titleTracker:IsShown() then
+                PVPHUB:UpdateTitleTracker()
+            end
+        end)
+    end
+
+    local t = PVPHUB.titleTracker
+    local WIDTH, ROW_H, ROW_GAP, PAD = 176, 28, 6, 8
+    local overview = BuildTitleProgressData(GetStatsCharacterList())
+
+    for i, meta in ipairs(activeMetas) do
+        local tp = overview[meta.key] or { current = 0, required = 0 }
+        local row = t.rowPool[i]
+
+        if not row then
+            row = CreateFrame("Frame", nil, t)
+            row:SetSize(WIDTH - PAD * 2, ROW_H)
+
+            row.icon = row:CreateTexture(nil, "ARTWORK")
+            row.icon:SetSize(14, 14)
+            row.icon:SetPoint("TOPLEFT", row, "TOPLEFT", 0, 0)
+            row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+
+            row.label = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            row.label:SetPoint("LEFT", row.icon, "RIGHT", 5, 0)
+            RegisterTrackedFont(row.label, 11, "OUTLINE")
+            row.label:SetTextColor(0.85, 0.85, 0.85, 1)
+
+            row.value = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            row.value:SetPoint("RIGHT", row, "RIGHT", 0, 0)
+            RegisterTrackedFont(row.value, 11, "OUTLINE")
+
+            row.barBG = row:CreateTexture(nil, "ARTWORK")
+            row.barBG:SetHeight(3)
+            row.barBG:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 0, 0)
+            row.barBG:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", 0, 0)
+            row.barBG:SetTexture("Interface\\Buttons\\WHITE8x8")
+            row.barBG:SetVertexColor(1, 1, 1, 0.12)
+
+            row.barFill = row:CreateTexture(nil, "ARTWORK", nil, 1)
+            row.barFill:SetHeight(3)
+            row.barFill:SetPoint("BOTTOMLEFT", row, "BOTTOMLEFT", 0, 0)
+            row.barFill:SetTexture("Interface\\Buttons\\WHITE8x8")
+
+            -- Static handlers read row.meta/row.tp/row.progressChar (kept
+            -- current below) instead of closing over per-update locals, so
+            -- refreshing never has to re-assign a new closure either.
+            row:EnableMouse(true)
+            row:SetScript("OnEnter", function(self)
+                GameTooltip:SetOwner(self, "ANCHOR_TOP")
+                GameTooltip:ClearLines()
+                GameTooltip:AddLine(self.meta.name, 1, 0.82, 0)
+                if self.progressChar then
+                    local charData = PVPHUB_DB[self.progressChar]
+                    local classColor = charData and RAID_CLASS_COLORS[charData.class]
+                    local coloredName = (classColor and classColor.colorStr)
+                        and ("|c" .. classColor.colorStr .. self.progressChar .. "|r") or self.progressChar
+                    GameTooltip:AddLine((self.tp.earned and "Earned on: " or "Progress on: ") .. coloredName, 0.9, 0.9, 0.9)
+                else
+                    GameTooltip:AddLine("No progress yet", 0.6, 0.6, 0.6)
+                end
+                GameTooltip:Show()
+            end)
+            row:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+            t.rowPool[i] = row
+        end
+
+        row:ClearAllPoints()
+        row:SetPoint("TOP", t, "TOP", 0, -PAD - (i - 1) * (ROW_H + ROW_GAP))
+        row.icon:SetTexture(meta.icon)
+        row.label:SetText(meta.name)
+        -- The row shows account-wide best progress (same aggregation as the
+        -- Season tab tiles); OnEnter reads these to name WHICH character
+        -- it's coming from, rather than cluttering the row itself.
+        row.meta, row.tp = meta, tp
+        row.progressChar = tp.earned and tp.earnedChar or tp.closestChar
+
+        if tp.earned then
+            row.value:SetTextColor(1, 0.82, 0, 1)
+            row.value:SetText("Earned!")
+            row.barFill:SetWidth(row:GetWidth())
+            row.barFill:SetVertexColor(1, 0.82, 0, 0.9)
+        else
+            local required = (tp.required and tp.required > 0) and tp.required or 1
+            local current  = math.min(tp.current or 0, required)
+            row.value:SetTextColor(1, 1, 1, 1)
+            row.value:SetText(current .. "/" .. ((tp.required and tp.required > 0) and tp.required or "?"))
+            local pct = current / required
+            row.barFill:SetWidth(math.max(0.5, row:GetWidth() * pct))
+            row.barFill:SetVertexColor(meta.color[1], meta.color[2], meta.color[3], 0.95)
+        end
+
+        row:Show()
+    end
+
+    -- Hide (but keep pooled for reuse) any rows left over from a previously
+    -- larger tracked set.
+    for i = #activeMetas + 1, #t.rowPool do
+        t.rowPool[i]:Hide()
+    end
+
+    t:SetSize(WIDTH, PAD * 2 + #activeMetas * ROW_H + (#activeMetas - 1) * ROW_GAP)
+    t:Show()
+end
+
 -- Pure data computation, no widgets — aggregates every tracked
 -- character/bracket into one dashboard-shaped table for the Stats tab's
 -- live, current-season render.
@@ -4636,6 +4800,31 @@ local function ShowPVPHUBRatingTooltip(anchor, charKey, bracketKey, ratingsData)
         charName)
     PvPTipRow(nil, titleText, nil, nil, PT_PAD, PT_W - PT_PAD, PT_W - PT_PAD, PT_TTL, true)
     PvPTipRow(nil, "|cff888888" .. bracketLabel .. "|r", nil, nil, PT_PAD, PT_W - PT_PAD, PT_W - PT_PAD, PT_SUB)
+
+    local hasAnyData = false
+
+    -- ── Season title progress (Legend / Strategist / Gladiator) ────────────
+    -- Placed right under the bracket label, with the title's own icon, so
+    -- it reads as a headline stat rather than something buried near the
+    -- bottom. Win count only, e.g. "Gladiator: 6/50" — the requirement text
+    -- only lives on the Season tab's title tiles (see AddTitleProgressTiles).
+    local titleMeta = TITLE_META_BY_BRACKET[bracketKey]
+    if titleMeta then
+        local tp = data.titleProgress and data.titleProgress[titleMeta.key]
+        if tp and tp.required and tp.required > 0 then
+            hasAnyData = true
+            local line
+            if tp.completed then
+                line = "|cfffff700" .. titleMeta.name .. ":|r |cff40ff40Earned!|r"
+            else
+                local pct      = tp.current / tp.required
+                local numColor = pct >= 0.75 and "|cff40ff40" or (pct >= 0.50 and "|cffffd700" or (pct >= 0.25 and "|cffffa500" or "|cffff4040"))
+                line = "|cfffff700" .. titleMeta.name .. ":|r " .. numColor .. tp.current .. "/" .. tp.required .. "|r"
+            end
+            PvPTipRow(tp.icon or titleMeta.icon, line, nil, nil, SP_NAME, PT_W - PT_PAD, PT_W - PT_PAD)
+        end
+    end
+
     PvPTipSeparator()
     PvPTipSpacer(2)
     -- Arena W/L is a single bracket-wide stat; Shuffle/Blitz resolves per-spec below.
@@ -4643,7 +4832,6 @@ local function ShowPVPHUBRatingTooltip(anchor, charKey, bracketKey, ratingsData)
     if isArena then
         wins, losses, winrate = GetWinLossStats(charKey, bracketKey)
     end
-    local hasAnyData = false
 
     if bracketKey == "ratingShuffle" or bracketKey == "ratingBlitz" then
         -- 4-column layout: name | CR | MMR | W/L
@@ -4801,27 +4989,6 @@ local function ShowPVPHUBRatingTooltip(anchor, charKey, bracketKey, ratingsData)
         PvPTipSpacer(3)
         PvPTipRow("Interface\\Icons\\Achievement_Arena_2v2_7", wlLine, nil, nil,
                   SP_NAME, PT_W - PT_PAD, PT_W - PT_PAD)
-    end
-
-    -- ── Season title progress (Legend / Strategist / Gladiator) ────────────
-    -- Win count only, e.g. "Gladiator: 0/50" — no requirement text here,
-    -- that only lives on the Season tab's title tiles (see AddTitleProgressTiles).
-    local titleMeta = TITLE_META_BY_BRACKET[bracketKey]
-    if titleMeta then
-        local tp = data.titleProgress and data.titleProgress[titleMeta.key]
-        if tp and tp.required and tp.required > 0 then
-            hasAnyData = true
-            PvPTipSpacer(3)
-            local line
-            if tp.completed then
-                line = "|cfffff700" .. titleMeta.name .. ":|r |cff40ff40Earned!|r"
-            else
-                local pct      = tp.current / tp.required
-                local numColor = pct >= 0.75 and "|cff40ff40" or (pct >= 0.50 and "|cffffd700" or (pct >= 0.25 and "|cffffa500" or "|cffff4040"))
-                line = "|cfffff700" .. titleMeta.name .. ":|r " .. numColor .. tp.current .. "/" .. tp.required .. "|r"
-            end
-            PvPTipRow(nil, line, nil, nil, SP_NAME, PT_W - PT_PAD, PT_W - PT_PAD)
-        end
     end
 
     -- ── Match history ───────────────────────────────────────────────────────
@@ -5916,6 +6083,12 @@ PVPHUB.frame:HookScript("OnEvent", function(self, event, ...)
                     PVPHUB:CreateCompactWindow()
                 end)
             end
+
+            -- Restore the floating title tracker (no-ops if nothing is
+            -- ticked "track" in PVPHUB_SETTINGS.trackedTitles).
+            C_Timer.After(1, function()
+                if PVPHUB.UpdateTitleTracker then PVPHUB:UpdateTitleTracker() end
+            end)
 
             -- Create initial backup after settings load
             C_Timer.After(3, CreateDataBackup)
@@ -10008,6 +10181,29 @@ SlashCmdList["PVPHUB"] = function(msg)
                     topStripe:SetPoint("TOPRIGHT", tileFrame, "TOPRIGHT", -2, -2)
                     topStripe:SetHeight(3)
 
+                    -- "Track" checkbox — surfaces this title's progress in a
+                    -- small floating overlay (PVPHUB:UpdateTitleTracker) that
+                    -- can be dragged anywhere on screen, so it stays visible
+                    -- outside the main window without needing it open.
+                    PVPHUB_SETTINGS.trackedTitles = PVPHUB_SETTINGS.trackedTitles or {}
+                    local trackCheckbox = CreateFrame("CheckButton", nil, tileFrame, "UICheckButtonTemplate")
+                    trackCheckbox:SetSize(16, 16)
+                    trackCheckbox:SetPoint("TOPRIGHT", tileFrame, "TOPRIGHT", -3, -6)
+                    trackCheckbox:SetFrameLevel(tileFrame:GetFrameLevel() + 2)
+                    trackCheckbox:SetChecked(PVPHUB_SETTINGS.trackedTitles[meta.key])
+                    trackCheckbox:SetScript("OnClick", function(self)
+                        PVPHUB_SETTINGS.trackedTitles[meta.key] = self:GetChecked() and true or nil
+                        if PVPHUB.UpdateTitleTracker then PVPHUB:UpdateTitleTracker() end
+                    end)
+                    trackCheckbox:SetScript("OnEnter", function(self)
+                        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+                        GameTooltip:ClearLines()
+                        GameTooltip:AddLine("Track in floating overlay", 1, 1, 1)
+                        GameTooltip:AddLine("Shows this title's progress in a small\nmovable window, even with PVP HUB closed.", 0.7, 0.7, 0.7, true)
+                        GameTooltip:Show()
+                    end)
+                    trackCheckbox:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
                     -- Real achievement icon once titleProgress has synced; the
                     -- bracket's generic icon is shown as a placeholder until then.
                     local iconTex = tileFrame:CreateTexture(nil, "ARTWORK")
@@ -10090,6 +10286,7 @@ SlashCmdList["PVPHUB"] = function(msg)
 
                     table.insert(cardWidgets, tileFrame)
                     table.insert(cardWidgets, topStripe)
+                    table.insert(cardWidgets, trackCheckbox)
                     table.insert(cardWidgets, iconTex)
                     table.insert(cardWidgets, nameText)
                     table.insert(cardWidgets, valueText)

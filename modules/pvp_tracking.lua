@@ -221,6 +221,8 @@ local function SaveTitleProgress(charKey)
             }
         end
     end
+
+    if PVPHUB.UpdateTitleTracker then PVPHUB:UpdateTitleTracker() end
 end
 
 -- --------------------------------------------------------------------------
