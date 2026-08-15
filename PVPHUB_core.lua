@@ -2063,12 +2063,34 @@ local function SetupUnicodeFriendlyFont(fontString, size, flags)
     fontString:SetFont(fontPath, size, flags)
 end
 
+-- Shared scrollbar position/length for the Characters, Season, and Settings
+-- tabs, anchored to the main window frame (not each tab's own scroll frame)
+-- so all three land in the exact same spot regardless of that tab's own
+-- content margins. Values tuned against the Season tab's layout: topY
+-- clears its personalized headline text, bottomY/x keep the bar clear of
+-- card borders while sitting out in the window's own right-edge margin.
+local function PVPHUB_SCROLLBAR_NUDGE(windowFrame)
+    return { relativeTo = windowFrame, x = -15, topY = -123, bottomY = 71 }
+end
+
 -- Function to apply modern TWW scrollbar styling with theme integration
-local function ApplyModernScrollbarStyling(scrollFrame, themeColors)
+local function ApplyModernScrollbarStyling(scrollFrame, themeColors, nudge)
     if not scrollFrame or not scrollFrame.ScrollBar then return end
-    
+
     local scrollBar = scrollFrame.ScrollBar
     local colors = themeColors or UI_CONSTANTS.COLORS
+
+    -- Optional positional nudge, used to give every tab's scrollbar the same
+    -- on-screen position/length. nudge.relativeTo lets the anchor be the
+    -- main window frame itself (rather than each tab's own scroll frame, which
+    -- differs in top/bottom margins per tab), so all three tabs' bars land in
+    -- the exact same spot regardless of that tab's own content layout.
+    if nudge then
+        local anchor = nudge.relativeTo or scrollFrame
+        scrollBar:ClearAllPoints()
+        scrollBar:SetPoint("TOP", anchor, "TOPRIGHT", nudge.x or 0, nudge.topY or 0)
+        scrollBar:SetPoint("BOTTOM", anchor, "BOTTOMRIGHT", nudge.x or 0, nudge.bottomY or 0)
+    end
     
     -- TWW ScrollFrameTemplate has different structure - work with the actual elements
     -- Theme-aware track styling (TWW track elements)
@@ -2130,7 +2152,7 @@ local function ApplyModernScrollbarStyling(scrollFrame, themeColors)
         scrollFrame:EnableMouse(true) -- ensures OnEnter/OnLeave fire for the fade, regardless of the template's own default
         scrollBar:SetFrameStrata("HIGH")
 
-        local IDLE_ALPHA, ACTIVE_ALPHA = 0.35, 1.0
+        local IDLE_ALPHA, ACTIVE_ALPHA = 0.15, 1.0
         scrollBar:SetAlpha(IDLE_ALPHA)
 
         local fadeOutTimer
@@ -2142,6 +2164,16 @@ local function ApplyModernScrollbarStyling(scrollFrame, themeColors)
             if fadeOutTimer then fadeOutTimer:Cancel() end
             fadeOutTimer = C_Timer.NewTimer(0.6, function()
                 fadeOutTimer = nil
+                -- Dragging the thumb on a bar this thin easily drifts the
+                -- cursor a few pixels off its hit-region, firing OnLeave
+                -- even though the drag is still active — check the actual
+                -- mouse-button state (not just "did the cursor leave") so a
+                -- mid-drag OnLeave doesn't fade the bar out from under the
+                -- user. Re-check shortly instead of fading while still held.
+                if IsMouseButtonDown("LeftButton") then
+                    FadeOutSoon()
+                    return
+                end
                 UIFrameFadeOut(scrollBar, 0.4, scrollBar:GetAlpha(), IDLE_ALPHA)
             end)
         end
@@ -6939,8 +6971,11 @@ SlashCmdList["PVPHUB"] = function(msg)
         scrollFrame:SetPoint("TOPLEFT", f, "TOPLEFT", 20, -120) -- Align better with headers at -92 + header height (~28px)
         scrollFrame:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -45, 60) -- Reduced bottom margin from 85 to 60 to close gap
         
-        -- Apply modern TWW scrollbar styling immediately after creation
-        ApplyModernScrollbarStyling(scrollFrame, UI_CONSTANTS.COLORS)
+        -- Apply modern TWW scrollbar styling immediately after creation.
+        -- Anchored relative to the window frame itself (not this scrollFrame)
+        -- so its position/length exactly matches the Settings and Season
+        -- tabs' bars, which use the same PVPHUB_SCROLLBAR_NUDGE.
+        ApplyModernScrollbarStyling(scrollFrame, UI_CONSTANTS.COLORS, PVPHUB_SCROLLBAR_NUDGE(f))
 
         -- Create content frame inside scroll frame
         local contentFrame = CreateFrame("Frame", "PVPHUBContentFrame", scrollFrame)
@@ -7328,8 +7363,8 @@ SlashCmdList["PVPHUB"] = function(msg)
             -- Create scroll frame with modern TWW styling
             local scrollFrame = CreateFrame("ScrollFrame", nil, settingsContainer, "ScrollFrameTemplate")
             scrollFrame:SetPoint("TOPLEFT", settingsContainer, "TOPLEFT", 0, 0)
-            scrollFrame:SetPoint("BOTTOMRIGHT", settingsContainer, "BOTTOMRIGHT", -25, 0)
-            ApplyModernScrollbarStyling(scrollFrame, UI_CONSTANTS.COLORS)
+            scrollFrame:SetPoint("BOTTOMRIGHT", settingsContainer, "BOTTOMRIGHT", -10, 0)
+            ApplyModernScrollbarStyling(scrollFrame, UI_CONSTANTS.COLORS, PVPHUB_SCROLLBAR_NUDGE(f))
             scrollFrame:EnableMouseWheel(true)
             scrollFrame:SetScript("OnMouseWheel", function(self, delta)
                 local current = self:GetVerticalScroll()
@@ -9625,8 +9660,8 @@ SlashCmdList["PVPHUB"] = function(msg)
             -- it never sits on top of card/tile content.
             local scrollFrame = CreateFrame("ScrollFrame", nil, statsContainer, "ScrollFrameTemplate")
             scrollFrame:SetPoint("TOPLEFT", statsContainer, "TOPLEFT", 0, -4)
-            scrollFrame:SetPoint("BOTTOMRIGHT", statsContainer, "BOTTOMRIGHT", -16, 0)
-            ApplyModernScrollbarStyling(scrollFrame, UI_CONSTANTS.COLORS)
+            scrollFrame:SetPoint("BOTTOMRIGHT", statsContainer, "BOTTOMRIGHT", -10, 0)
+            ApplyModernScrollbarStyling(scrollFrame, UI_CONSTANTS.COLORS, PVPHUB_SCROLLBAR_NUDGE(f))
             scrollFrame:EnableMouseWheel(true)
             scrollFrame:SetScript("OnMouseWheel", function(self, delta)
                 local current = self:GetVerticalScroll()
