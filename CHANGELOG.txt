@@ -1,3 +1,18 @@
+## v6.6.0 - Start Fresh for New Season & Season-Boundary Fixes
+- NEW: "Start Fresh for New Season" popup
+  • Offers to clear last season's ratings, win/loss records, match history, and conquest/token progress for every tracked character, so your dashboard starts clean — honor, gold, notes, and settings are always kept
+  • Shows automatically at login while unresolved, and keeps reappearing every login until you actually make a choice — closing it without deciding doesn't count and it'll ask again next time
+  • A "Start Fresh" button beside Streamer Mode reopens the same prompt anytime
+  • Requires confirming twice ("Yes, Start Fresh" then a final "Are you sure?") since it's irreversible — this is a from-scratch redesign of the removed v6.5 Season Wipe & Archive feature, without either bug that got it pulled: there's no archive step to be inaccurate, and nothing wipes until you explicitly confirm
+- NEW: Stale character indicators
+  • A character that hasn't logged in since the last detected season change now shows dimmed with a "(last season)" tag in the character list, instead of silently displaying last season's numbers as if they were current
+  • The Season tab shows a reminder banner when any tracked character is in this state
+- Bug Fixes:
+  • Fixed the Conquest tooltip sometimes showing an impossible "Season: 5,679 / 1,600" — Blizzard's own season-total counters can lag a day or so behind the Conquest cap actually updating; PVPHUB now also detects a season change from the cap itself and clamps any season total that exceeds the live cap
+  • Fixed the Season tab (Total Games Played, Win Rate, Highest Rating, class/spec breakdown, Favourite Bracket) continuing to show last season's stats after a season change, instead of resetting
+  • Fixed "Hide Characters with No Ratings" not actually hiding characters whose ratings were cleared by a season reset — it was checking old legacy fields instead of current-season data
+  • Fixed the Honor/Conquest/Gold totals (and the Conquest breakdown tooltip) either zeroing out or including stale pre-reset Conquest amounts depending on the ratings filter and which characters had logged in since the reset
+
 ## v6.5.1 - Season Wipe & Archive Removed
 - REMOVED: Season Wipe & Archive (added in v6.5, below)
   • This feature has been pulled. It could archive an inaccurate recap — in some cases only counting whichever character happened to be logged in at the moment, not your whole roster — and a new season's early matches could silently wipe the old season's match history before you'd even answered the "start fresh?" prompt

@@ -1080,6 +1080,22 @@ local function IsCharacterHidden(charKey)
     return hiddenCharSet[charKey] == true
 end
 
+-- True if this character's last recorded activity predates the most-recently
+-- detected PvP season boundary (stamped in UpdateCurrencyData). There is no
+-- way to query another character's currency/PvP data without logging into
+-- it, so a character that hasn't logged in since the season changed is still
+-- carrying last season's snapshot - callers use this to dim/flag that
+-- instead of presenting it as current. A character never seen at all counts
+-- as stale; if no season boundary has been detected yet this install, no
+-- character is considered stale.
+local function IsCharacterStaleThisSeason(charKey)
+    local data = PVPHUB_DB and PVPHUB_DB[charKey]
+    if not data then return true end
+    local seasonStart = PVPHUB_SETTINGS and PVPHUB_SETTINGS.seasonStartTimestamp
+    if not seasonStart then return false end
+    return not data.lastSeen or data.lastSeen < seasonStart
+end
+
 local function HideCharacter(charKey)
     if not PVPHUB_SETTINGS.hiddenCharacters then
         PVPHUB_SETTINGS.hiddenCharacters = {}
@@ -3075,6 +3091,13 @@ local function CreateCharacterName(entry, isCompactMode, suppressSpecIcon, suppr
     return coloredName
 end
 
+-- Set once the "Start Fresh" popup has been offered this session, so the
+-- various events that call UpdateCurrencyData during a single login
+-- (PLAYER_LOGIN, PLAYER_ENTERING_WORLD, CURRENCY_DISPLAY_UPDATE, ...) don't
+-- reopen it every time — it resets naturally on the next /reload or login
+-- since this is a plain local, not a saved value.
+local seasonFreshStartPromptedThisSession = false
+
 -- Data Update Functions with Protection
 local function UpdateCurrencyData()
     local charKey = GetFullName()
@@ -3098,21 +3121,81 @@ local function UpdateCurrencyData()
     -- capped season starts - without this the old seasonMaximum would make every
     -- character look "fully capped" on day 1 of the new season.
     local currentSeason = (C_PvP and C_PvP.GetUIDisplaySeason and C_PvP.GetUIDisplaySeason()) or 0
-    if currentSeason > 0 then
-        local lastSeason = PVPHUB_SETTINGS.lastKnownSeasonID or 0
-        if currentSeason ~= lastSeason then
-            DebugPrint("Season change detected: " .. lastSeason .. " -> " .. currentSeason)
-            -- Clear all per-character seasonal tracking for every stored toon
-            for key, data in pairs(PVPHUB_DB) do
-                if type(data) == "table" then
-                    data.conquestWeeklyData = nil
-                    data.bloodytokensWeeklyData = nil
-                end
-            end
 
-            PVPHUB_SETTINGS.lastKnownSeasonID = currentSeason
-            PVPHubPrint("|cffff0000[PVPHUB]|r New PvP season detected (Season " .. currentSeason .. ")! Season tracking data has been automatically reset for all characters.")
+    -- C_PvP.GetUIDisplaySeason() (and the rated-stat totals GetPersonalRatedInfo
+    -- returns) can lag behind the actual in-game rollover by a while - Blizzard
+    -- sometimes flips the "rated season" flag after the new season's Conquest
+    -- cap/curve already went live. So also treat the Conquest cap itself
+    -- changing as a season-boundary signal: it's currency-scoped and always
+    -- moves immediately when a new season starts, even on days the season-ID
+    -- check above misses.
+    local conquestCapNow = 0
+    do
+        local ok, capInfo = pcall(C_CurrencyInfo.GetCurrencyInfo, CURRENCY_IDS.conquest)
+        if ok and capInfo and capInfo.maxQuantity and capInfo.maxQuantity > 0 then
+            conquestCapNow = capInfo.maxQuantity
         end
+    end
+
+    local lastSeason       = PVPHUB_SETTINGS.lastKnownSeasonID or 0
+    local lastConquestCap  = PVPHUB_SETTINGS.lastKnownConquestCap or 0
+    local seasonChangedByID  = currentSeason > 0 and currentSeason ~= lastSeason
+    local seasonChangedByCap = conquestCapNow > 0 and lastConquestCap > 0 and conquestCapNow ~= lastConquestCap
+
+    if seasonChangedByID or seasonChangedByCap then
+        DebugPrint(string.format("Season change detected (season %d -> %d, conquest cap %d -> %d)",
+            lastSeason, currentSeason, lastConquestCap, conquestCapNow))
+        -- Clear all per-character seasonal tracking for every stored toon.
+        -- bracketStats/wlData feed the Stats tab's "this season" totals and
+        -- are each tagged with the season they were written under, but that
+        -- guard only works once fresh, correctly-tagged data replaces them -
+        -- wiping them here means an alt that hasn't logged in yet shows "no
+        -- data this season" instead of last season's numbers indefinitely.
+        for key, data in pairs(PVPHUB_DB) do
+            if type(data) == "table" then
+                data.conquestWeeklyData = nil
+                data.bloodytokensWeeklyData = nil
+                data.bracketStats = nil
+                data.wlData = nil
+            end
+        end
+
+        if currentSeason > 0 then
+            PVPHUB_SETTINGS.lastKnownSeasonID = currentSeason
+        end
+        -- Anchor point for IsCharacterStaleThisSeason: any character whose
+        -- lastSeen predates this moment hasn't reported in since the season
+        -- changed and gets dimmed in the roster until it logs in again.
+        PVPHUB_SETTINGS.seasonStartTimestamp = GetServerTime()
+        PVPHubPrint("|cffff0000[PVPHUB]|r New PvP season detected! Season tracking data has been automatically reset for all characters.")
+    end
+
+    if conquestCapNow > 0 then
+        PVPHUB_SETTINGS.lastKnownConquestCap = conquestCapNow
+    end
+
+    -- Offer the deeper "Start Fresh" wipe (match history + MMR caches, which
+    -- the automatic reset above deliberately leaves alone) every login until
+    -- the player makes an explicit choice — either button on the popup marks
+    -- the current season resolved via seasonFreshStartResolvedForSeason, so
+    -- this stops firing once answered and re-arms itself on the next real
+    -- season change. Delayed like the welcome/update popups so it doesn't
+    -- fight the login/reload screen for focus; the once-per-session guard
+    -- stops the handful of events that call UpdateCurrencyData at login from
+    -- reopening it repeatedly in the same session.
+    if currentSeason > 0 and not seasonFreshStartPromptedThisSession
+       and PVPHUB_SETTINGS.seasonFreshStartResolvedForSeason ~= currentSeason then
+        seasonFreshStartPromptedThisSession = true
+        C_Timer.After(2, function()
+            PVPHUB:ShowSeasonFreshStartPopup()
+        end)
+    end
+
+    -- Bootstrap: if a season boundary was already detected and reset under an
+    -- older addon version (before seasonStartTimestamp existed), anchor it
+    -- now rather than leaving every character permanently un-flaggable.
+    if not PVPHUB_SETTINGS.seasonStartTimestamp then
+        PVPHUB_SETTINGS.seasonStartTimestamp = GetServerTime()
     end
 
     PVPHUB_DB[charKey] = PVPHUB_DB[charKey] or {}
@@ -3201,7 +3284,20 @@ local function UpdateCurrencyData()
                     seasonData.seasonMaximum = math.max(totalEarned, currentAmount)
                     DebugPrint("Force recalculated " .. currencyType .. " season maximum to: " .. seasonData.seasonMaximum)
                 end
-                
+
+                -- Sanity clamp: a stored season maximum can never legitimately
+                -- exceed the currency's live cap. If it does, it's leftover
+                -- from a prior (higher-cap) season that the season-change
+                -- check above didn't catch in time (e.g. Blizzard's own
+                -- totalEarned/season counters lagging the cap/curve update) -
+                -- reset it from the live current amount so the tooltip can't
+                -- show an impossible "5679 / 1600".
+                if info.maxQuantity and info.maxQuantity > 0 and (seasonData.seasonMaximum or 0) > info.maxQuantity then
+                    DebugPrint(currencyType .. " season maximum (" .. seasonData.seasonMaximum .. ") exceeds live cap (" ..
+                        info.maxQuantity .. ") - stale prior-season data, resetting to current amount")
+                    seasonData.seasonMaximum = currentAmount
+                end
+
                 -- For weekly cap detection, we still need to track weekly earnings
                 local currentWeek = math.floor(GetServerTime() / (7 * 24 * 60 * 60))
                 local weeklyEarned = info.quantityEarnedThisWeek or 0
@@ -10517,6 +10613,33 @@ SlashCmdList["PVPHUB"] = function(msg)
                 table.insert(cardWidgets, disclaimerText)
                 yPos = yPos - 34
 
+                -- Login reminder: a character that hasn't logged in since the
+                -- last detected season change is still carrying last season's
+                -- snapshot (there's no way to refresh another character's
+                -- data without logging into it — see IsCharacterStaleThisSeason).
+                -- The roster dims those rows; this nudges toward the fix.
+                do
+                    local staleCount = 0
+                    for charKey, cdata in pairs(PVPHUB_DB) do
+                        if type(cdata) == "table" and charKey ~= "settings" and cdata.class
+                           and not IsCharacterHidden(charKey) and IsCharacterStaleThisSeason(charKey) then
+                            staleCount = staleCount + 1
+                        end
+                    end
+                    if staleCount > 0 then
+                        local reminderText = statsScrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                        reminderText:SetPoint("TOP", statsScrollChild, "TOP", 0, yPos)
+                        reminderText:SetWidth(600)
+                        reminderText:SetWordWrap(true)
+                        reminderText:SetJustifyH("CENTER")
+                        reminderText:SetText(string.format(
+                            "|cffffcc00%d character%s|r haven't logged in since the season changed — their numbers (dimmed in the character list) are still last season's until you log in on them.",
+                            staleCount, staleCount == 1 and "" or "s"))
+                        table.insert(cardWidgets, reminderText)
+                        yPos = yPos - 34
+                    end
+                end
+
                 -- Season title progress — one row of three equal-width tiles
                 -- (Legend/Strategist/Gladiator), placed first and set apart in
                 -- its own gold-framed panel so it reads as the featured section
@@ -10867,6 +10990,27 @@ SlashCmdList["PVPHUB"] = function(msg)
             end
             GameTooltip:Hide()
         end)
+
+        -- Start Fresh for New Season button — placed beside Streamer Mode since
+        -- both are situational, opt-in actions rather than always-relevant window
+        -- controls. Opens the same confirmation as the automatic login-time
+        -- prompt (see UpdateCurrencyData's season-change detection), so this is
+        -- also how to re-trigger it any time after dismissing that prompt.
+        local startFreshBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+        startFreshBtn:SetSize(100, 18)
+        startFreshBtn:SetPoint("BOTTOMRIGHT", compactToggleBtn, "BOTTOMLEFT", -8, 0)
+        startFreshBtn:SetText("Start Fresh")
+        startFreshBtn:GetFontString():SetFont("Fonts\\ARIALN.TTF", 10)
+        f.startFreshBtn = startFreshBtn
+        startFreshBtn:SetScript("OnClick", function() PVPHUB:ShowSeasonFreshStartPopup() end)
+        startFreshBtn:SetScript("OnEnter", function(self)
+            GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
+            GameTooltip:SetText("Start Fresh for New Season", 0.2, 1, 0.4)
+            GameTooltip:AddLine("Clears last season's ratings, W/L, and match history for every tracked character.", 1, 1, 1, true)
+            GameTooltip:AddLine("Honor, gold, notes, and settings are kept.", 0.8, 0.8, 0.8, true)
+            GameTooltip:Show()
+        end)
+        startFreshBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
         -- Use saved window scale or default to 1.0
         PVPHUB_SETTINGS.windowScale = PVPHUB_SETTINGS.windowScale or 1.0
@@ -11303,42 +11447,61 @@ SlashCmdList["PVPHUB"] = function(msg)
             local sortKey = PVPHUB_SETTINGS.sortKey or "highestRating" -- Fixed: use same default as initialization
             local sorted = {}
             
-            -- Helper function to check if character has any ratings
+            -- Helper function to check if character has any CURRENT-season
+            -- ratings. Reads bracketStats — season-tagged, and cleared by
+            -- both the automatic season-boundary reset and "Start Fresh" —
+            -- rather than the legacy flat rating2v2/ratingShuffle/etc fields.
+            -- Those flat fields are never cleared by either reset (the
+            -- roster display gates on bracketStats instead, via
+            -- isRatingKnown), so checking them here left "Hide Characters
+            -- with No Ratings" showing characters tagged "(last season)"
+            -- since their old rating numbers were technically still >0.
             local function hasAnyRating(data)
-                -- Check regular brackets (2v2, 3v3, RBG)
-                if (data.rating2v2 or 0) > 0 or (data.rating3v3 or 0) > 0 or (data.ratingRBG or 0) > 0 then
-                    return true
-                end
-
-                -- Check Shuffle ratings (can be table or number)
-                local shuffle = data.ratingShuffle
-                if type(shuffle) == "number" and shuffle > 0 then
-                    return true
-                elseif type(shuffle) == "table" then
-                    for _, rating in pairs(shuffle) do
-                        if rating > 0 then
+                local bs = data.bracketStats
+                if not bs then return false end
+                for _, meta in ipairs(BRACKET_META) do
+                    local entry = bs[meta.key]
+                    if entry then
+                        if meta.key == "ratingShuffle" or meta.key == "ratingBlitz" then
+                            for _, spec in pairs(entry) do
+                                if type(spec) == "table" and (spec.rating or 0) > 0 then
+                                    return true
+                                end
+                            end
+                        elseif (entry.rating or 0) > 0 then
                             return true
                         end
                     end
                 end
-
-                -- Check Blitz ratings (can be table or number)
-                local blitz = data.ratingBlitz
-                if type(blitz) == "number" and blitz > 0 then
-                    return true
-                elseif type(blitz) == "table" then
-                    for _, rating in pairs(blitz) do
-                        if rating > 0 then
-                            return true
-                        end
-                    end
-                end
-
                 return false
             end
             
+            local totalHonor, totalConquest, totalGold = 0, 0, 0
+
             for char, data in pairs(PVPHUB_DB) do
                 if type(data) == "table" and not IsCharacterHidden(char) then
+                    -- Totals cover every tracked (non-hidden) character
+                    -- regardless of the "Hide Characters with No Ratings"
+                    -- filter below — honor/conquest/gold aren't rating-gated,
+                    -- so a character with no PvP rating this season (e.g.
+                    -- freshly wiped by Start Fresh, before it's logged back
+                    -- in) should still count toward the summary instead of
+                    -- vanishing from it entirely.
+                    totalHonor = totalHonor + (data.honor or 0)
+                    totalGold  = totalGold  + (data.gold or 0)
+
+                    -- Conquest is the one currency Blizzard actually zeroes
+                    -- out at the season boundary (unlike honor/gold, which
+                    -- never reset) — data.conquest is just a snapshot of
+                    -- that character's wallet as of their last login, so for
+                    -- a character that hasn't logged in since the season
+                    -- changed, it's known to be their stale pre-reset amount,
+                    -- not their real current balance. Leave it out of the
+                    -- total instead of counting a number we know is wrong.
+                    if not IsCharacterStaleThisSeason(char) then
+                        totalConquest = totalConquest + (data.conquest or 0)
+                    end
+
                     -- Filter out characters with no ratings if setting is enabled
                     if PVPHUB_SETTINGS.mainWindow and PVPHUB_SETTINGS.mainWindow.hideNoRatings then
                         if hasAnyRating(data) then
@@ -11423,16 +11586,6 @@ SlashCmdList["PVPHUB"] = function(msg)
                     return (aVal or 0) > (bVal or 0)
                 end
             end)
-
-            local totalHonor, totalConquest, totalGold = 0, 0, 0
-            
-            -- Calculate totals from all characters (before filtering by collapsed groups)
-            for _, entry in ipairs(sorted) do
-                local data = entry.data
-                totalHonor = totalHonor + (data.honor or 0)
-                totalConquest = totalConquest + (data.conquest or 0)
-                totalGold = totalGold + (data.gold or 0)
-            end
             
             local contentHeight = 0
             local currentChar = GetFullName()
@@ -11824,6 +11977,16 @@ SlashCmdList["PVPHUB"] = function(msg)
                 -- Create row data
                 local data = entry.data
 
+                -- Dim the whole row (background, icon, and every column's text
+                -- all inherit a frame's alpha) when this character hasn't
+                -- logged in since the last detected season change - its
+                -- honor/conquest/ratings are still last season's snapshot and
+                -- there's no way to refresh them without logging into it.
+                local isStaleThisSeason = IsCharacterStaleThisSeason(entry.char)
+                if isStaleThisSeason then
+                    cardFrame:SetAlpha(0.45)
+                end
+
                 -- Class icon texture: same width and height as the accent strip, zoom-cropped to center
                 local classIconTexPath = nil
                 if data and data.specID then
@@ -11848,7 +12011,10 @@ SlashCmdList["PVPHUB"] = function(msg)
                 end
 
                 local coloredName = CreateCharacterName(entry, false, true)
-                
+                if isStaleThisSeason then
+                    coloredName = coloredName .. " |cff888888(last season)|r"
+                end
+
                 local function coloredRating(val)
                     return string.format("%s%d|r", GetRatingColor(val), val)
                 end
@@ -12645,10 +12811,16 @@ SlashCmdList["PVPHUB"] = function(msg)
                     GameTooltip:SetText("|cffa335eeTotal Conquest|r", 1, 1, 1)
                     GameTooltip:AddLine(" ", 1, 1, 1) -- Empty line
                     
-                    -- Collect character data
+                    -- Collect character data. Excludes characters that haven't
+                    -- logged in since the season changed (see
+                    -- IsCharacterStaleThisSeason) — Blizzard zeroes Conquest
+                    -- out at the season boundary, so a stale character's
+                    -- cached data.conquest is a known-wrong pre-reset amount,
+                    -- same reasoning as the totalConquest summary above.
                     local charData = {}
                     for charKey, data in pairs(PVPHUB_DB) do
-                        if type(data) == "table" and charKey ~= "settings" and not IsCharacterHidden(charKey) and (data.conquest or 0) > 0 then
+                        if type(data) == "table" and charKey ~= "settings" and not IsCharacterHidden(charKey)
+                           and not IsCharacterStaleThisSeason(charKey) and (data.conquest or 0) > 0 then
                             table.insert(charData, {
                                 char = charKey,
                                 conquest = data.conquest or 0,
@@ -12656,20 +12828,20 @@ SlashCmdList["PVPHUB"] = function(msg)
                             })
                         end
                     end
-                    
+
                     -- Sort by highest conquest
                     table.sort(charData, function(a, b) return a.conquest > b.conquest end)
-                    
+
                     -- Show each character's conquest with class color and column alignment
                     for _, entry in ipairs(charData) do
                         local classColor = RAID_CLASS_COLORS[entry.class] or RAID_CLASS_COLORS["WARRIOR"]
-                        local coloredName = string.format("|cff%02x%02x%02x%s|r", 
+                        local coloredName = string.format("|cff%02x%02x%02x%s|r",
                             classColor.r * 255, classColor.g * 255, classColor.b * 255, entry.char)
-                        
+
                         -- Use GameTooltip:AddDoubleLine for column alignment (left-right layout)
                         GameTooltip:AddDoubleLine(coloredName, "|cffffffff" .. tooltipFormatNumber(entry.conquest) .. "|r", 0.8, 0.8, 0.8, 0.8, 0.8, 0.8)
                     end
-                    
+
                     if #charData == 0 then
                         GameTooltip:AddLine("No conquest found", 0.6, 0.6, 0.6)
                     end
@@ -13435,6 +13607,102 @@ compartmentFrame:SetScript("OnEvent", function(self, event, addonName)
         print("|cffff0000[PVPHUB Error]|r Event handler error: " .. tostring(errorMsg))
     end
 end)
+
+-- Handlers for the branded "Start Fresh" popup (modules/popups.lua,
+-- PVPHUB:ShowSeasonFreshStartPopup) — kept here rather than in the popup
+-- module because they need UpdateCurrencyData/CURRENCY_IDS/PVPHubPrint,
+-- which only exist as locals in this file's chunk. The popup module is
+-- UI-only and just calls these.
+--
+-- Only clears season-scoped PvP tracking (ratings, W/L, match history,
+-- conquest/token season progress) for every stored character; honor, gold,
+-- notes, hidden characters, and settings are all left untouched.
+function PVPHUB:ExecuteSeasonFreshStart()
+    for charKey, data in pairs(PVPHUB_DB) do
+        if type(data) == "table" and charKey ~= "settings" then
+            data.conquestWeeklyData     = nil
+            data.bloodytokensWeeklyData = nil
+            data.bracketStats           = nil
+            data.wlData                 = nil
+            data.mmrHistory             = nil
+            data.lastKnownMMR           = nil
+            data.mmrData                = nil
+        end
+    end
+
+    -- Re-anchor the season-boundary bookkeeping to right now, so
+    -- UpdateCurrencyData's automatic detection doesn't immediately think
+    -- another season just started, and every character but this one
+    -- correctly shows as "last season" (see IsCharacterStaleThisSeason)
+    -- until it logs in and reports fresh data.
+    local nowSeason = (C_PvP and C_PvP.GetUIDisplaySeason and C_PvP.GetUIDisplaySeason()) or 0
+    if nowSeason > 0 then
+        PVPHUB_SETTINGS.lastKnownSeasonID = nowSeason
+        -- Explicit decision made — stop re-prompting for this season.
+        PVPHUB_SETTINGS.seasonFreshStartResolvedForSeason = nowSeason
+    end
+    local capOk, capInfo = pcall(C_CurrencyInfo.GetCurrencyInfo, CURRENCY_IDS.conquest)
+    if capOk and capInfo and capInfo.maxQuantity and capInfo.maxQuantity > 0 then
+        PVPHUB_SETTINGS.lastKnownConquestCap = capInfo.maxQuantity
+    end
+    PVPHUB_SETTINGS.seasonStartTimestamp = GetServerTime()
+
+    -- Immediately repopulate the current character rather than leaving
+    -- it on a blank state until the next natural update event fires.
+    UpdateCurrencyData()
+    if PVPHUB.PvPTracking and PVPHUB.PvPTracking.SaveBracketStats then
+        PVPHUB.PvPTracking.SaveBracketStats(GetFullName())
+    end
+
+    if PVPHUB.window and PVPHUB.window.UpdateContent then
+        PVPHUB.window:UpdateContent()
+    end
+    if PVPHUB.window and PVPHUB.window:IsShown() and PVPHUB.window.currentTab == "stats"
+       and PVPHUB.window.statsFrame and PVPHUB.window.RenderStatsFor then
+        PVPHUB.window.RenderStatsFor()
+    end
+    if PVPHUB.compactWindow and PVPHUB.compactWindow.UpdateContent then
+        PVPHUB.compactWindow:UpdateContent()
+    end
+
+    PVPHubPrint("|cff33ff66[PVPHUB]|r Fresh start! Season tracking cleared for all characters — honor, gold, and notes were kept.")
+    PlaySound(8959)
+end
+
+-- Final safety gate before ExecuteSeasonFreshStart actually runs — clicking
+-- "Yes, Start Fresh" on the branded popup (modules/popups.lua) opens this
+-- plain native confirm instead of wiping immediately, since that button
+-- sits right next to the decline button and a misclick there would
+-- otherwise be irreversible with a single click. Canceling here leaves the
+-- season unresolved, same as closing the branded popup via its X — it'll
+-- offer again next login.
+StaticPopupDialogs["PVPHUB_CONFIRM_SEASON_FRESH_START"] = {
+    text = "|cffff4444Are you sure?|r\n\nThis will permanently clear last season's ratings, win/loss records, and match history for every tracked character.\n\n|cff888888This can't be undone.|r",
+    button1 = "Yes, I'm Sure",
+    button2 = "Cancel",
+    OnAccept = function()
+        PVPHUB:ExecuteSeasonFreshStart()
+    end,
+    OnCancel = function()
+        -- Do nothing — leaves seasonFreshStartResolvedForSeason untouched.
+    end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+}
+
+-- Explicit decision to handle it manually — stop re-prompting for this
+-- season. Only reached via an actual button click (see ShowSeasonFreshStartPopup's
+-- X close, which calls neither handler), so dismissing without choosing
+-- still re-prompts next login as intended.
+function PVPHUB:DeclineSeasonFreshStart()
+    local nowSeason = (C_PvP and C_PvP.GetUIDisplaySeason and C_PvP.GetUIDisplaySeason()) or 0
+    if nowSeason > 0 then
+        PVPHUB_SETTINGS.seasonFreshStartResolvedForSeason = nowSeason
+    end
+    PVPHubPrint("|cffaaaaaa[PVPHUB]|r No problem — log into each character when you get a chance and PVPHUB will pick up fresh season data automatically.")
+end
 
 -- StaticPopup for confirming reset all data
 StaticPopupDialogs["PVPHUB_RESET_ALL_DATA"] = {
