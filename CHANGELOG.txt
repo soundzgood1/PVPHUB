@@ -1,3 +1,8 @@
+## v6.6.1 - Season Popup & Stale-Tag Fixes
+- Changed: The "Start Fresh for New Season" popup no longer opens itself automatically at login — it's now only reachable via the "Start Fresh" button beside Streamer Mode
+- Fixed: A never-logged-in character (e.g. a brand new alt right after installing PVPHUB) could incorrectly show the "(last season)" dimmed tag; that tag is now only applied to characters that actually have recorded activity predating the season boundary
+- Changed: Fonts registered with LibSharedMedia by other addons are now re-resolved on PLAYER_ENTERING_WORLD as well, fixing a case where PVPHUB could silently fall back to the default font if its own font-resolution ran before the other addon had registered
+
 ## v6.6.0 - Start Fresh for New Season & Season-Boundary Fixes
 - NEW: "Start Fresh for New Season" popup
   • Offers to clear last season's ratings, win/loss records, match history, and conquest/token progress for every tracked character, so your dashboard starts clean — honor, gold, notes, and settings are always kept

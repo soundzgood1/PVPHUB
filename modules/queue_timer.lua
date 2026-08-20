@@ -1258,6 +1258,18 @@ queueEventFrame:SetScript("OnEvent", function(self, event, arg1)
             end
         end
 
+        -- Re-resolve the font family here too, not just at ADDON_LOADED/creation.
+        -- If the selected font is a LibSharedMedia font registered by a DIFFERENT
+        -- addon, that addon's own ADDON_LOADED (which is when it registers with
+        -- LSM) isn't guaranteed to have already run by the time ours fires and
+        -- CreateFrame()/_ScaleFonts() resolves the font the first time - so it can
+        -- silently fall back to the default font until something re-resolves it.
+        -- PLAYER_ENTERING_WORLD fires once everyone's ADDON_LOADED has already run,
+        -- so this is a safe, guaranteed-late point to correct that.
+        if PVPHUB.QueueTimer.frame and PVPHUB.QueueTimer._ScaleFonts then
+            PVPHUB.QueueTimer:_ScaleFonts()
+        end
+
     elseif event == "ADDON_LOADED" and arg1 == "PVPHUB" then
         -- Build the locale-independent BG name map from the client's own BG list.
         -- Must be called after ADDON_LOADED so GetNumBattlegroundTypes is available.

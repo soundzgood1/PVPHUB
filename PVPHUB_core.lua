@@ -1085,15 +1085,17 @@ end
 -- way to query another character's currency/PvP data without logging into
 -- it, so a character that hasn't logged in since the season changed is still
 -- carrying last season's snapshot - callers use this to dim/flag that
--- instead of presenting it as current. A character never seen at all counts
--- as stale; if no season boundary has been detected yet this install, no
--- character is considered stale.
+-- instead of presenting it as current. A character with no recorded activity
+-- at all has nothing stale to show (this covers both a character PVPHUB has
+-- never tracked, and one whose first-ever update hasn't stamped lastSeen
+-- yet) - it's just untracked, not "last season's". If no season boundary has
+-- been detected yet this install, no character is considered stale either.
 local function IsCharacterStaleThisSeason(charKey)
     local data = PVPHUB_DB and PVPHUB_DB[charKey]
-    if not data then return true end
+    if not data or not data.lastSeen then return false end
     local seasonStart = PVPHUB_SETTINGS and PVPHUB_SETTINGS.seasonStartTimestamp
     if not seasonStart then return false end
-    return not data.lastSeen or data.lastSeen < seasonStart
+    return data.lastSeen < seasonStart
 end
 
 local function HideCharacter(charKey)
@@ -3091,13 +3093,6 @@ local function CreateCharacterName(entry, isCompactMode, suppressSpecIcon, suppr
     return coloredName
 end
 
--- Set once the "Start Fresh" popup has been offered this session, so the
--- various events that call UpdateCurrencyData during a single login
--- (PLAYER_LOGIN, PLAYER_ENTERING_WORLD, CURRENCY_DISPLAY_UPDATE, ...) don't
--- reopen it every time — it resets naturally on the next /reload or login
--- since this is a plain local, not a saved value.
-local seasonFreshStartPromptedThisSession = false
-
 -- Data Update Functions with Protection
 local function UpdateCurrencyData()
     local charKey = GetFullName()
@@ -3172,23 +3167,6 @@ local function UpdateCurrencyData()
 
     if conquestCapNow > 0 then
         PVPHUB_SETTINGS.lastKnownConquestCap = conquestCapNow
-    end
-
-    -- Offer the deeper "Start Fresh" wipe (match history + MMR caches, which
-    -- the automatic reset above deliberately leaves alone) every login until
-    -- the player makes an explicit choice — either button on the popup marks
-    -- the current season resolved via seasonFreshStartResolvedForSeason, so
-    -- this stops firing once answered and re-arms itself on the next real
-    -- season change. Delayed like the welcome/update popups so it doesn't
-    -- fight the login/reload screen for focus; the once-per-session guard
-    -- stops the handful of events that call UpdateCurrencyData at login from
-    -- reopening it repeatedly in the same session.
-    if currentSeason > 0 and not seasonFreshStartPromptedThisSession
-       and PVPHUB_SETTINGS.seasonFreshStartResolvedForSeason ~= currentSeason then
-        seasonFreshStartPromptedThisSession = true
-        C_Timer.After(2, function()
-            PVPHUB:ShowSeasonFreshStartPopup()
-        end)
     end
 
     -- Bootstrap: if a season boundary was already detected and reset under an
@@ -13674,8 +13652,8 @@ end
 -- plain native confirm instead of wiping immediately, since that button
 -- sits right next to the decline button and a misclick there would
 -- otherwise be irreversible with a single click. Canceling here leaves the
--- season unresolved, same as closing the branded popup via its X — it'll
--- offer again next login.
+-- season unresolved, same as closing the branded popup via its X — reopen
+-- the "Start Fresh" button beside Streamer Mode whenever you're ready.
 StaticPopupDialogs["PVPHUB_CONFIRM_SEASON_FRESH_START"] = {
     text = "|cffff4444Are you sure?|r\n\nThis will permanently clear last season's ratings, win/loss records, and match history for every tracked character.\n\n|cff888888This can't be undone.|r",
     button1 = "Yes, I'm Sure",
@@ -13692,10 +13670,10 @@ StaticPopupDialogs["PVPHUB_CONFIRM_SEASON_FRESH_START"] = {
     preferredIndex = 3,
 }
 
--- Explicit decision to handle it manually — stop re-prompting for this
--- season. Only reached via an actual button click (see ShowSeasonFreshStartPopup's
--- X close, which calls neither handler), so dismissing without choosing
--- still re-prompts next login as intended.
+-- Explicit decision to handle it manually — marks the season resolved so
+-- the reminder banner/dimming still treats it normally. Only reached via an
+-- actual button click (see ShowSeasonFreshStartPopup's X close, which calls
+-- neither handler).
 function PVPHUB:DeclineSeasonFreshStart()
     local nowSeason = (C_PvP and C_PvP.GetUIDisplaySeason and C_PvP.GetUIDisplaySeason()) or 0
     if nowSeason > 0 then

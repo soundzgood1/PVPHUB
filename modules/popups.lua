@@ -611,17 +611,13 @@ end
 
 -- "Start Fresh for New Season" popup — offers to clear last season's ratings,
 -- W/L, match history, and conquest/token progress across every tracked
--- character. Shown automatically at login while unresolved (see
--- UpdateCurrencyData's season-change detection in PVPHUB_core.lua) and
--- reachable anytime via the "Start Fresh" button beside Streamer Mode.
--- Branded like the rest of the addon's popups instead of a generic
--- StaticPopup — logo, theme colors, custom buttons.
+-- character. Only reachable via the "Start Fresh" button beside Streamer
+-- Mode — it no longer opens itself automatically at login. Branded like the
+-- rest of the addon's popups instead of a generic StaticPopup — logo, theme
+-- colors, custom buttons.
 --
 -- Either decision button marks the season resolved (PVPHUB_SETTINGS.
--- seasonFreshStartResolvedForSeason) so this stops auto-showing until the
--- next real season change. Closing via the X makes no decision, so it
--- reopens next login — mirrors StaticPopup's Escape-vs-button2 distinction,
--- just explicit instead of relying on that Blizzard quirk.
+-- seasonFreshStartResolvedForSeason).
 function PVPHUB:ShowSeasonFreshStartPopup()
     if PVPHUB.seasonFreshStartWindow then
         PVPHUB.seasonFreshStartWindow:Show()
@@ -737,9 +733,10 @@ function PVPHUB:ShowSeasonFreshStartPopup()
     declineFS:SetTextColor(0.75, 0.75, 0.75, 1)
     cursorY = cursorY + 10 + 36
 
-    -- X close — makes no decision, so the popup reopens next login. This is
-    -- the ONLY dismissal path that leaves seasonFreshStartResolvedForSeason
-    -- untouched; both buttons below explicitly resolve it.
+    -- X close — makes no decision, so seasonFreshStartResolvedForSeason is
+    -- left untouched; both buttons below explicitly resolve it. Since this
+    -- popup only opens via the "Start Fresh" button, closing it this way
+    -- just requires clicking that button again to reopen it.
     local xBtn = CreateFrame("Button", nil, f, "UIPanelCloseButton")
     xBtn:SetPoint("TOPRIGHT", -5, -5)
     xBtn:SetScript("OnClick", function() f:Hide() end)
