@@ -8152,6 +8152,68 @@ SlashCmdList["PVPHUB"] = function(msg)
                 end
             end)
 
+            -- Total Honor/Conquest/Gold display thresholds — a character
+            -- with less than this amount of a currency is left out of that
+            -- currency's Total summary (and its breakdown popup), so a pile
+            -- of 1-copper or single-digit-honor alts doesn't dilute the
+            -- number. 0 (default) includes everyone, matching prior behavior.
+            local function CreateThresholdRow(anchorTo, labelText, tooltipText, settingsKey)
+                local label = dispContent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+                label:SetPoint("TOPLEFT", anchorTo, "BOTTOMLEFT", 0, -12)
+                label:SetText(labelText)
+
+                local editBox = CreateFrame("EditBox", nil, dispContent, "InputBoxTemplate")
+                editBox:SetSize(60, 20)
+                editBox:SetPoint("LEFT", label, "RIGHT", 14, -1)
+                editBox:SetAutoFocus(false)
+                editBox:SetNumeric(true)
+                editBox:SetMaxLetters(9)
+
+                local function CurrentValue()
+                    return (PVPHUB_SETTINGS.mainWindow and PVPHUB_SETTINGS.mainWindow[settingsKey]) or 0
+                end
+                editBox:SetText(tostring(CurrentValue()))
+                editBox:SetCursorPosition(0)
+
+                local function SaveValue()
+                    local val = tonumber(editBox:GetText()) or 0
+                    if val < 0 then val = 0 end
+                    if not PVPHUB_SETTINGS.mainWindow then PVPHUB_SETTINGS.mainWindow = {} end
+                    PVPHUB_SETTINGS.mainWindow[settingsKey] = val
+                    editBox:SetText(tostring(val))
+                    editBox:ClearFocus()
+                    if f.currentTab == "characters" and f.UpdateContent then f:UpdateContent() end
+                end
+                editBox:SetScript("OnEnterPressed", SaveValue)
+                editBox:SetScript("OnEditFocusLost", SaveValue)
+                editBox:SetScript("OnEscapePressed", function(self)
+                    self:SetText(tostring(CurrentValue()))
+                    self:ClearFocus()
+                end)
+                editBox:SetScript("OnEnter", function(self)
+                    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                    GameTooltip:SetText(labelText, 1, 1, 1)
+                    GameTooltip:AddLine(tooltipText, 0.7, 0.7, 0.7, true)
+                    GameTooltip:Show()
+                end)
+                editBox:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+                return editBox
+            end
+
+            local honorThresholdBox = CreateThresholdRow(enableGroupsCheckbox,
+                "Honor Threshold:",
+                "Only count characters with more than this much Honor toward Total Honor. 0 includes everyone.",
+                "honorThreshold")
+            local conquestThresholdBox = CreateThresholdRow(honorThresholdBox,
+                "Conquest Threshold:",
+                "Only count characters with more than this much Conquest toward Total Conquest. 0 includes everyone.",
+                "conquestThreshold")
+            local goldThresholdBox = CreateThresholdRow(conquestThresholdBox,
+                "Gold Threshold:",
+                "Only count characters with more than this much Gold toward Total Gold. Value is in gold, not copper. 0 includes everyone.",
+                "goldThreshold")
+
             -- ============================================================
             -- SECTION: NOTIFICATIONS
             -- ============================================================
@@ -9004,7 +9066,7 @@ SlashCmdList["PVPHUB"] = function(msg)
             -- Visual display order (independent of code order above)
             allSections = {sDisp, sApp, sNotif, sQT, sAdv}
 
-            sDisp.contentHeight  = 105
+            sDisp.contentHeight  = 185
             sApp.contentHeight   = 245
             sNotif.contentHeight = 75
             sQT.contentHeight    = 215
@@ -9019,7 +9081,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                     if ct and wb then return math.abs(ct - wb) + 14 end
                     return 100
                 end
-                sDisp.contentHeight  = MeasureHeight(dispContent,  enableGroupsCheckbox)
+                sDisp.contentHeight  = MeasureHeight(dispContent,  goldThresholdBox)
                 sApp.contentHeight   = MeasureHeight(appContent,    windowGlowCheckbox)
                 sNotif.contentHeight = MeasureHeight(notifContent,  disablePrintCheckbox)
                 sQT.contentHeight    = MeasureHeight(qtContent,     qtPreviewBtn)
@@ -10705,6 +10767,14 @@ SlashCmdList["PVPHUB"] = function(msg)
             
             local totalHonor, totalConquest, totalGold = 0, 0, 0
 
+            -- Display thresholds (Settings > Display) — a character below
+            -- the threshold is left out of that currency's total entirely,
+            -- same as a hidden character, so a pile of near-zero alts
+            -- doesn't dilute the number. 0 (default) includes everyone.
+            local honorThreshold    = (PVPHUB_SETTINGS.mainWindow and PVPHUB_SETTINGS.mainWindow.honorThreshold) or 0
+            local conquestThreshold = (PVPHUB_SETTINGS.mainWindow and PVPHUB_SETTINGS.mainWindow.conquestThreshold) or 0
+            local goldThreshold     = ((PVPHUB_SETTINGS.mainWindow and PVPHUB_SETTINGS.mainWindow.goldThreshold) or 0) * 10000 -- gold -> copper
+
             for char, data in pairs(PVPHUB_DB) do
                 if type(data) == "table" and not IsCharacterHidden(char) then
                     -- Totals cover every tracked (non-hidden) character
@@ -10714,8 +10784,12 @@ SlashCmdList["PVPHUB"] = function(msg)
                     -- freshly wiped by Start Fresh, before it's logged back
                     -- in) should still count toward the summary instead of
                     -- vanishing from it entirely.
-                    totalHonor = totalHonor + (data.honor or 0)
-                    totalGold  = totalGold  + (data.gold or 0)
+                    if (data.honor or 0) > honorThreshold then
+                        totalHonor = totalHonor + (data.honor or 0)
+                    end
+                    if (data.gold or 0) > goldThreshold then
+                        totalGold = totalGold + (data.gold or 0)
+                    end
 
                     -- Conquest is the one currency Blizzard actually zeroes
                     -- out at the season boundary (unlike honor/gold, which
@@ -10725,7 +10799,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                     -- changed, it's known to be their stale pre-reset amount,
                     -- not their real current balance. Leave it out of the
                     -- total instead of counting a number we know is wrong.
-                    if not IsCharacterStaleThisSeason(char) then
+                    if not IsCharacterStaleThisSeason(char) and (data.conquest or 0) > conquestThreshold then
                         totalConquest = totalConquest + (data.conquest or 0)
                     end
 
@@ -11986,9 +12060,10 @@ SlashCmdList["PVPHUB"] = function(msg)
                 
                 f.honorTooltipBtn:SetScript("OnEnter", function()
                     -- Collect character data
+                    local honorThreshold = (PVPHUB_SETTINGS.mainWindow and PVPHUB_SETTINGS.mainWindow.honorThreshold) or 0
                     local charData = {}
                     for charKey, data in pairs(PVPHUB_DB) do
-                        if type(data) == "table" and charKey ~= "settings" and not IsCharacterHidden(charKey) and (data.honor or 0) > 0 then
+                        if type(data) == "table" and charKey ~= "settings" and not IsCharacterHidden(charKey) and (data.honor or 0) > honorThreshold then
                             table.insert(charData, {
                                 char = charKey,
                                 honor = data.honor or 0,
@@ -12029,10 +12104,11 @@ SlashCmdList["PVPHUB"] = function(msg)
                     -- out at the season boundary, so a stale character's
                     -- cached data.conquest is a known-wrong pre-reset amount,
                     -- same reasoning as the totalConquest summary above.
+                    local conquestThreshold = (PVPHUB_SETTINGS.mainWindow and PVPHUB_SETTINGS.mainWindow.conquestThreshold) or 0
                     local charData = {}
                     for charKey, data in pairs(PVPHUB_DB) do
                         if type(data) == "table" and charKey ~= "settings" and not IsCharacterHidden(charKey)
-                           and not IsCharacterStaleThisSeason(charKey) and (data.conquest or 0) > 0 then
+                           and not IsCharacterStaleThisSeason(charKey) and (data.conquest or 0) > conquestThreshold then
                             table.insert(charData, {
                                 char = charKey,
                                 conquest = data.conquest or 0,
@@ -12068,9 +12144,10 @@ SlashCmdList["PVPHUB"] = function(msg)
                 
                 f.goldTooltipBtn:SetScript("OnEnter", function()
                     -- Collect character data
+                    local goldThreshold = ((PVPHUB_SETTINGS.mainWindow and PVPHUB_SETTINGS.mainWindow.goldThreshold) or 0) * 10000 -- gold -> copper
                     local charData = {}
                     for charKey, data in pairs(PVPHUB_DB) do
-                        if type(data) == "table" and charKey ~= "settings" and not IsCharacterHidden(charKey) and (data.gold or 0) > 0 then
+                        if type(data) == "table" and charKey ~= "settings" and not IsCharacterHidden(charKey) and (data.gold or 0) > goldThreshold then
                             table.insert(charData, {
                                 char = charKey,
                                 gold = data.gold or 0,
