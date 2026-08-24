@@ -7576,6 +7576,15 @@ SlashCmdList["PVPHUB"] = function(msg)
         closeButton:SetScript("OnClick", function() f:Hide() end)
         f.closeButton = closeButton
 
+        -- Force-close the interactive Honor/Conquest/Gold totals popup
+        -- whenever the main window closes, however it closes (close button,
+        -- Escape, /pvphub toggle, etc.) — it's a separate top-level frame
+        -- parented to UIParent, not a child of f, so hiding f alone doesn't
+        -- take it down with it.
+        f:HookScript("OnHide", function()
+            if _totalsPopup then _totalsPopup:Hide() end
+        end)
+
         -- Create scroll frame with modern TWW styling
         local scrollFrame = CreateFrame("ScrollFrame", "PVPHUBScrollFrame", f, "ScrollFrameTemplate")
         scrollFrame:SetPoint("TOPLEFT", f, "TOPLEFT", 20, -120) -- Align better with headers at -92 + header height (~28px)
