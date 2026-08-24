@@ -12626,6 +12626,19 @@ function PVPHUB:ExecuteSeasonFreshStart()
             data.mmrHistory             = nil
             data.lastKnownMMR           = nil
             data.mmrData                = nil
+            -- Legacy flat/per-spec rating keys (see pvp_tracking.lua's header
+            -- comment: "PVPHUB_DB[charKey][bracketKey] — legacy flat/per-spec
+            -- keys, UI reads these"). bracketStats above is the newer rich
+            -- structure, but every rating display in the addon (Characters
+            -- tab, Streamer Mode list, "Hide No Rating") actually reads these
+            -- instead — they only get refreshed when a character logs back
+            -- in, so leaving them alone here meant every character you
+            -- hadn't logged into yet kept showing last season's ratings.
+            data.rating2v2     = nil
+            data.rating3v3     = nil
+            data.ratingRBG     = nil
+            data.ratingShuffle = nil
+            data.ratingBlitz   = nil
         end
     end
 
