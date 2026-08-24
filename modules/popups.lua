@@ -12,6 +12,14 @@ function PVPHUB:ShowWelcomePopup()
         return
     end
 
+    -- Mark seen the moment it's shown, not on a particular dismissal path.
+    -- This used to only get set from the "Don't show again" checkbox below,
+    -- so anyone who just clicked "Let's Go!" (i.e. almost everyone) kept
+    -- welcomeShown false forever — leaving them eligible to see this again
+    -- on a later login, at which point whatever version bump had happened
+    -- in between made the update popup fire too, showing both back to back.
+    PVPHUB_SETTINGS.welcomeShown = true
+
     local f = CreateFrame("Frame", "PVPHUBWelcomeWindow", UIParent, "BackdropTemplate")
     -- FULLSCREEN_DIALOG (not just HIGH, same as the main window) so this
     -- always draws above the main window's content regardless of internal
@@ -267,29 +275,11 @@ function PVPHUB:ShowWelcomePopup()
     f.openMainBtn = openMainBtn
     cursorY = cursorY + 18 + 32
 
-    -- Don't show again (bottom-left, unobtrusive) — stays anchored to the
-    -- frame's own corner rather than the content chain; the frame height
-    -- computed below leaves enough margin for it to sit near the button.
-    local dontShowCheckbox = CreateFrame("CheckButton", nil, f, "UICheckButtonTemplate")
-    dontShowCheckbox:SetPoint("BOTTOMLEFT", 16, 12)
-    dontShowCheckbox:SetSize(20, 20)
-    dontShowCheckbox:SetScript("OnClick", function(self)
-        PVPHUB_SETTINGS.welcomeShown = self:GetChecked() and true or false
-    end)
-
-    local dontShowLabel = f:CreateFontString(nil, "OVERLAY")
-    dontShowLabel:SetPoint("LEFT", dontShowCheckbox, "RIGHT", 2, 0)
-    dontShowLabel:SetFont("Fonts\\FRIZQT__.TTF", 10)
-    dontShowLabel:SetText("Don't show again")
-    dontShowLabel:SetTextColor(unpack(UI_CONSTANTS.COLORS.SUMMARY_TEXT))
-
-    -- X close button
+    -- X close button — welcomeShown is already set to true above, so any
+    -- dismissal path (this, or "Let's Go!") is equally final.
     local xCloseBtn = CreateFrame("Button", nil, f, "UIPanelCloseButton")
     xCloseBtn:SetPoint("TOPRIGHT", -5, -5)
     xCloseBtn:SetScript("OnClick", function()
-        if dontShowCheckbox:GetChecked() then
-            PVPHUB_SETTINGS.welcomeShown = true
-        end
         f:Hide()
     end)
 
