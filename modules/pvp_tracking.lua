@@ -229,6 +229,7 @@ end
 -- Dedicated event frame
 -- --------------------------------------------------------------------------
 
+local _pendingTitleProgressSave = false
 local pvpTrackingFrame = CreateFrame("Frame")
 
 pvpTrackingFrame:RegisterEvent("ADDON_LOADED")
@@ -310,11 +311,20 @@ pvpTrackingFrame:SetScript("OnEvent", function(self, event, arg1, arg2)
         if key then SaveBracketStats(key) end
 
     elseif event == "CRITERIA_UPDATE" or event == "ACHIEVEMENT_EARNED" then
-        -- Title achievement progress changed (e.g. a rated win just landed).
-        -- No cache-readiness gate needed: achievement criteria always reflect
-        -- the currently logged-in character, unlike GetPersonalRatedInfo.
-        local key = GetCurrentCharKey()
-        if key then SaveTitleProgress(key) end
+        -- CRITERIA_UPDATE fires for every achievement criterion in the game,
+        -- not just PvP ones (leveling, gathering, etc. all trigger it too).
+        -- Coalesce rapid-fire updates into a single deferred SaveTitleProgress
+        -- instead of redoing the full per-title GetAchievementInfo/
+        -- GetAchievementProgress pass (plus a SavedVariables write and UI
+        -- update) on every one.
+        if not _pendingTitleProgressSave then
+            _pendingTitleProgressSave = true
+            C_Timer.After(1, function()
+                _pendingTitleProgressSave = false
+                local key = GetCurrentCharKey()
+                if key then SaveTitleProgress(key) end
+            end)
+        end
 
     elseif event == "PVP_MATCH_ACTIVE" then
         -- Rated match is starting; capture current ratings as a baseline

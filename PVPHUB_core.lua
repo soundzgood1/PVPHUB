@@ -2040,10 +2040,28 @@ local function StyleDropdownMenu(level)
     menuFrame._pvpBackdrop:Show()
 end
 
+-- Walks up a dropdown owner's parent chain looking for a PVPHUB-named frame.
+-- ToggleDropDownMenu is Blizzard's shared dropdown system (used by every
+-- addon and most of the Blizzard UI) and DropDownList<level> is a reused
+-- singleton frame, not one per owner — without this check, opening ANY
+-- dropdown anywhere (Blizzard's or another addon's) got silently reskinned
+-- to PVPHUB's theme colors.
+local function IsPVPHUBOwnedFrame(frame)
+    local node = frame
+    for _ = 1, 20 do -- bounded walk; guards against any pathological parent loop
+        if not node then return false end
+        local name = node.GetName and node:GetName()
+        if name and string.find(name, "^PVPHUB") then return true end
+        node = node.GetParent and node:GetParent()
+    end
+    return false
+end
+
 -- Hook into dropdown opening
 hooksecurefunc("ToggleDropDownMenu", function(level)
     -- ElvUI skins dropdowns itself; skip our custom styling to avoid conflicts
     if ElvUI then return end
+    if not IsPVPHUBOwnedFrame(UIDROPDOWNMENU_OPEN_MENU) then return end
     C_Timer.After(0, function()
         StyleDropdownMenu(level or 1)
     end)
@@ -2735,20 +2753,26 @@ local function CreateCharacterTooltip()
 end
 
 -- Helper function to format numbers with thousand separators (e.g., 6110 -> 6.110)
-local function FormatNumberWithSeparators(number)
-    if not number or number == 0 then return "0" end
-    
-    local formatted = tostring(number)
-    local len = #formatted
+-- Thousand-separated number string, e.g. 12345 -> "12.345" (period, not comma
+-- — matches the EU-style separator used throughout PVPHUB's UI).
+local function FormatNumber(num)
+    if not num or num == 0 then return "0" end
+
+    local str = tostring(num)
     local result = ""
-    
+    local len = string.len(str)
+
     for i = 1, len do
-        result = result .. string.sub(formatted, i, i)
-        if (len - i) % 3 == 0 and i < len then
+        local char = string.sub(str, i, i)
+        result = result .. char
+
+        -- Add period every 3 digits from the right
+        local remaining = len - i
+        if remaining > 0 and remaining % 3 == 0 then
             result = result .. "."
         end
     end
-    
+
     return result
 end
 
@@ -2832,20 +2856,20 @@ local function ShowCharacterTooltip(charKey, anchor)
         
         local goldText = ""
         if goldAmount > 0 then
-            goldText = FormatNumberWithSeparators(goldAmount) .. "|TInterface\\MoneyFrame\\UI-GoldIcon:0:0:2:0|t"
+            goldText = FormatNumber(goldAmount) .. "|TInterface\\MoneyFrame\\UI-GoldIcon:0:0:2:0|t"
             if silverAmount > 0 then
-                goldText = goldText .. " " .. FormatNumberWithSeparators(silverAmount) .. "|TInterface\\MoneyFrame\\UI-SilverIcon:0:0:2:0|t"
+                goldText = goldText .. " " .. FormatNumber(silverAmount) .. "|TInterface\\MoneyFrame\\UI-SilverIcon:0:0:2:0|t"
             end
             if copperAmount > 0 then
-                goldText = goldText .. " " .. FormatNumberWithSeparators(copperAmount) .. "|TInterface\\MoneyFrame\\UI-CopperIcon:0:0:2:0|t"
+                goldText = goldText .. " " .. FormatNumber(copperAmount) .. "|TInterface\\MoneyFrame\\UI-CopperIcon:0:0:2:0|t"
             end
         elseif silverAmount > 0 then
-            goldText = FormatNumberWithSeparators(silverAmount) .. "|TInterface\\MoneyFrame\\UI-SilverIcon:0:0:2:0|t"
+            goldText = FormatNumber(silverAmount) .. "|TInterface\\MoneyFrame\\UI-SilverIcon:0:0:2:0|t"
             if copperAmount > 0 then
-                goldText = goldText .. " " .. FormatNumberWithSeparators(copperAmount) .. "|TInterface\\MoneyFrame\\UI-CopperIcon:0:0:2:0|t"
+                goldText = goldText .. " " .. FormatNumber(copperAmount) .. "|TInterface\\MoneyFrame\\UI-CopperIcon:0:0:2:0|t"
             end
         else
-            goldText = FormatNumberWithSeparators(copperAmount) .. "|TInterface\\MoneyFrame\\UI-CopperIcon:0:0:2:0|t"
+            goldText = FormatNumber(copperAmount) .. "|TInterface\\MoneyFrame\\UI-CopperIcon:0:0:2:0|t"
         end
         
         tooltip:AddLine(goldText, 1, 1, 1)
@@ -2920,27 +2944,6 @@ local function GetRatingColor(rating)
 end
 
 -- Function to format numbers with periods as thousand separators (e.g., 15000 -> 15.000)
-local function FormatNumber(num)
-    if not num or num == 0 then return "0" end
-    
-    local str = tostring(num)
-    local result = ""
-    local len = string.len(str)
-    
-    for i = 1, len do
-        local char = string.sub(str, i, i)
-        result = result .. char
-        
-        -- Add period every 3 digits from the right
-        local remaining = len - i
-        if remaining > 0 and remaining % 3 == 0 then
-            result = result .. "."
-        end
-    end
-    
-    return result
-end
-
 local function GetCurrencyColor(amount, currencyType, data)
     local currencyID = CURRENCY_IDS[currencyType]
     local cap = nil
@@ -3930,7 +3933,7 @@ end
 
 -- Helper function to get win/loss statistics for a bracket from Blizzard API
 local function GetWinLossStats(charKey, bracketKey, specID)
-    local currentCharKey = UnitName("player") .. "-" .. GetRealmName()
+    local currentCharKey = GetFullName()
     local currentSeason  = (C_PvP and C_PvP.GetUIDisplaySeason and C_PvP.GetUIDisplaySeason()) or 0
 
     -- ── Helper: read from bracketStats with optional season validation ──────
@@ -8801,1044 +8804,6 @@ SlashCmdList["PVPHUB"] = function(msg)
                 PVPHubPrint("|cffff0000[PVPHUB]|r Failed to build the Settings panel: " .. tostring(buildErr) .. ". Try opening Settings again, or /reload if it keeps failing.")
             end
 
-            --[==[ OLD CODE -- superseded by the collapsible section layout above
-            -- Dark background panels for each column
-            local leftBg = CreateFrame("Frame", nil, settingsFrame, "BackdropTemplate")
-            leftBg:SetPoint("TOPLEFT",     settingsFrame, "TOPLEFT",     8,   -5)
-            leftBg:SetPoint("BOTTOMRIGHT", settingsFrame, "BOTTOMLEFT", 362, -10)
-            leftBg:SetFrameLevel(settingsFrame:GetFrameLevel())
-            leftBg:SetBackdrop({
-                bgFile   = "Interface\\Buttons\\WHITE8x8",
-                edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-                tile = false, tileSize = 16, edgeSize = 10,
-                insets = { left = 3, right = 3, top = 3, bottom = 3 },
-            })
-            leftBg:SetBackdropColor(0.04, 0.04, 0.06, 0.55)
-            leftBg:SetBackdropBorderColor(0.25, 0.18, 0.28, 0.45)
-
-            local rightBg = CreateFrame("Frame", nil, settingsFrame, "BackdropTemplate")
-            rightBg:SetPoint("TOPLEFT",     settingsFrame, "TOPLEFT",      368,  -5)
-            rightBg:SetPoint("BOTTOMRIGHT", settingsFrame, "BOTTOMRIGHT",   -8, -10)
-            rightBg:SetFrameLevel(settingsFrame:GetFrameLevel())
-            rightBg:SetBackdrop({
-                bgFile   = "Interface\\Buttons\\WHITE8x8",
-                edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-                tile = false, tileSize = 16, edgeSize = 10,
-                insets = { left = 3, right = 3, top = 3, bottom = 3 },
-            })
-            rightBg:SetBackdropColor(0.04, 0.04, 0.06, 0.55)
-            rightBg:SetBackdropBorderColor(0.25, 0.18, 0.28, 0.45)
-
-            -- Store refs so the theme system can tint borders on theme change
-            f.settingsLeftBg  = leftBg
-            f.settingsRightBg = rightBg
-            local displayTitle = settingsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-            displayTitle:SetPoint("TOPLEFT", settingsFrame, "TOPLEFT", 20, -15)
-            displayTitle:SetText("Display")
-            RegisterTrackedFont(displayTitle, 16, "OUTLINE")
-            displayTitle:SetTextColor(unpack(UI_CONSTANTS.COLORS.TITLE_COLOR))
-            f.settingsTitle = displayTitle
-            
-            local styleTitle = settingsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-            styleTitle:SetPoint("TOPLEFT", settingsFrame, "TOPLEFT", 380, -15)
-            styleTitle:SetText("Appearance")
-            RegisterTrackedFont(styleTitle, 16, "OUTLINE")
-            styleTitle:SetTextColor(unpack(UI_CONSTANTS.COLORS.TITLE_COLOR))
-            f.styleTitle = styleTitle
-            
-            -- === DISPLAY SECTION (LEFT) ===
-            local hideRealmCheckbox = CreateFrame("CheckButton", nil, settingsFrame, "InterfaceOptionsCheckButtonTemplate")
-            hideRealmCheckbox:SetPoint("TOPLEFT", displayTitle, "BOTTOMLEFT", 5, -10)
-            hideRealmCheckbox.Text:SetText("Hide Realm Names")
-            hideRealmCheckbox.tooltipText = "Hide realm names in character display"
-            
-            if not PVPHUB_SETTINGS.mainWindow then
-                PVPHUB_SETTINGS.mainWindow = {}
-            end
-            hideRealmCheckbox:SetChecked(PVPHUB_SETTINGS.mainWindow.hideServerNames or false)
-            
-            hideRealmCheckbox:SetScript("OnClick", function(self)
-                PVPHUB_SETTINGS.mainWindow.hideServerNames = self:GetChecked()
-                if f.currentTab == "characters" then
-                    if f.UpdateContent then
-                        f:UpdateContent()
-                    end
-                end
-            end)
-            
-            local hideNoRatingsCheckbox = CreateFrame("CheckButton", nil, settingsFrame, "InterfaceOptionsCheckButtonTemplate")
-            hideNoRatingsCheckbox:SetPoint("TOPLEFT", hideRealmCheckbox, "BOTTOMLEFT", 0, -2)
-            hideNoRatingsCheckbox.Text:SetText("Hide Characters with No Ratings")
-            hideNoRatingsCheckbox.tooltipText = "Hide characters that have no rating in any PvP bracket"
-            
-            if not PVPHUB_SETTINGS.mainWindow then
-                PVPHUB_SETTINGS.mainWindow = {}
-            end
-            hideNoRatingsCheckbox:SetChecked(PVPHUB_SETTINGS.mainWindow.hideNoRatings or false)
-            
-            hideNoRatingsCheckbox:SetScript("OnClick", function(self)
-                PVPHUB_SETTINGS.mainWindow.hideNoRatings = self:GetChecked()
-                if f.currentTab == "characters" then
-                    if f.UpdateContent then
-                        f:UpdateContent()
-                    end
-                end
-            end)
-
-            local enableGroupsCheckbox = CreateFrame("CheckButton", nil, settingsFrame, "InterfaceOptionsCheckButtonTemplate")
-            enableGroupsCheckbox:SetPoint("TOPLEFT", hideNoRatingsCheckbox, "BOTTOMLEFT", 0, -2)
-            enableGroupsCheckbox.Text:SetText("Enable Character Groups")
-            
-            enableGroupsCheckbox:SetScript("OnEnter", function(self)
-                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                GameTooltip:SetText("Enable Character Groups", 1, 1, 1)
-                GameTooltip:AddLine("Organize your characters into custom groups that can be collapsed and expanded.", 0.7, 0.7, 0.7, true)
-                GameTooltip:AddLine(" ", 1, 1, 1)
-                GameTooltip:AddLine("Click the '+ New Group' button to create groups, then right-click characters to move them between groups.", 0.7, 0.7, 0.7, true)
-                GameTooltip:Show()
-            end)
-            enableGroupsCheckbox:SetScript("OnLeave", function(self)
-                GameTooltip:Hide()
-            end)
-            
-            if not PVPHUB_SETTINGS.characterGroups then
-                PVPHUB_SETTINGS.characterGroups = {
-                    groups = {
-                        {name = "No Group", characters = {}, collapsed = false, isDefault = true}
-                    },
-                    enabled = false
-                }
-            end
-            enableGroupsCheckbox:SetChecked(PVPHUB_SETTINGS.characterGroups.enabled or false)
-            
-            enableGroupsCheckbox:SetScript("OnClick", function(self)
-                PVPHUB_SETTINGS.characterGroups.enabled = self:GetChecked()
-                if f.currentTab == "characters" then
-                    if f.UpdateContent then
-                        f:UpdateContent()
-                    end
-                    if f.manageGroupsBtn then
-                        if PVPHUB_SETTINGS.characterGroups.enabled then
-                            f.manageGroupsBtn:Show()
-                        else
-                            f.manageGroupsBtn:Hide()
-                        end
-                    end
-                end
-            end)
-            
-            -- === NOTIFICATIONS SECTION ===
-            local notificationsSubtitle = settingsFrame:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-            notificationsSubtitle:SetPoint("TOPLEFT", enableGroupsCheckbox, "BOTTOMLEFT", -5, -20)
-            notificationsSubtitle:SetText("Notifications")
-            notificationsSubtitle:SetTextColor(0.9, 0.9, 0.9, 1)
-            RegisterTrackedFont(notificationsSubtitle, 13, "OUTLINE")
-            
-            local disableHonorWarningsCheckbox = CreateFrame("CheckButton", nil, settingsFrame, "InterfaceOptionsCheckButtonTemplate")
-            disableHonorWarningsCheckbox:SetPoint("TOPLEFT", notificationsSubtitle, "BOTTOMLEFT", 5, -8)
-            disableHonorWarningsCheckbox.Text:SetText("Disable Honor Cap Warnings")
-            disableHonorWarningsCheckbox.tooltipText = "Disable the popup warning when characters reach 14k Honor"
-            
-            PVPHUB_SETTINGS.disableHonorWarnings = PVPHUB_SETTINGS.disableHonorWarnings or false
-            disableHonorWarningsCheckbox:SetChecked(PVPHUB_SETTINGS.disableHonorWarnings)
-            
-            disableHonorWarningsCheckbox:SetScript("OnClick", function(self)
-                PVPHUB_SETTINGS.disableHonorWarnings = self:GetChecked()
-                if PVPHUB_SETTINGS.disableHonorWarnings then
-                    PVPHubPrint("|cffff0000[PVPHUB]|r Honor cap warnings disabled.")
-                else
-                    PVPHubPrint("|cffff0000[PVPHUB]|r Honor cap warnings enabled.")
-                end
-            end)
-            
-            local disablePrintCheckbox = CreateFrame("CheckButton", nil, settingsFrame, "InterfaceOptionsCheckButtonTemplate")
-            disablePrintCheckbox:SetPoint("TOPLEFT", disableHonorWarningsCheckbox, "BOTTOMLEFT", 0, -2)
-            disablePrintCheckbox.Text:SetText("Disable Chat Notifications")
-            
-            PVPHUB_SETTINGS.disablePrintMessages = PVPHUB_SETTINGS.disablePrintMessages or false
-            disablePrintCheckbox:SetChecked(PVPHUB_SETTINGS.disablePrintMessages)
-            
-            disablePrintCheckbox:SetScript("OnClick", function(self)
-                PVPHUB_SETTINGS.disablePrintMessages = self:GetChecked()
-            end)
-            
-            disablePrintCheckbox:SetScript("OnEnter", function(self)
-                GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
-                GameTooltip:SetText("Disable Chat Notifications", 1, 1, 1)
-                GameTooltip:AddLine("Hide addon messages that appear in your chat window", 0.7, 0.7, 0.7, true)
-                GameTooltip:AddLine(" ", 1, 1, 1)
-                GameTooltip:AddLine("Examples of messages that will be hidden:", 1, 0.82, 0)
-                GameTooltip:AddLine("• MMR recorded! New MMR: 1850 (+15)", 0.9, 0.9, 0.9, true)
-                GameTooltip:AddLine("• Note saved: Good healer", 0.9, 0.9, 0.9, true)
-                GameTooltip:AddLine("• Character hidden/unhidden", 0.9, 0.9, 0.9, true)
-                GameTooltip:AddLine("• PvP ratings updated", 0.9, 0.9, 0.9, true)
-                GameTooltip:Show()
-            end)
-            
-            disablePrintCheckbox:SetScript("OnLeave", function(self)
-                GameTooltip:Hide()
-            end)
-
-            local queueTimerCheckbox = CreateFrame("CheckButton", nil, settingsFrame, "InterfaceOptionsCheckButtonTemplate")
-            queueTimerCheckbox:SetPoint("TOPLEFT", disablePrintCheckbox, "BOTTOMLEFT", 0, -2)
-            queueTimerCheckbox.Text:SetText("Show Queue Timer")
-            queueTimerCheckbox.tooltipText = "Show a draggable queue timer widget when you are in a PvP queue"
-
-            if PVPHUB_SETTINGS.queueTimerEnabled == nil then
-                PVPHUB_SETTINGS.queueTimerEnabled = true
-            end
-            queueTimerCheckbox:SetChecked(PVPHUB_SETTINGS.queueTimerEnabled)
-
-            queueTimerCheckbox:SetScript("OnClick", function(self)
-                PVPHUB_SETTINGS.queueTimerEnabled = self:GetChecked()
-                if PVPHUB_SETTINGS.queueTimerEnabled then
-                    if PVPHUB.QueueTimer then
-                        PVPHUB.QueueTimer:Update()
-                    end
-                else
-                    if PVPHUB.QueueTimer then
-                        PVPHUB.QueueTimer:Hide()
-                    end
-                end
-            end)
-
-            queueTimerCheckbox:SetScript("OnEnter", function(self)
-                GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
-                GameTooltip:SetText("Show Queue Timer", 1, 1, 1)
-                GameTooltip:AddLine("Displays a small draggable widget while you are in a PvP queue", 0.7, 0.7, 0.7, true)
-                GameTooltip:AddLine(" ")
-                GameTooltip:AddLine("The timer shows:", 1, 0.82, 0)
-                GameTooltip:AddLine("• Queue name (Solo Shuffle, 2v2, 3v3, BlitzBG)", 0.9, 0.9, 0.9, true)
-                GameTooltip:AddLine("• Average estimated wait time", 0.9, 0.9, 0.9, true)
-                GameTooltip:AddLine("• Your elapsed time in queue", 0.9, 0.9, 0.9, true)
-                GameTooltip:AddLine("• Countdown to accept when the queue pops", 0.9, 0.9, 0.9, true)
-                GameTooltip:Show()
-            end)
-
-            queueTimerCheckbox:SetScript("OnLeave", function(self)
-                GameTooltip:Hide()
-            end)
-
-            -- Queue Timer size slider
-            local queueTimerSizeLabel = settingsFrame:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-            queueTimerSizeLabel:SetPoint("TOPLEFT", queueTimerCheckbox, "BOTTOMLEFT", 22, -6)
-            queueTimerSizeLabel:SetText("Size:")
-            queueTimerSizeLabel:SetTextColor(0.9, 0.9, 0.9, 1)
-
-            PVPHUB_SETTINGS.queueTimerScale = PVPHUB_SETTINGS.queueTimerScale or 1.0
-
-            local queueTimerSizeSlider = CreateFrame("Slider", nil, settingsFrame, "MinimalSliderTemplate")
-            queueTimerSizeSlider:SetPoint("LEFT", queueTimerSizeLabel, "RIGHT", 8, 0)
-            queueTimerSizeSlider:SetSize(100, 15)
-            queueTimerSizeSlider:SetMinMaxValues(1.0, 2.5)
-            queueTimerSizeSlider:SetValue(PVPHUB_SETTINGS.queueTimerScale)
-            queueTimerSizeSlider:SetValueStep(0.05)
-            queueTimerSizeSlider:SetObeyStepOnDrag(true)
-
-            local queueTimerSizeValue = settingsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-            queueTimerSizeValue:SetPoint("LEFT", queueTimerSizeSlider, "RIGHT", 6, 0)
-            queueTimerSizeValue:SetText(string.format("%.0f%%", PVPHUB_SETTINGS.queueTimerScale * 100))
-            queueTimerSizeValue:SetTextColor(1, 1, 1, 1)
-
-            -- Helper: apply scale to the queue timer frame directly, without relying on _G.PVPHUB
-            local function ApplyQueueTimerScale(value)
-                PVPHUB_SETTINGS.queueTimerScale = value
-                queueTimerSizeValue:SetText(string.format("%.0f%%", value * 100))
-                -- Use the local PVPHUB (addon namespace) directly — most reliable path
-                if PVPHUB.QueueTimer and PVPHUB.QueueTimer.frame then
-                    PVPHUB.QueueTimer.frame:SetScale(value)
-                elseif _G.PVPHUBQueueTimerFrame then
-                    -- Named frames are always accessible globally — ultimate fallback
-                    _G.PVPHUBQueueTimerFrame:SetScale(value)
-                end
-            end
-
-            queueTimerSizeSlider:SetScript("OnValueChanged", function(self, value)
-                if not value then return end
-                ApplyQueueTimerScale(value)
-            end)
-
-            -- Track dragging state so OnUpdate can apply scale every frame during drag
-            queueTimerSizeSlider:SetScript("OnMouseDown", function(self, button)
-                if button == "LeftButton" then
-                    self._dragging = true
-                    self._lastScale = self:GetValue()
-                end
-            end)
-
-            queueTimerSizeSlider:SetScript("OnMouseUp", function(self, button)
-                if button == "LeftButton" then
-                    self._dragging = false
-                    ApplyQueueTimerScale(self:GetValue())
-                end
-            end)
-
-            -- OnUpdate guarantees real-time scale changes every rendered frame while dragging
-            queueTimerSizeSlider:SetScript("OnUpdate", function(self)
-                if not self._dragging then return end
-                local value = self:GetValue()
-                if value == self._lastScale then return end
-                self._lastScale = value
-                ApplyQueueTimerScale(value)
-            end)
-
-            -- Hide Queue Timer in Instances checkbox
-            local hideInInstancesCheckbox = CreateFrame("CheckButton", nil, settingsFrame, "InterfaceOptionsCheckButtonTemplate")
-            hideInInstancesCheckbox:SetPoint("TOPLEFT", queueTimerSizeLabel, "BOTTOMLEFT", -22, -14)
-            hideInInstancesCheckbox.Text:SetText("Hide Queue Timer in Arenas/BGs")
-            hideInInstancesCheckbox.tooltipText = "Automatically hide the queue timer widget while inside arenas or battlegrounds"
-
-            if not PVPHUB_SETTINGS.queueTimer then PVPHUB_SETTINGS.queueTimer = {} end
-            if PVPHUB_SETTINGS.queueTimer.hideInInstances == nil then
-                PVPHUB_SETTINGS.queueTimer.hideInInstances = true
-            end
-            hideInInstancesCheckbox:SetChecked(PVPHUB_SETTINGS.queueTimer.hideInInstances)
-
-            hideInInstancesCheckbox:SetScript("OnClick", function(self)
-                if not PVPHUB_SETTINGS.queueTimer then PVPHUB_SETTINGS.queueTimer = {} end
-                PVPHUB_SETTINGS.queueTimer.hideInInstances = self:GetChecked()
-                if PVPHUB.QueueTimer then
-                    PVPHUB.QueueTimer:Update()
-                end
-            end)
-
-            hideInInstancesCheckbox:SetScript("OnEnter", function(self)
-                GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
-                GameTooltip:SetText("Hide Queue Timer in Arenas/BGs", 1, 1, 1)
-                GameTooltip:AddLine("Hides the queue timer widget while inside arenas or battlegrounds", 0.7, 0.7, 0.7, true)
-                GameTooltip:AddLine("The timer resumes displaying once you leave the instance", 0.7, 0.7, 0.7, true)
-                GameTooltip:Show()
-            end)
-
-            hideInInstancesCheckbox:SetScript("OnLeave", function(self)
-                GameTooltip:Hide()
-            end)
-
-            -- Queue Timer Opacity row
-            local qtOpacityLabel = settingsFrame:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-            qtOpacityLabel:SetPoint("TOPLEFT", hideInInstancesCheckbox, "BOTTOMLEFT", 22, -6)
-            qtOpacityLabel:SetText("Opacity:")
-            qtOpacityLabel:SetTextColor(0.9, 0.9, 0.9, 1)
-
-            if PVPHUB_SETTINGS.queueTimer.opacity == nil then
-                PVPHUB_SETTINGS.queueTimer.opacity = 0.95
-            end
-
-            local qtOpacitySlider = CreateFrame("Slider", nil, settingsFrame, "MinimalSliderTemplate")
-            qtOpacitySlider:SetPoint("LEFT", qtOpacityLabel, "RIGHT", 8, 0)
-            qtOpacitySlider:SetSize(100, 15)
-            qtOpacitySlider:SetMinMaxValues(0.0, 1.0)
-            qtOpacitySlider:SetValue(PVPHUB_SETTINGS.queueTimer.opacity)
-            qtOpacitySlider:SetValueStep(0.01)
-            qtOpacitySlider:SetObeyStepOnDrag(true)
-
-            local qtOpacityValue = settingsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-            qtOpacityValue:SetPoint("LEFT", qtOpacitySlider, "RIGHT", 6, 0)
-            qtOpacityValue:SetText(string.format("%.0f%%", PVPHUB_SETTINGS.queueTimer.opacity * 100))
-            qtOpacityValue:SetTextColor(1, 1, 1, 1)
-
-            -- Helper: apply opacity directly via local namespace + named-frame fallback
-            local function ApplyQueueTimerOpacity(value)
-                if not PVPHUB_SETTINGS.queueTimer then PVPHUB_SETTINGS.queueTimer = {} end
-                PVPHUB_SETTINGS.queueTimer.opacity = value
-                qtOpacityValue:SetText(string.format("%.0f%%", value * 100))
-                if PVPHUB.QueueTimer and PVPHUB.QueueTimer.frame then
-                    PVPHUB.QueueTimer:ApplyOpacity()
-                elseif _G.PVPHUBQueueTimerFrame then
-                    local f = _G.PVPHUBQueueTimerFrame
-                    f:SetBackdropColor(0.08, 0.05, 0.05, value)
-                    f:SetBackdropBorderColor(0.35, 0.2, 0.25, value)
-                end
-            end
-
-            qtOpacitySlider:SetScript("OnValueChanged", function(self, value)
-                if not value then return end
-                ApplyQueueTimerOpacity(value)
-            end)
-
-            qtOpacitySlider:SetScript("OnMouseDown", function(self, button)
-                if button == "LeftButton" then
-                    self._dragging = true
-                    self._lastOpacity = self:GetValue()
-                end
-            end)
-
-            qtOpacitySlider:SetScript("OnMouseUp", function(self, button)
-                if button == "LeftButton" then
-                    self._dragging = false
-                    ApplyQueueTimerOpacity(self:GetValue())
-                end
-            end)
-
-            qtOpacitySlider:SetScript("OnUpdate", function(self)
-                if not self._dragging then return end
-                local value = self:GetValue()
-                if value == self._lastOpacity then return end
-                self._lastOpacity = value
-                ApplyQueueTimerOpacity(value)
-            end)
-
-            qtOpacitySlider:SetScript("OnEnter", function(self)
-                GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
-                GameTooltip:SetText("Queue Timer Opacity", 1, 1, 1)
-                GameTooltip:AddLine("Adjust the transparency of the queue timer widget (0% - 100%)", 0.7, 0.7, 0.7, true)
-                GameTooltip:Show()
-            end)
-
-            qtOpacitySlider:SetScript("OnLeave", function(self)
-                GameTooltip:Hide()
-            end)
-
-            -- Queue Timer Font Outline checkbox
-            local qtOutlineCheckbox = CreateFrame("CheckButton", nil, settingsFrame, "InterfaceOptionsCheckButtonTemplate")
-            qtOutlineCheckbox:SetPoint("TOPLEFT", qtOpacityLabel, "BOTTOMLEFT", -22, -10)
-            qtOutlineCheckbox.Text:SetText("Font Outline")
-            qtOutlineCheckbox.tooltipText = "Add an outline to the queue timer font for better readability"
-
-            if PVPHUB_SETTINGS.queueTimer.fontOutline == nil then
-                PVPHUB_SETTINGS.queueTimer.fontOutline = true
-            end
-            qtOutlineCheckbox:SetChecked(PVPHUB_SETTINGS.queueTimer.fontOutline)
-
-            qtOutlineCheckbox:SetScript("OnClick", function(self)
-                if not PVPHUB_SETTINGS.queueTimer then PVPHUB_SETTINGS.queueTimer = {} end
-                PVPHUB_SETTINGS.queueTimer.fontOutline = self:GetChecked()
-                if PVPHUB.QueueTimer then
-                    PVPHUB.QueueTimer:_ScaleFonts()
-                end
-            end)
-
-            qtOutlineCheckbox:SetScript("OnEnter", function(self)
-                GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
-                GameTooltip:SetText("Queue Timer Font Outline", 1, 1, 1)
-                GameTooltip:AddLine("Toggle the text outline on queue timer labels", 0.7, 0.7, 0.7, true)
-                GameTooltip:Show()
-            end)
-
-            qtOutlineCheckbox:SetScript("OnLeave", function(self)
-                GameTooltip:Hide()
-            end)
-
-            -- Match Ready Sound dropdown
-            if PVPHUB_SETTINGS.queueTimer.readySound == nil then
-                PVPHUB_SETTINGS.queueTimer.readySound = "PvP Queue Ready"
-            end
-            local qtSoundLabel = settingsFrame:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-            qtSoundLabel:SetPoint("TOPLEFT", qtOutlineCheckbox, "BOTTOMLEFT", 22, -10)
-            qtSoundLabel:SetText("Match Ready Sound:")
-            qtSoundLabel:SetTextColor(0.9, 0.9, 0.9, 1)
-
-            local qtSoundDropdown = CreateFrame("Frame", "PVPHUBSoundDropdown", settingsFrame, "UIDropDownMenuTemplate")
-            qtSoundDropdown:SetPoint("LEFT", qtSoundLabel, "RIGHT", -10, 0)
-            UIDropDownMenu_SetWidth(qtSoundDropdown, 120)
-            UIDropDownMenu_SetText(qtSoundDropdown, PVPHUB_SETTINGS.queueTimer.readySound)
-
-            UIDropDownMenu_Initialize(qtSoundDropdown, function(self, level)
-                for _, opt in ipairs(PVPHUB.QueueTimer.SOUND_OPTIONS) do
-                    local info = UIDropDownMenu_CreateInfo()
-                    info.text    = opt.label
-                    info.value   = opt.label
-                    info.checked = (PVPHUB_SETTINGS.queueTimer.readySound == opt.label)
-                    info.func    = function()
-                        PVPHUB_SETTINGS.queueTimer.readySound = opt.label
-                        UIDropDownMenu_SetText(qtSoundDropdown, opt.label)
-                        if opt.id then
-                            PlaySound(opt.id, "Master")
-                        end
-                    end
-                    UIDropDownMenu_AddButton(info)
-                end
-            end)
-
-            -- Queue Pop Volume slider
-            if PVPHUB_SETTINGS.queueTimer.readySoundVolume == nil then
-                PVPHUB_SETTINGS.queueTimer.readySoundVolume = 100
-            end
-            local qtVolLabel2 = settingsFrame:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-            qtVolLabel2:SetPoint("TOPLEFT", qtSoundLabel, "BOTTOMLEFT", 0, -10)
-            qtVolLabel2:SetText("Queue Pop Volume:")
-            qtVolLabel2:SetTextColor(0.9, 0.9, 0.9, 1)
-
-            local qtVolSlider2 = CreateFrame("Slider", nil, settingsFrame, "MinimalSliderTemplate")
-            qtVolSlider2:SetPoint("LEFT", qtVolLabel2, "RIGHT", 8, 0)
-            qtVolSlider2:SetSize(110, 15)
-            qtVolSlider2:SetMinMaxValues(0, 100)
-            qtVolSlider2:SetValueStep(5)
-            qtVolSlider2:SetObeyStepOnDrag(true)
-            qtVolSlider2:SetValue(PVPHUB_SETTINGS.queueTimer.readySoundVolume)
-
-            local qtVolValue2 = settingsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-            qtVolValue2:SetPoint("LEFT", qtVolSlider2, "RIGHT", 8, 0)
-            qtVolValue2:SetText(PVPHUB_SETTINGS.queueTimer.readySoundVolume .. "%")
-            qtVolValue2:SetTextColor(1, 1, 1, 1)
-
-            qtVolSlider2:SetScript("OnValueChanged", function(self, value)
-                local v = math.floor(value + 0.5)
-                PVPHUB_SETTINGS.queueTimer.readySoundVolume = v
-                qtVolValue2:SetText(v .. "%")
-            end)
-            qtVolSlider2:SetScript("OnEnter", function(self)
-                GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
-                GameTooltip:SetText("Queue Pop Volume", 1, 1, 1)
-                GameTooltip:AddLine("Adjusts the volume of the match-ready sound alert", 0.7, 0.7, 0.7, true)
-                GameTooltip:AddLine("100% = full volume  |  0% = silent", 0.7, 0.7, 0.7, true)
-                GameTooltip:Show()
-            end)
-            qtVolSlider2:SetScript("OnLeave", function() GameTooltip:Hide() end)
-
-            -- Play Sound button
-            local qtPlaySoundBtn2 = CreateFrame("Button", nil, settingsFrame, "UIPanelButtonTemplate")
-            qtPlaySoundBtn2:SetSize(100, 25)
-            qtPlaySoundBtn2:SetPoint("TOPLEFT", qtVolLabel2, "BOTTOMLEFT", 0, -10)
-            qtPlaySoundBtn2:SetText("Play Sound")
-            qtPlaySoundBtn2:GetFontString():SetTextColor(1, 1, 1)
-            qtPlaySoundBtn2:SetScript("OnClick", function()
-                if PVPHUB.QueueTimer then
-                    PVPHUB.QueueTimer:PlayReadySound()
-                end
-            end)
-            qtPlaySoundBtn2:SetScript("OnEnter", function(self)
-                GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
-                GameTooltip:SetText("Play Sound", 1, 1, 1)
-                GameTooltip:AddLine("Preview the match-ready alert at the current volume", 0.7, 0.7, 0.7, true)
-                GameTooltip:Show()
-            end)
-            qtPlaySoundBtn2:SetScript("OnLeave", function() GameTooltip:Hide() end)
-
-            local streamerSubtitle = settingsFrame:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-            streamerSubtitle:SetPoint("TOPLEFT", qtPlaySoundBtn2, "BOTTOMLEFT", -22, -10)
-            streamerSubtitle:SetText("Streamer Mode Settings")
-
-            local disableStreamerModeCheckbox = CreateFrame("CheckButton", nil, settingsFrame, "InterfaceOptionsCheckButtonTemplate")
-            disableStreamerModeCheckbox:SetPoint("TOPLEFT", streamerSubtitle, "BOTTOMLEFT", 5, -4)
-            disableStreamerModeCheckbox.Text:SetText("Disable Streamer Mode")
-
-            disableStreamerModeCheckbox:SetScript("OnEnter", function(self)
-                GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
-                GameTooltip:SetText("Disable Streamer Mode", 1, 0.8, 0)
-                GameTooltip:AddLine("Prevents the Streamer Mode window from being opened or auto-restored on login", 1, 1, 1, true)
-                GameTooltip:AddLine("Hides the Streamer Mode button inside the main window", 0.8, 0.8, 0.8, true)
-                GameTooltip:Show()
-            end)
-            disableStreamerModeCheckbox:SetScript("OnLeave", function(self)
-                GameTooltip:Hide()
-            end)
-
-            if PVPHUB_SETTINGS.disableStreamerMode == nil then
-                PVPHUB_SETTINGS.disableStreamerMode = false
-            end
-            disableStreamerModeCheckbox:SetChecked(PVPHUB_SETTINGS.disableStreamerMode)
-
-            -- Apply initial button visibility
-            if f.compactToggleBtn then
-                f.compactToggleBtn:SetShown(not PVPHUB_SETTINGS.disableStreamerMode)
-            end
-
-            disableStreamerModeCheckbox:SetScript("OnClick", function(self)
-                PVPHUB_SETTINGS.disableStreamerMode = self:GetChecked()
-                if f.compactToggleBtn then
-                    f.compactToggleBtn:SetShown(not PVPHUB_SETTINGS.disableStreamerMode)
-                end
-                if PVPHUB_SETTINGS.disableStreamerMode then
-                    PVPHUB_SETTINGS.compactWindowStayOpen = false
-                    if PVPHUB.compactWindow and PVPHUB.compactWindow:IsShown() then
-                        PVPHUB.compactWindow:Hide()
-                    end
-                end
-            end)
-
-            -- === APPEARANCE SECTION (RIGHT) ===
-            -- Fonts subtitle
-            local fontsSubtitle = settingsFrame:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-            fontsSubtitle:SetPoint("TOPLEFT", styleTitle, "BOTTOMLEFT", 0, -10)
-            fontsSubtitle:SetText("Font")
-            fontsSubtitle:SetTextColor(0.9, 0.9, 0.9, 1)
-            RegisterTrackedFont(fontsSubtitle, 13, "OUTLINE")
-            f.fontsSubtitle = fontsSubtitle
-            
-            -- === MATCH HISTORY ===
-            local historySubtitle = settingsFrame:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-            historySubtitle:SetPoint("TOPLEFT", disableStreamerModeCheckbox, "BOTTOMLEFT", -5, -16)
-            historySubtitle:SetText("Match History")
-            historySubtitle:SetTextColor(0.9, 0.9, 0.9, 1)
-            RegisterTrackedFont(historySubtitle, 13, "OUTLINE")
-            
-            PVPHUB_SETTINGS.matchHistoryEntries = PVPHUB_SETTINGS.matchHistoryEntries or 1
-            
-            local historyLabel = settingsFrame:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-            historyLabel:SetPoint("TOPLEFT", historySubtitle, "BOTTOMLEFT", 5, -10)
-            historyLabel:SetText("Entries:")
-            historyLabel:SetTextColor(0.9, 0.9, 0.9, 1)
-            
-            local historySlider = CreateFrame("Slider", nil, settingsFrame, "MinimalSliderTemplate")
-            historySlider:SetPoint("LEFT", historyLabel, "RIGHT", 10, 0)
-            historySlider:SetSize(80, 15)
-            historySlider:SetMinMaxValues(1, 5)
-            historySlider:SetValue(PVPHUB_SETTINGS.matchHistoryEntries)
-            historySlider:SetValueStep(1)
-            historySlider:SetObeyStepOnDrag(true)
-            
-            local historyValue = settingsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-            historyValue:SetPoint("LEFT", historySlider, "RIGHT", 5, 0)
-            historyValue:SetText(PVPHUB_SETTINGS.matchHistoryEntries)
-            historyValue:SetTextColor(1, 1, 1, 1)
-            
-            local isDragging = false
-            
-            historySlider:SetScript("OnValueChanged", function(self, value)
-                if not value then return end
-                local newValue = math.floor(value + 0.5)
-                PVPHUB_SETTINGS.matchHistoryEntries = newValue
-                historyValue:SetText(newValue)
-            end)
-            
-            historySlider:SetScript("OnMouseDown", function(self)
-                isDragging = true
-            end)
-            
-            historySlider:SetScript("OnMouseUp", function(self)
-                if isDragging then
-                    isDragging = false
-                    StaticPopup_Show("PVPHUB_RELOAD_UI")
-                end
-            end)
-            
-            historySlider:SetScript("OnEnter", function(self)
-                GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
-                GameTooltip:SetText("Match History Entries", 1, 1, 1)
-                GameTooltip:AddLine("Number of matches in bracket tooltips (1-5)", 0.7, 0.7, 0.7, true)
-                GameTooltip:AddLine("Requires /reload to apply", 1, 0.8, 0, true)
-                GameTooltip:Show()
-            end)
-            
-            historySlider:SetScript("OnLeave", function(self)
-                GameTooltip:Hide()
-            end)
-            
-            local dateFormatLabel = settingsFrame:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-            dateFormatLabel:SetPoint("TOPLEFT", historyLabel, "BOTTOMLEFT", 0, -15)
-            dateFormatLabel:SetText("Date Format:")
-            dateFormatLabel:SetTextColor(0.9, 0.9, 0.9, 1)
-            
-            local dateFormatDropdown = CreateFrame("Frame", nil, settingsFrame, "UIDropDownMenuTemplate")
-            dateFormatDropdown:SetPoint("TOPLEFT", dateFormatLabel, "BOTTOMLEFT", -15, -3)
-            UIDropDownMenu_SetWidth(dateFormatDropdown, 135)
-            ApplyModernDropdownStyling(dateFormatDropdown)
-            f.dateFormatDropdown = dateFormatDropdown
-
-            -- Auto-detect region and set as default
-            if not PVPHUB_SETTINGS.dateFormat or PVPHUB_SETTINGS.dateFormat == "AUTO" then
-                local locale = GetLocale()
-                if locale == "enUS" or locale == "esMX" then
-                    PVPHUB_SETTINGS.dateFormat = "US"
-                else
-                    PVPHUB_SETTINGS.dateFormat = "EU"
-                end
-            end
-            
-            local dateFormatOptions = {
-                EU = "DD.MM.YY (EU)",
-                US = "MM.DD.YY (US)"
-            }
-            
-            UIDropDownMenu_SetText(dateFormatDropdown, dateFormatOptions[PVPHUB_SETTINGS.dateFormat])
-            
-            local function OnDateFormatSelect(self)
-                PVPHUB_SETTINGS.dateFormat = self.value
-                UIDropDownMenu_SetText(dateFormatDropdown, dateFormatOptions[self.value])
-                PVPHubPrint("|cffff0000[PVPHUB]|r Date format: " .. dateFormatOptions[self.value])
-                StaticPopup_Show("PVPHUB_RELOAD_UI")
-            end
-            
-            UIDropDownMenu_Initialize(dateFormatDropdown, function(self, level)
-                local info = UIDropDownMenu_CreateInfo()
-                
-                info.text = "DD.MM.YY (EU)"
-                info.value = "EU"
-                info.func = OnDateFormatSelect
-                info.checked = PVPHUB_SETTINGS.dateFormat == "EU"
-                UIDropDownMenu_AddButton(info)
-                
-                info.text = "MM.DD.YY (US)"
-                info.value = "US"
-                info.func = OnDateFormatSelect
-                info.checked = PVPHUB_SETTINGS.dateFormat == "US"
-                UIDropDownMenu_AddButton(info)
-            end)
-            
-
-            -- === ADVANCED SECTION (BOTTOM) ===
-            local advancedTitle = settingsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-            advancedTitle:SetPoint("TOPLEFT", dateFormatDropdown, "BOTTOMLEFT", 15, -30)
-            advancedTitle:SetText("Advanced")
-            RegisterTrackedFont(advancedTitle, 16, "OUTLINE")
-            advancedTitle:SetTextColor(unpack(UI_CONSTANTS.COLORS.TITLE_COLOR))
-            
-            -- Manage Hidden Characters button
-            local hiddenCharsButton = CreateFrame("Button", nil, settingsFrame, "UIPanelButtonTemplate")
-            hiddenCharsButton:SetSize(180, 25)
-            hiddenCharsButton:SetPoint("TOPLEFT", advancedTitle, "BOTTOMLEFT", 5, -10)
-            hiddenCharsButton:SetText("Manage Hidden Characters")
-            
-            hiddenCharsButton:SetScript("OnClick", function(self)
-                ShowHiddenCharactersWindow()
-            end)
-            
-            hiddenCharsButton:SetScript("OnEnter", function(self)
-                GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
-                GameTooltip:SetText("Manage Hidden Characters", 1, 0.8, 0)
-                GameTooltip:AddLine("View and unhide characters that are currently hidden", 1, 1, 1, true)
-                GameTooltip:Show()
-            end)
-            
-            hiddenCharsButton:SetScript("OnLeave", function(self)
-                GameTooltip:Hide()
-            end)
-
-            local resetButton = CreateFrame("Button", nil, settingsFrame, "UIPanelButtonTemplate")
-            resetButton:SetSize(180, 25)
-            resetButton:SetPoint("TOPLEFT", hiddenCharsButton, "BOTTOMLEFT", 0, -5)
-            resetButton:SetText("Reset All Data")
-            
-            -- Style the button to look like a warning/danger button
-            resetButton:GetFontString():SetTextColor(1, 1, 1) -- White text
-            
-            resetButton:SetScript("OnClick", function(self)
-                -- Create confirmation popup
-                StaticPopup_Show("PVPHUB_RESET_ALL_DATA")
-            end)
-            
-            resetButton:SetScript("OnEnter", function(self)
-                GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
-                GameTooltip:SetText("Reset All Character Data", 1, 0.2, 0.2)
-                GameTooltip:AddLine("This will permanently delete ALL character PvP data", 1, 1, 0, true)
-                GameTooltip:AddLine("This action cannot be undone!", 1, 0.2, 0.2, true)
-                GameTooltip:Show()
-            end)
-            
-            resetButton:SetScript("OnLeave", function(self)
-                GameTooltip:Hide()
-            end)
-
-            -- Store reference to reset button for positioning developer credit
-            f.resetButton = resetButton
-            
-            -- Font Selection
-            PVPHUB_SETTINGS.selectedFont = PVPHUB_SETTINGS.selectedFont or "Friz Quadrata TT"
-            if not PVPHUB.currentFontPath then PVPHUB.currentFontPath = "Fonts\\FRIZQT__.TTF" end
-
-            local function ApplyFontChanges()
-                if f.ApplyFont then f:ApplyFont() end
-                if f.UpdateGreetingLayout then f:UpdateGreetingLayout() end
-                -- Push the new font to everything else that tracks it: Settings/
-                -- Stats tab chrome, hover tooltips, and the Queue Timer window.
-                -- Streamer Mode is deliberately not touched here — it keeps its
-                -- own independent font setting (compactMode.selectedFont).
-                PVPHUB:RefreshTrackedFonts()
-                if PVPHUB.QueueTimer and PVPHUB.QueueTimer._ScaleFonts then
-                    PVPHUB.QueueTimer:_ScaleFonts()
-                end
-            end
-
-            local function GetAvailableFonts()
-                local seen, fonts = {}, {}
-                local function add(n) if not seen[n] then seen[n]=true; table.insert(fonts,n) end end
-                local builtIn = {["Friz Quadrata TT"]="Fonts\\FRIZQT__.TTF",["Arial Narrow"]="Fonts\\ARIALN.TTF",["Morpheus"]="Fonts\\MORPHEUS.TTF",["Skurri"]="Fonts\\skurri.ttf"}
-                for n in pairs(builtIn) do add(n) end
-                for _, e in ipairs(PVPHUB.bundledFonts or {}) do add(e[1]) end
-                if LibStub then
-                    local LSM = LibStub("LibSharedMedia-3.0", true)
-                    if LSM then for _, n in ipairs(LSM:List("font") or {}) do add(n) end end
-                end
-                table.sort(fonts)
-                return fonts
-            end
-
-            local fontDropdown = PVPHUB_CreateFontPicker(settingsFrame, fontsSubtitle, "BOTTOMLEFT", -15, -8, 200,
-                function() return PVPHUB_SETTINGS.selectedFont end,
-                function(name)
-                    PVPHUB_SETTINGS.selectedFont = name
-                    ApplyFontChanges()
-                    PVPHubPrint("|cffff0000[PVPHUB]|r Font: |cffffff00" .. name .. "|r")
-                end,
-                GetAvailableFonts)
-            ApplyModernDropdownStyling(fontDropdown)
-            ApplyFontChanges()
-            f.fontDropdown = fontDropdown
-
-            -- Theme subtitle
-            local themeSubtitle = settingsFrame:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-            themeSubtitle:SetPoint("TOPLEFT", fontDropdown, "BOTTOMLEFT", 0, -20)
-            themeSubtitle:SetText("Theme")
-            themeSubtitle:SetTextColor(0.9, 0.9, 0.9, 1)
-            RegisterTrackedFont(themeSubtitle, 13, "OUTLINE")
-            f.themeSubtitle = themeSubtitle
-            
-            -- Theme Selection Dropdown
-            local themeDropdown = CreateFrame("Frame", "PVPHUBThemeDropdown", settingsFrame, "UIDropDownMenuTemplate")
-            themeDropdown:SetPoint("TOPLEFT", themeSubtitle, "BOTTOMLEFT", -15, -8)
-            UIDropDownMenu_SetWidth(themeDropdown, 120)
-            ApplyModernDropdownStyling(themeDropdown)
-
-            -- Set current theme text with simplified names
-            local themeNames = { BLUE = "Blue", RED = "Red", DARK = "Dark", MIDNIGHT = "Midnight", AURORA = "Aurora", CLASS = "Class" }
-            local currentTheme = PVPHUB_SETTINGS.colorTheme or "RED"
-            UIDropDownMenu_SetText(themeDropdown, themeNames[currentTheme] or "Theme")
-
-            -- Store reference for refresh function
-            f.themeDropdown = themeDropdown
-
-            local function OnThemeSelect(self)
-                PVPHUB_SETTINGS.colorTheme = self.value
-                UIDropDownMenu_SetText(themeDropdown, themeNames[self.value] or self.value)
-                ApplyTheme()
-
-                -- Update main window colors directly without RefreshAllWindows
-                if f then
-                    -- Apply theme colors with saved transparency
-                    local bgColor = UI_CONSTANTS.COLORS.WINDOW_BG
-                    local opacity = PVPHUB_SETTINGS.windowOpacity or 0.95
-                    f:SetBackdropColor(bgColor[1], bgColor[2], bgColor[3], bgColor[4] * opacity)
-                    f:SetBackdropBorderColor(unpack(UI_CONSTANTS.COLORS.WINDOW_BORDER))
-
-
-                    -- Tab recoloring now happens via f.ApplyTabThemeColors()
-                    -- below (the custom tab bar's own theme-aware refresh),
-                    -- which supersedes the Blizzard-tab-texture hack that used
-                    -- to live inline here.
-
-                    -- Update title color
-                    if f.title then
-                        f.title:SetTextColor(unpack(UI_CONSTANTS.COLORS.TITLE_COLOR))
-                    end
-                    
-                    -- Update scale label color
-                    if f.scaleLabel then
-                        f.scaleLabel:SetTextColor(unpack(UI_CONSTANTS.COLORS.HEADER_COLOR))
-                    end
-                    
-                    -- Update glow frame color if it exists (preserve transparency)
-                    local children = {f:GetChildren()}
-                    for _, child in ipairs(children) do
-                        if child and child.SetBackdropBorderColor and child ~= f then -- This is likely the glow frame
-                            child:SetBackdropBorderColor(0, 0, 0, 0)
-                            break
-                        end
-                    end
-                end
-                
-                -- Apply theme colors to tabs using our new system
-                if f.ApplyTabThemeColors then
-                    f.ApplyTabThemeColors()
-                end
-                
-                -- Update settings frame colors if it exists and we're in settings tab
-                if f.currentTab == "settings" and f.settingsFrame and f.settingsTitle then
-                    -- Update settings title color
-                    f.settingsTitle:SetTextColor(unpack(UI_CONSTANTS.COLORS.TITLE_COLOR))
-                    
-                    -- Update Style Settings title color
-                    if f.styleTitle then
-                        f.styleTitle:SetTextColor(unpack(UI_CONSTANTS.COLORS.TITLE_COLOR))
-                    end
-                    
-                    -- Update subtitle colors
-                    if f.fontsSubtitle then
-                        f.fontsSubtitle:SetTextColor(unpack(UI_CONSTANTS.COLORS.HEADER_COLOR))
-                    end
-                    if f.themeSubtitle then
-                        f.themeSubtitle:SetTextColor(unpack(UI_CONSTANTS.COLORS.HEADER_COLOR))
-                    end
-                    if f.transparencySubtitle then
-                        f.transparencySubtitle:SetTextColor(unpack(UI_CONSTANTS.COLORS.HEADER_COLOR))
-                    end
-                    
-                    -- Update developer credit color
-                    if f.developerCredit then
-                        f.developerCredit:SetTextColor(0.8, 0.8, 0.8, 1) -- Keep subtle gray color
-                    end
-
-                    -- Update settings panel background border colors to match theme
-                    local accent = UI_CONSTANTS.COLORS.COMPACT_BORDER or UI_CONSTANTS.COLORS.WINDOW_BORDER or { 0.3, 0.3, 0.35, 0.8 }
-                    if f.settingsLeftBg then
-                        f.settingsLeftBg:SetBackdropBorderColor(accent[1], accent[2], accent[3], 0.45)
-                    end
-                    if f.settingsRightBg then
-                        f.settingsRightBg:SetBackdropBorderColor(accent[1], accent[2], accent[3], 0.45)
-                    end
-                    
-                    -- Also update summary text color if it exists
-                    if f.honorText then
-                        f.honorText:SetTextColor(1, 1, 1, 1)
-                        if f.conquestText then f.conquestText:SetTextColor(1, 1, 1, 1) end
-                        if f.goldText then f.goldText:SetTextColor(1, 1, 1, 1) end
-                    end
-                end
-                
-                -- Update greeting underline color
-                if f.titleLine then
-                    f.titleLine:SetVertexColor(unpack(UI_CONSTANTS.COLORS.ACCENT_LINE))
-                end
-                
-                -- Only update content if we're in characters tab - NO RefreshAllWindows call
-                if f.currentTab == "characters" and f.UpdateContent then
-                    f:UpdateContent()
-                end
-
-                -- Refresh close button with theme glow color
-                if f.closeButton then
-                    local cb = f.closeButton
-                    if cb.normalTex    then cb.normalTex:SetVertexColor(0.82, 0.82, 0.88, 1) end
-                    if cb.pushedTex    then cb.pushedTex:SetVertexColor(0.55, 0.55, 0.60, 1) end
-                    if cb.highlightTex then cb.highlightTex:SetVertexColor(1, 1, 1, 1) end
-                end
-
-
-                -- Refresh dropdown colors to match new theme
-                local dds = { _G["PVPHUBSortDropdown"], _G["PVPHUBColumnDropdown"], _G["PVPHUBThemeDropdown"] }
-                if f.fontDropdown  then table.insert(dds, f.fontDropdown)  end
-                if f.themeDropdown then table.insert(dds, f.themeDropdown) end
-                for _, dd in ipairs(dds) do RefreshDropdownColors(dd) end
-
-                -- Show brief confirmation message
-                PVPHubPrint("|cffff0000[PVPHUB]|r Theme changed to " .. self.value .. "!")
-            end
-            
-            UIDropDownMenu_Initialize(themeDropdown, function(self, level, menuList)
-                local themes = {
-                    { text = "Blue",     value = "BLUE" },
-                    { text = "Red",      value = "RED" },
-                    { text = "Dark",     value = "DARK" },
-                    { text = "Midnight", value = "MIDNIGHT" },
-                    { text = "Aurora",   value = "AURORA" },
-                    { text = "Class",    value = "CLASS" },
-                }
-
-                for _, theme in ipairs(themes) do
-                    local info = UIDropDownMenu_CreateInfo()
-                    info.text = theme.text
-                    info.value = theme.value
-                    info.func = OnThemeSelect
-                    info.checked = PVPHUB_SETTINGS.colorTheme == theme.value
-                    UIDropDownMenu_AddButton(info)
-                end
-            end)
-
-            -- Transparency subtitle
-            local transparencySubtitle = settingsFrame:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-            transparencySubtitle:SetPoint("TOPLEFT", themeDropdown, "BOTTOMLEFT", 15, -8)
-            transparencySubtitle:SetText("Transparency")
-            transparencySubtitle:SetTextColor(0.9, 0.9, 0.9, 1)
-            RegisterTrackedFont(transparencySubtitle, 13, "OUTLINE")
-            f.transparencySubtitle = transparencySubtitle
-            
-            -- Initialize transparency setting (default 95% opacity)
-            PVPHUB_SETTINGS.windowOpacity = PVPHUB_SETTINGS.windowOpacity or 0.95
-            
-            -- Transparency slider
-            local transparencySlider = CreateFrame("Slider", nil, settingsFrame, "MinimalSliderTemplate")
-            transparencySlider:SetPoint("TOPLEFT", transparencySubtitle, "BOTTOMLEFT", -5, -10)
-            transparencySlider:SetSize(150, 12)
-            transparencySlider:SetMinMaxValues(0.5, 1.0)
-            transparencySlider:SetValue(PVPHUB_SETTINGS.windowOpacity)
-            transparencySlider:SetValueStep(0.05)
-            transparencySlider:SetObeyStepOnDrag(true)
-            
-            -- Transparency value label
-            local transparencyValueLabel = settingsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-            transparencyValueLabel:SetPoint("LEFT", transparencySlider, "RIGHT", 10, 0)
-            transparencyValueLabel:SetText(math.floor(PVPHUB_SETTINGS.windowOpacity * 100 + 0.5) .. "%")
-            transparencyValueLabel:SetTextColor(unpack(UI_CONSTANTS.COLORS.HEADER_COLOR))
-            
-            -- Function to apply transparency to tabs
-            local function ApplyTabTransparency(opacity)
-                -- opacity is ignored here — PVPHUB_SETTINGS.windowOpacity is
-                -- already updated by the caller (ApplyTransparency) before
-                -- this runs, and RefreshTabBar (f.ApplyTabThemeColors) reads
-                -- that live rather than needing it passed in.
-                if f.ApplyTabThemeColors then f.ApplyTabThemeColors() end
-            end
-
-            -- Function to apply transparency changes
-            local function ApplyTransparency(opacity)
-                PVPHUB_SETTINGS.windowOpacity = opacity
-                transparencyValueLabel:SetText(math.floor(opacity * 100 + 0.5) .. "%")
-                if f then
-                    -- Update main window background opacity
-                    local bgColor = UI_CONSTANTS.COLORS.WINDOW_BG
-                    f:SetBackdropColor(bgColor[1], bgColor[2], bgColor[3], opacity)
-                    
-                    -- Apply transparency to tabs to match window opacity
-                    ApplyTabTransparency(opacity)
-                    
-                    -- Update glow frame opacity proportionally (keep it subtle)
-                    local children = {f:GetChildren()}
-                    for _, child in ipairs(children) do
-                        if child.SetBackdropBorderColor and child ~= f then -- This is likely the glow frame
-                            child:SetBackdropBorderColor(0, 0, 0, 0)
-                            break
-                        end
-                    end
-                end
-            end
-            
-            -- Handle transparency changes
-            transparencySlider:SetScript("OnValueChanged", function(self, value)
-                if not value then return end
-                ApplyTransparency(value)
-            end)
-            
-            -- Tooltip for transparency slider
-            transparencySlider:SetScript("OnEnter", function(self)
-                GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
-                GameTooltip:SetText("Window Transparency", 1, 1, 1)
-                GameTooltip:AddLine("Adjust window opacity (50% - 100%)", 0.7, 0.7, 0.7, true)
-                GameTooltip:AddLine("Lower values = more transparent", 0.7, 0.7, 0.7, true)
-                GameTooltip:Show()
-            end)
-            
-            transparencySlider:SetScript("OnLeave", function(self)
-                GameTooltip:Hide()
-            end)
-            
-            -- Store references for theme updates
-            f.transparencySlider = transparencySlider
-            f.transparencyValueLabel = transparencyValueLabel
-            
-            -- Apply initial transparency
-            ApplyTransparency(PVPHUB_SETTINGS.windowOpacity)
-            
-            -- Add developer credit below the last button
-            local developerCredit = settingsFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-            developerCredit:SetPoint("TOPLEFT", resetButton, "BOTTOMLEFT", 0, -30) -- Position below Reset All Data button with 30px gap
-            developerCredit:SetText("For Feedback and Bugreports: twitch.tv/soundzgood")
-            developerCredit:SetFont("Fonts\\FRIZQT__.TTF", 11, "OUTLINE") -- Fixed standard font (Friz Quadrata)
-            developerCredit:SetTextColor(0.8, 0.8, 0.8, 1) -- Subtle gray color
-            
-            -- Store reference for theme updates
-            f.developerCredit = developerCredit
-            
-            -- Calculate content height dynamically based on the tallest column across both sides
-            C_Timer.After(0, function()
-                -- Left column bottom: developer credit (below resetButton)
-                local creditBottom = developerCredit:GetBottom()
-                -- Right column bottom: transparency slider
-                local rightBottom = transparencySlider:GetBottom()
-                -- Use whichever column reaches further down
-                local lowestBottom = math.min(
-                    creditBottom or 0,
-                    rightBottom or 0
-                )
-                local frameTop = settingsFrame:GetTop()
-                if frameTop and lowestBottom ~= 0 then
-                    local contentHeight = math.abs(frameTop - lowestBottom) + 50 -- 50px padding
-                    settingsFrame:SetHeight(math.max(contentHeight, 450))
-                end
-            end)
-            
-            -- Hide the container initially (not the scroll child)
-            settingsContainer:Hide()
-            --]==]  -- end of superseded old code
         end
         
         -- Always initialize with CHARACTERS tab (prevents header generation bugs when reopening from settings tab)
@@ -9918,7 +8883,7 @@ SlashCmdList["PVPHUB"] = function(msg)
         -- "most played by" callouts. Falls back to the plain name if the
         -- character's class isn't known.
         local function ColorCharName(charKey)
-            if not charKey then return charKey end
+            if not charKey or not PVPHUB_DB then return charKey end
             local data  = PVPHUB_DB[charKey]
             local color = data and RAID_CLASS_COLORS[data.class]
             if color and color.colorStr then
@@ -11526,12 +10491,12 @@ SlashCmdList["PVPHUB"] = function(msg)
                     end
                 end
             end
+            -- Hoisted out of the comparator: table.sort calls this O(n log n)
+            -- times, and UnitName/GetRealmName/concat don't change mid-sort.
+            local currentPlayer = UnitName("player")
+            local currentRealm = GetRealmName()
+            local currentChar = currentPlayer and currentRealm and (currentPlayer .. "-" .. currentRealm) or nil
             table.sort(sorted, function(a, b)
-                -- Get current logged in character
-                local currentPlayer = UnitName("player")
-                local currentRealm = GetRealmName()
-                local currentChar = currentPlayer and currentRealm and (currentPlayer .. "-" .. currentRealm) or nil
-                
                 -- Always put current character first
                 if currentChar then
                     if a.char == currentChar then
@@ -13083,7 +12048,13 @@ local function CheckHonorWarnings()
     if not currentChar or not PVPHUB_DB[currentChar] then return end
     
     local currentHonor = PVPHUB_DB[currentChar].honor or 0
+    -- Warn once honor is within 1000 of the actual cap so this doesn't go
+    -- stale if Blizzard changes the honor cap; 14000 is just the fallback.
     local warningThreshold = 14000
+    local honorInfo = C_CurrencyInfo and C_CurrencyInfo.GetCurrencyInfo and C_CurrencyInfo.GetCurrencyInfo(1792)
+    if honorInfo and honorInfo.maxQuantity and honorInfo.maxQuantity > 0 then
+        warningThreshold = honorInfo.maxQuantity - 1000
+    end
     
     -- Initialize honor warnings table if it doesn't exist
     PVPHUB_SETTINGS.honorWarnings = PVPHUB_SETTINGS.honorWarnings or {}
@@ -13126,8 +12097,12 @@ ShowHonorWarning = function(charName, honorAmount)
         end
     end
     
-    -- Create a popup warning dialog with classic WoW styling
-    local dialogName = "PVPHUB_HONOR_WARNING_" .. GetTime()
+    -- Create a popup warning dialog with classic WoW styling.
+    -- Fixed name (not GetTime()-suffixed): honor can drop below the warning
+    -- threshold and re-trigger this multiple times per session, and a
+    -- unique key per call would grow StaticPopupDialogs (a global table)
+    -- without bound for the rest of the session.
+    local dialogName = "PVPHUB_HONOR_WARNING"
     StaticPopupDialogs[dialogName] = {
         text = string.format("|T1455894:16|t HONOR CAP WARNING\n\n|c%s%s|r has reached |cffFFD700%s Honor|r!",
             classColor, cleanName, FormatNumber(honorAmount)),

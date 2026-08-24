@@ -1945,6 +1945,22 @@ function PVPHUB:ShowCompactSettings()
     PVPHUB.compactSettingsWindow:Show()
 end
 
+-- CreateFrame with a name string always registers that name in _G. Named
+-- children (e.g. the font picker built by PVPHUB_CreateFontPicker, which
+-- needs a real global name for its UIDropDownMenuTemplate to resolve) leak
+-- just as permanently as the top-level frame unless their names are cleared
+-- too, so walk the whole subtree instead of only the frame passed in.
+local function ClearNamedGlobalsRecursive(frame)
+    if not frame or not frame.GetName then return end
+    local name = frame:GetName()
+    if name then _G[name] = nil end
+    if frame.GetChildren then
+        for _, child in ipairs({ frame:GetChildren() }) do
+            ClearNamedGlobalsRecursive(child)
+        end
+    end
+end
+
 -- Called from ApplyTheme() (PVPHUB_core.lua) whenever the color theme
 -- changes, so the streamer overlay and its settings window pick up the new
 -- theme immediately instead of needing a /reload.
@@ -1975,11 +1991,12 @@ function PVPHUB:RefreshCompactTheme()
             end
         end
         PVPHUB.compactSettingsWindow:Hide()
+        -- Clear this frame's and every named descendant's _G entry (e.g. the
+        -- font picker) before dropping our own reference — otherwise each
+        -- theme switch permanently leaks the whole tree, reachable forever
+        -- via those globals even after SetParent(nil).
+        ClearNamedGlobalsRecursive(PVPHUB.compactSettingsWindow)
         PVPHUB.compactSettingsWindow:SetParent(nil)
-        -- CreateFrame with a name string always registers that name in _G;
-        -- clear it here too or every theme switch permanently leaks the old
-        -- frame tree (it stays reachable via _G[name] forever otherwise).
-        if name then _G[name] = nil end
         PVPHUB.compactSettingsWindow = nil
         if wasShown then
             PVPHUB:ShowCompactSettings()
