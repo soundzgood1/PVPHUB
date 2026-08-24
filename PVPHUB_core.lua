@@ -5960,24 +5960,33 @@ PVPHUB.frame:HookScript("OnEvent", function(self, event, ...)
                     -- character data structure changes between releases.
                     -- Add a migration block (if PVPHUB_DB.__dbVersion < N then ... end)
                     -- before bumping the constant so existing users upgrade cleanly.
-                    local CURRENT_DB_VERSION = 2
+                    local CURRENT_DB_VERSION = 3
                     PVPHUB_DB.__dbVersion = PVPHUB_DB.__dbVersion or 0
 
-                    if PVPHUB_DB.__dbVersion < 2 then
+                    if PVPHUB_DB.__dbVersion < 3 then
                         -- One-time cleanup for anyone who hit the old bug before
                         -- ClearCharacterSeasonData existed: the season-data reset
                         -- (automatic boundary detection or "Start Fresh") used to
                         -- clear bracketStats/wlData/etc. but not the legacy flat
                         -- rating fields (rating2v2/rating3v3/ratingRBG/
                         -- ratingShuffle/ratingBlitz) that the UI actually reads.
-                        -- A character reset while not logged in is left with
-                        -- bracketStats already nil but those fields still
-                        -- carrying stale values from before the reset — detect
-                        -- exactly that combination and finish the cleanup.
+                        --
+                        -- bracketStats and the legacy fields are always written
+                        -- together by SaveBracketStats, in the same call — there
+                        -- is no code path where bracketStats is nil but a legacy
+                        -- field genuinely holds current data. So bracketStats
+                        -- being nil is sufficient on its own to identify leftover
+                        -- stale values; an earlier version of this migration also
+                        -- required IsCharacterStaleThisSeason(), but that only
+                        -- reflects general login recency (stamped by any
+                        -- UpdateAllData call), not whether this character's PvP
+                        -- data specifically ever re-synced — a character logged
+                        -- into this season without a full rated-stats round trip
+                        -- completing reads as "not stale" while still carrying
+                        -- the exact leftover values this cleanup exists to catch.
                         for charKey, cdata in pairs(PVPHUB_DB) do
                             if type(cdata) == "table" and charKey ~= "settings"
-                               and cdata.bracketStats == nil
-                               and IsCharacterStaleThisSeason(charKey) then
+                               and cdata.bracketStats == nil then
                                 cdata.rating2v2     = nil
                                 cdata.rating3v3     = nil
                                 cdata.ratingRBG     = nil
