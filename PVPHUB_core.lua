@@ -4575,6 +4575,173 @@ local function BuildSeasonOverviewData(charList)
     }
 end
 
+-- ── Totals breakdown popup (Honor/Conquest/Gold) ───────────────────────────
+-- Custom interactive replacement for the native GameTooltip these summary
+-- totals used to use. A character left behind by a realm transfer can't be
+-- reliably auto-detected as "the same character" (UnitGUID is realm-scoped,
+-- so it changes on a real transfer — see the GUID rename/transfer migration
+-- comment near ADDON_LOADED) and it may already be filtered out of the main
+-- roster by "Hide Characters with No Ratings" once its ratings are cleared,
+-- leaving no row there to right-click Delete Character on. This popup lists
+-- every character contributing to a total with a small delete control right
+-- on each row, so a stale entry is always reachable from wherever its stale
+-- number is visible.
+local _totalsPopup
+local _totalsPopupRows = {}
+local TP_PAD, TP_ROW_H, TP_WIDTH = 12, 20, 260
+local ScheduleHideTotalsPopup -- forward declaration; defined below EnsureTotalsPopup, used inside it
+
+local function EnsureTotalsPopup()
+    if _totalsPopup then return _totalsPopup end
+    local f = CreateFrame("Frame", nil, UIParent, "BackdropTemplate")
+    f:SetFrameStrata("TOOLTIP")
+    f:SetFrameLevel(800)
+    f:SetClampedToScreen(true)
+    f:EnableMouse(true)
+    f:Hide()
+    f:SetBackdrop({
+        bgFile   = "Interface\\Tooltips\\UI-Tooltip-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 16, edgeSize = 16,
+        insets = { left = 4, right = 4, top = 4, bottom = 4 },
+    })
+    f:SetBackdropColor(0.04, 0.04, 0.09, 0.97)
+    f:SetBackdropBorderColor(0.36, 0.36, 0.48, 1.0)
+
+    f.title = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    f.title:SetPoint("TOPLEFT", TP_PAD, -10)
+    RegisterTrackedFont(f.title, 13, "OUTLINE")
+
+    f.emptyText = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    f.emptyText:SetJustifyH("LEFT")
+    f.emptyText:SetTextColor(0.6, 0.6, 0.6, 1)
+    RegisterTrackedFont(f.emptyText, 11, "")
+
+    f.hint = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    f.hint:SetJustifyH("LEFT")
+    f.hint:SetWordWrap(true)
+    f.hint:SetTextColor(0.55, 0.55, 0.55, 1)
+    RegisterTrackedFont(f.hint, 10, "")
+
+    f:SetScript("OnLeave", function(self) ScheduleHideTotalsPopup() end)
+
+    _totalsPopup = f
+    return f
+end
+
+-- Only hide once the mouse has left BOTH the popup itself and whatever
+-- button opened it — otherwise moving off the trigger button to reach a
+-- delete "x" inside the popup would close it before the click lands. Shared
+-- by the popup's own OnLeave and every trigger button's OnLeave.
+ScheduleHideTotalsPopup = function()
+    C_Timer.After(0.15, function()
+        if not _totalsPopup or not _totalsPopup:IsShown() then return end
+        local overPopup  = _totalsPopup:IsMouseOver()
+        local overButton = _totalsPopup.triggerBtn and _totalsPopup.triggerBtn:IsMouseOver()
+        if not overPopup and not overButton then
+            _totalsPopup:Hide()
+        end
+    end)
+end
+
+local function GetTotalsPopupRow(n)
+    if _totalsPopupRows[n] then return _totalsPopupRows[n] end
+    local f = EnsureTotalsPopup()
+
+    local row = CreateFrame("Frame", nil, f)
+    row:SetHeight(TP_ROW_H)
+    row:SetWidth(TP_WIDTH)
+
+    row.deleteBtn = CreateFrame("Button", nil, row)
+    row.deleteBtn:SetSize(16, 16)
+    row.deleteBtn:SetPoint("RIGHT", row, "RIGHT", 0, 0)
+    row.deleteBtn.text = row.deleteBtn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    row.deleteBtn.text:SetAllPoints()
+    row.deleteBtn.text:SetJustifyH("CENTER")
+    row.deleteBtn.text:SetText("|cff888888x|r")
+    row.deleteBtn:SetScript("OnEnter", function(self)
+        self.text:SetText("|cffff4040x|r")
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Remove this character")
+        GameTooltip:AddLine("Permanently deletes all PVPHUB data for this character.", 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    row.deleteBtn:SetScript("OnLeave", function(self)
+        self.text:SetText("|cff888888x|r")
+        GameTooltip:Hide()
+    end)
+    row.deleteBtn:SetScript("OnClick", function(self)
+        local charKey = self.charKey
+        if not charKey then return end
+        if _totalsPopup then _totalsPopup:Hide() end
+        PVPHUB._deleteCharCtx = charKey
+        StaticPopupDialogs["PVPHUB_DELETE_CHARACTER"].text =
+            "Are you sure you want to permanently delete all data for |cff4da6ff" .. charKey .. "|r?\n\nThis action cannot be undone!"
+        StaticPopup_Show("PVPHUB_DELETE_CHARACTER")
+    end)
+
+    row.name = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    row.name:SetPoint("LEFT", row, "LEFT", 0, 0)
+    row.name:SetJustifyH("LEFT")
+    row.name:SetWidth(170) -- fixed, so a long realm name can't overlap the value/delete button
+    row.name:SetWordWrap(false)
+    RegisterTrackedFont(row.name, 12, "")
+
+    row.value = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    row.value:SetPoint("RIGHT", row.deleteBtn, "LEFT", -8, 0)
+    row.value:SetJustifyH("RIGHT")
+    RegisterTrackedFont(row.value, 12, "")
+
+    _totalsPopupRows[n] = row
+    return row
+end
+
+-- entries: { { char = charKey, coloredName = "...", value = "..." }, ... },
+-- already sorted by the caller.
+local function ShowTotalsPopup(triggerBtn, titleText, titleColor, entries)
+    local popup = EnsureTotalsPopup()
+    popup.triggerBtn = triggerBtn
+    popup:ClearAllPoints()
+    popup:SetPoint("TOP", triggerBtn, "BOTTOM", 0, -4)
+
+    popup.title:SetText(titleText)
+    popup.title:SetTextColor(unpack(titleColor))
+
+    for _, row in ipairs(_totalsPopupRows) do row:Hide() end
+
+    local y = -10 - popup.title:GetStringHeight() - 8
+
+    if #entries == 0 then
+        popup.emptyText:ClearAllPoints()
+        popup.emptyText:SetPoint("TOPLEFT", TP_PAD, y)
+        popup.emptyText:SetText("No data")
+        popup.emptyText:Show()
+        y = y - popup.emptyText:GetStringHeight() - 8
+    else
+        popup.emptyText:Hide()
+        for i, entry in ipairs(entries) do
+            local row = GetTotalsPopupRow(i)
+            row:ClearAllPoints()
+            row:SetPoint("TOPLEFT", TP_PAD, y)
+            row.name:SetText(entry.coloredName)
+            row.value:SetText(entry.value)
+            row.deleteBtn.charKey = entry.char
+            row:Show()
+            y = y - TP_ROW_H
+        end
+    end
+
+    popup.hint:ClearAllPoints()
+    popup.hint:SetPoint("TOPLEFT", TP_PAD, y - 4)
+    popup.hint:SetWidth(TP_WIDTH)
+    popup.hint:SetText("Click |cffff5555x|r to permanently remove a character (e.g. a stale entry left behind by a realm transfer).")
+    y = y - 4 - popup.hint:GetStringHeight()
+
+    popup:SetWidth(TP_WIDTH + TP_PAD * 2)
+    popup:SetHeight(-y + 12)
+    popup:Show()
+end
+
 local _pvpTip     = nil   -- Frame, created lazily
 local _pvpTipPool = {}    -- pooled rows: [n] = { icon, c1, c2, c3, c4 }
 local _pvpTipUsed = 0     -- rows consumed this render
@@ -11818,11 +11985,6 @@ SlashCmdList["PVPHUB"] = function(msg)
                 f.honorTooltipBtn:SetFrameLevel(f:GetFrameLevel() + 1)
                 
                 f.honorTooltipBtn:SetScript("OnEnter", function()
-                    GameTooltip:SetOwner(f.honorTooltipBtn, "ANCHOR_CURSOR")
-                    
-                    GameTooltip:SetText("|cffff6b00Total Honor|r", 1, 1, 1)
-                    GameTooltip:AddLine(" ", 1, 1, 1) -- Empty line
-                    
                     -- Collect character data
                     local charData = {}
                     for charKey, data in pairs(PVPHUB_DB) do
@@ -11834,40 +11996,24 @@ SlashCmdList["PVPHUB"] = function(msg)
                             })
                         end
                     end
-                    
+
                     -- Sort by highest honor
                     table.sort(charData, function(a, b) return a.honor > b.honor end)
-                    
-                    -- Show each character's honor with class color and column alignment
+
+                    local entries = {}
                     for _, entry in ipairs(charData) do
                         local classColor = RAID_CLASS_COLORS[entry.class] or RAID_CLASS_COLORS["WARRIOR"]
-                        local coloredName = string.format("|cff%02x%02x%02x%s|r", 
+                        local coloredName = string.format("|cff%02x%02x%02x%s|r",
                             classColor.r * 255, classColor.g * 255, classColor.b * 255, entry.char)
-                        
-                        -- Use GameTooltip:AddDoubleLine for column alignment (left-right layout)
-                        GameTooltip:AddDoubleLine(coloredName, "|cffffffff" .. tooltipFormatNumber(entry.honor) .. "|r", 0.8, 0.8, 0.8, 0.8, 0.8, 0.8)
-                    end
-                    
-                    if #charData == 0 then
-                        GameTooltip:AddLine("No honor found", 0.6, 0.6, 0.6)
+                        table.insert(entries, { char = entry.char, coloredName = coloredName,
+                            value = "|cffffffff" .. tooltipFormatNumber(entry.honor) .. "|r" })
                     end
 
-                    -- A character that transferred realms shows up under
-                    -- every realm it's ever been on — PVPHUB can't reliably
-                    -- tell that apart from two genuinely different
-                    -- characters (see the GUID rename/transfer migration
-                    -- comment near ADDON_LOADED), so it can't auto-merge or
-                    -- auto-remove these. Point at the manual fix instead.
-                    if #charData > 0 then
-                        GameTooltip:AddLine(" ", 1, 1, 1)
-                        GameTooltip:AddLine("Realm transfer left an old entry? Right-click it in the roster and choose Delete Character.", 0.55, 0.55, 0.55, true)
-                    end
-
-                    GameTooltip:Show()
+                    ShowTotalsPopup(f.honorTooltipBtn, "Total Honor", { 1, 0.42, 0 }, entries)
                 end)
 
                 f.honorTooltipBtn:SetScript("OnLeave", function()
-                    GameTooltip:Hide()
+                    ScheduleHideTotalsPopup()
                 end)
                 
                 -- Conquest tooltip button
@@ -11877,11 +12023,6 @@ SlashCmdList["PVPHUB"] = function(msg)
                 f.conquestTooltipBtn:SetFrameLevel(f:GetFrameLevel() + 1)
                 
                 f.conquestTooltipBtn:SetScript("OnEnter", function()
-                    GameTooltip:SetOwner(f.conquestTooltipBtn, "ANCHOR_CURSOR")
-                    
-                    GameTooltip:SetText("|cffa335eeTotal Conquest|r", 1, 1, 1)
-                    GameTooltip:AddLine(" ", 1, 1, 1) -- Empty line
-                    
                     -- Collect character data. Excludes characters that haven't
                     -- logged in since the season changed (see
                     -- IsCharacterStaleThisSeason) — Blizzard zeroes Conquest
@@ -11903,30 +12044,20 @@ SlashCmdList["PVPHUB"] = function(msg)
                     -- Sort by highest conquest
                     table.sort(charData, function(a, b) return a.conquest > b.conquest end)
 
-                    -- Show each character's conquest with class color and column alignment
+                    local entries = {}
                     for _, entry in ipairs(charData) do
                         local classColor = RAID_CLASS_COLORS[entry.class] or RAID_CLASS_COLORS["WARRIOR"]
                         local coloredName = string.format("|cff%02x%02x%02x%s|r",
                             classColor.r * 255, classColor.g * 255, classColor.b * 255, entry.char)
-
-                        -- Use GameTooltip:AddDoubleLine for column alignment (left-right layout)
-                        GameTooltip:AddDoubleLine(coloredName, "|cffffffff" .. tooltipFormatNumber(entry.conquest) .. "|r", 0.8, 0.8, 0.8, 0.8, 0.8, 0.8)
+                        table.insert(entries, { char = entry.char, coloredName = coloredName,
+                            value = "|cffffffff" .. tooltipFormatNumber(entry.conquest) .. "|r" })
                     end
 
-                    if #charData == 0 then
-                        GameTooltip:AddLine("No conquest found", 0.6, 0.6, 0.6)
-                    end
-
-                    if #charData > 0 then
-                        GameTooltip:AddLine(" ", 1, 1, 1)
-                        GameTooltip:AddLine("Realm transfer left an old entry? Right-click it in the roster and choose Delete Character.", 0.55, 0.55, 0.55, true)
-                    end
-
-                    GameTooltip:Show()
+                    ShowTotalsPopup(f.conquestTooltipBtn, "Total Conquest", { 0.64, 0.21, 0.93 }, entries)
                 end)
 
                 f.conquestTooltipBtn:SetScript("OnLeave", function()
-                    GameTooltip:Hide()
+                    ScheduleHideTotalsPopup()
                 end)
                 
                 -- Gold tooltip button
@@ -11936,11 +12067,6 @@ SlashCmdList["PVPHUB"] = function(msg)
                 f.goldTooltipBtn:SetFrameLevel(f:GetFrameLevel() + 1)
                 
                 f.goldTooltipBtn:SetScript("OnEnter", function()
-                    GameTooltip:SetOwner(f.goldTooltipBtn, "ANCHOR_CURSOR")
-                    
-                    GameTooltip:SetText("|cffffff00Total Gold|r", 1, 1, 1)
-                    GameTooltip:AddLine(" ", 1, 1, 1) -- Empty line
-                    
                     -- Collect character data
                     local charData = {}
                     for charKey, data in pairs(PVPHUB_DB) do
@@ -11952,16 +12078,16 @@ SlashCmdList["PVPHUB"] = function(msg)
                             })
                         end
                     end
-                    
+
                     -- Sort by highest gold
                     table.sort(charData, function(a, b) return a.gold > b.gold end)
-                    
-                    -- Show each character's gold with class color and column alignment
+
+                    local entries = {}
                     for _, entry in ipairs(charData) do
                         local classColor = RAID_CLASS_COLORS[entry.class] or RAID_CLASS_COLORS["WARRIOR"]
-                        local coloredName = string.format("|cff%02x%02x%02x%s|r", 
+                        local coloredName = string.format("|cff%02x%02x%02x%s|r",
                             classColor.r * 255, classColor.g * 255, classColor.b * 255, entry.char)
-                        
+
                         local goldAmount = entry.gold / 10000 -- Convert copper to gold
                         local goldFormatted = ""
                         if goldAmount >= 1000000 then
@@ -11971,25 +12097,16 @@ SlashCmdList["PVPHUB"] = function(msg)
                         else
                             goldFormatted = string.format("%.0f", goldAmount)
                         end
-                        
-                        -- Use GameTooltip:AddDoubleLine for column alignment (left-right layout)
-                        GameTooltip:AddDoubleLine(coloredName, "|cffffffff" .. goldFormatted .. "|r", 0.8, 0.8, 0.8, 0.8, 0.8, 0.8)
-                    end
-                    
-                    if #charData == 0 then
-                        GameTooltip:AddLine("No gold found", 0.6, 0.6, 0.6)
+
+                        table.insert(entries, { char = entry.char, coloredName = coloredName,
+                            value = "|cffffffff" .. goldFormatted .. "|r" })
                     end
 
-                    if #charData > 0 then
-                        GameTooltip:AddLine(" ", 1, 1, 1)
-                        GameTooltip:AddLine("Realm transfer left an old entry? Right-click it in the roster and choose Delete Character.", 0.55, 0.55, 0.55, true)
-                    end
-
-                    GameTooltip:Show()
+                    ShowTotalsPopup(f.goldTooltipBtn, "Total Gold", { 1, 1, 0 }, entries)
                 end)
 
                 f.goldTooltipBtn:SetScript("OnLeave", function()
-                    GameTooltip:Hide()
+                    ScheduleHideTotalsPopup()
                 end)
             end
             
