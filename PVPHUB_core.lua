@@ -911,6 +911,18 @@ end
 local _lastBackupTime = 0
 local _BACKUP_INTERVAL = 300  -- at most once every 5 minutes
 
+-- Recursive deep copy, no depth limit. The old inline copy only went 3
+-- levels deep (char -> field -> k2 -> k3), so anything nested deeper (e.g.
+-- per-spec MMR history under mmrData) was assigned by reference: later
+-- mutations to the "live" table silently corrupted the "backup" too.
+local function DeepCopyTable(t)
+    local copy = {}
+    for k, v in pairs(t) do
+        copy[k] = (type(v) == "table") and DeepCopyTable(v) or v
+    end
+    return copy
+end
+
 local function CreateDataBackup()
     local now = GetTime()
     if now - _lastBackupTime < _BACKUP_INTERVAL then return end
@@ -932,27 +944,10 @@ local function CreateDataBackup()
         PVPHUB_DB_BACKUP[2] = PVPHUB_DB_BACKUP[1]
         PVPHUB_DB_BACKUP[1] = {}
         
-        -- Deep copy current data (two levels: char → field → nested table)
+        -- Deep copy current data (unbounded depth — see DeepCopyTable)
         for char, data in pairs(PVPHUB_DB) do
             if type(data) == "table" then
-                PVPHUB_DB_BACKUP[1][char] = {}
-                for k, v in pairs(data) do
-                    if type(v) == "table" then
-                        local copy = {}
-                        for k2, v2 in pairs(v) do
-                            if type(v2) == "table" then
-                                local copy2 = {}
-                                for k3, v3 in pairs(v2) do copy2[k3] = v3 end
-                                copy[k2] = copy2
-                            else
-                                copy[k2] = v2
-                            end
-                        end
-                        PVPHUB_DB_BACKUP[1][char][k] = copy
-                    else
-                        PVPHUB_DB_BACKUP[1][char][k] = v
-                    end
-                end
+                PVPHUB_DB_BACKUP[1][char] = DeepCopyTable(data)
             end
         end
         -- Backup created silently (no chat message to avoid spam)
@@ -3628,11 +3623,12 @@ local function TrackMMRChange(retryCount, eventWinner)
     if bracket == 0 or bracket == 1 then -- 2v2 or 3v3
         -- Set faction for battlefield score (MMRTracker approach)
         if SetBattlefieldScoreFaction then
-            SetBattlefieldScoreFaction(-1)
+            pcall(SetBattlefieldScoreFaction, -1)
         end
 
         -- Get team info: teamName, oldTeamRating, newTeamRating, teamMMR
-        local teamName, oldTeamRating, newTeamRating, currentTeamMMR = GetBattlefieldTeamInfo(scoreInfo.faction or 0)
+        local teamOk, teamName, oldTeamRating, newTeamRating, currentTeamMMR = pcall(GetBattlefieldTeamInfo, scoreInfo.faction or 0)
+        if not teamOk then currentTeamMMR = nil end
         if currentTeamMMR and currentTeamMMR > 0 then
             teamMMR = currentTeamMMR
             -- For arenas, we track current team MMR without showing changes
@@ -6052,6 +6048,16 @@ PVPHUB.frame:HookScript("OnEvent", function(self, event, ...)
                 SafeInitStep("initialize MMR data", function()
                     -- Initialize MMR data
                     UpdateMMRData()
+                end)
+
+                SafeInitStep("prewarm spec lookup table", function()
+                    -- GetSpecLookup() lazily loops every specID (60-1500) on its
+                    -- first call. Left alone, that first call lands inside
+                    -- TrackMMRChange right as an arena/BG match ends — the worst
+                    -- possible moment for a synchronous API burst. Prewarm it
+                    -- here instead, a few seconds after login, well before any
+                    -- match could finish.
+                    C_Timer.After(5, GetSpecLookup)
                 end)
 
                 SafeInitStep("schedule PvP data refresh", function()
@@ -13185,6 +13191,7 @@ local function UpdateHonorDataStandalone()
 end
 
 -- Initialize honor tracking with comprehensive event handling
+local _pendingCurrencyRefresh = false
 local honorTrackingFrame = CreateFrame("Frame")
 honorTrackingFrame:RegisterEvent("ADDON_LOADED")
 honorTrackingFrame:RegisterEvent("CURRENCY_DISPLAY_UPDATE")
@@ -13206,12 +13213,18 @@ honorTrackingFrame:SetScript("OnEvent", function(self, event, addonName, ...)
             CheckHonorWarnings()
         end)
     elseif event == "CURRENCY_DISPLAY_UPDATE" then
-        -- Save honor to DB then check warnings (window may be closed)
-        C_Timer.After(0.5, function()
-            UpdateHonorDataStandalone()
-            CheckHonorWarnings()
-            PVPHUB_RefreshUI()
-        end)
+        -- Coalesce rapid-fire currency ticks (e.g. honor gained repeatedly
+        -- during a match) into a single deferred refresh instead of
+        -- stacking one full-window-rebuild PVPHUB_RefreshUI() call per tick.
+        if not _pendingCurrencyRefresh then
+            _pendingCurrencyRefresh = true
+            C_Timer.After(0.5, function()
+                _pendingCurrencyRefresh = false
+                UpdateHonorDataStandalone()
+                CheckHonorWarnings()
+                PVPHUB_RefreshUI()
+            end)
+        end
     elseif event == "PLAYER_ENTERING_WORLD" or event == "PLAYER_LOGIN" then
         -- Snapshot honor on login/zone change so DB is populated without opening PVPHUB.
         -- Skip the UI rebuild when entering a PvP instance: ratings haven't changed yet,

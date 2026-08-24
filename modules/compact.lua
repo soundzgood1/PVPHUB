@@ -596,7 +596,12 @@ function PVPHUB:CreateCompactWindow()
     PVPHUB_SETTINGS.compactWindowStayOpen = true
 end
 
-function PVPHUB:UpdateCompactWindow()
+-- Implementation for PVPHUB:UpdateCompactWindow (wrapped below in a pcall).
+-- Rebuilds the entire streamer overlay from scratch every call, with deep
+-- indexing into PVPHUB_DB/PVPHUB_SETTINGS and no per-call guards — unlike
+-- most other update paths in the addon, so one bad index here would
+-- otherwise throw a raw, on-stream, error instead of failing gracefully.
+local function UpdateCompactWindowImpl()
     if not PVPHUB.compactWindow or not PVPHUB.compactWindow.content then return end
 
     -- Font path is resolved by ApplyCompactFontChanges (on change) or by
@@ -964,6 +969,13 @@ function PVPHUB:UpdateCompactWindow()
     -- Update window height dynamically
     PVPHUB.compactWindow:SetHeight(dynamicHeight)
     PVPHUB.compactWindow.content:SetSize(dynamicWidth - 16, yOffset)
+end
+
+function PVPHUB:UpdateCompactWindow()
+    local ok, err = pcall(UpdateCompactWindowImpl)
+    if not ok then
+        PVPHubPrint("|cffff0000[PVP HUB]|r Compact window update failed: " .. tostring(err))
+    end
 end
 
 -- pinnedSpecID (optional): renders this character's row showing THAT spec's
@@ -1964,6 +1976,10 @@ function PVPHUB:RefreshCompactTheme()
         end
         PVPHUB.compactSettingsWindow:Hide()
         PVPHUB.compactSettingsWindow:SetParent(nil)
+        -- CreateFrame with a name string always registers that name in _G;
+        -- clear it here too or every theme switch permanently leaks the old
+        -- frame tree (it stays reachable via _G[name] forever otherwise).
+        if name then _G[name] = nil end
         PVPHUB.compactSettingsWindow = nil
         if wasShown then
             PVPHUB:ShowCompactSettings()
