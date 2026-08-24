@@ -4623,6 +4623,13 @@ local function EnsureTotalsPopup()
     f.hint:SetTextColor(0.55, 0.55, 0.55, 1)
     RegisterTrackedFont(f.hint, 10, "")
 
+    -- Separates an account-wide entry (e.g. Warband Bank — no char, always
+    -- listed first) from the per-character rows below it.
+    f.divider = f:CreateTexture(nil, "ARTWORK")
+    f.divider:SetHeight(1)
+    f.divider:SetColorTexture(0.45, 0.45, 0.5, 0.6)
+    f.divider:Hide()
+
     f:SetScript("OnLeave", function(self) ScheduleHideTotalsPopup() end)
 
     _totalsPopup = f
@@ -4719,6 +4726,7 @@ local function ShowTotalsPopup(triggerBtn, titleText, titleColor, entries)
         y = y - popup.emptyText:GetStringHeight() - 8
     else
         popup.emptyText:Hide()
+        popup.divider:Hide()
         for i, entry in ipairs(entries) do
             local row = GetTotalsPopupRow(i)
             row:ClearAllPoints()
@@ -4731,6 +4739,16 @@ local function ShowTotalsPopup(triggerBtn, titleText, titleColor, entries)
             row.deleteBtn:SetShown(entry.char ~= nil)
             row:Show()
             y = y - TP_ROW_H
+
+            -- Visually separate an account-wide entry from the character
+            -- rows below it with a divider line and a little extra room.
+            if entry.char == nil and entries[i + 1] then
+                popup.divider:ClearAllPoints()
+                popup.divider:SetPoint("TOPLEFT",  TP_PAD,  y - 3)
+                popup.divider:SetPoint("TOPRIGHT", -TP_PAD, y - 3)
+                popup.divider:Show()
+                y = y - 7
+            end
         end
     end
 
