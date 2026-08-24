@@ -10591,33 +10591,6 @@ SlashCmdList["PVPHUB"] = function(msg)
                 table.insert(cardWidgets, disclaimerText)
                 yPos = yPos - 34
 
-                -- Login reminder: a character that hasn't logged in since the
-                -- last detected season change is still carrying last season's
-                -- snapshot (there's no way to refresh another character's
-                -- data without logging into it — see IsCharacterStaleThisSeason).
-                -- The roster dims those rows; this nudges toward the fix.
-                do
-                    local staleCount = 0
-                    for charKey, cdata in pairs(PVPHUB_DB) do
-                        if type(cdata) == "table" and charKey ~= "settings" and cdata.class
-                           and not IsCharacterHidden(charKey) and IsCharacterStaleThisSeason(charKey) then
-                            staleCount = staleCount + 1
-                        end
-                    end
-                    if staleCount > 0 then
-                        local reminderText = statsScrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-                        reminderText:SetPoint("TOP", statsScrollChild, "TOP", 0, yPos)
-                        reminderText:SetWidth(600)
-                        reminderText:SetWordWrap(true)
-                        reminderText:SetJustifyH("CENTER")
-                        reminderText:SetText(string.format(
-                            "|cffffcc00%d character%s|r haven't logged in since the season changed — their numbers (dimmed in the character list) are still last season's until you log in on them.",
-                            staleCount, staleCount == 1 and "" or "s"))
-                        table.insert(cardWidgets, reminderText)
-                        yPos = yPos - 34
-                    end
-                end
-
                 -- Season title progress — one row of three equal-width tiles
                 -- (Legend/Strategist/Gladiator), placed first and set apart in
                 -- its own gold-framed panel so it reads as the featured section
