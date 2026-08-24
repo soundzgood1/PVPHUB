@@ -5889,6 +5889,17 @@ PVPHUB.frame:RegisterEvent("UI_SCALE_CHANGED")
 PVPHUB.frame:RegisterEvent("PLAYER_REGEN_DISABLED")
 PVPHUB.frame:RegisterEvent("PLAYER_REGEN_ENABLED")
 
+-- Runs one login-init step in its own pcall so a failure partway through
+-- ADDON_LOADED (a bad font file, a malformed SavedVariables entry, etc.)
+-- only skips that one step instead of silently aborting every step after it
+-- for the rest of the session.
+local function SafeInitStep(label, fn)
+    local ok, err = pcall(fn)
+    if not ok then
+        PVPHubPrint("|cffff0000[PVP HUB]|r Startup step \"" .. label .. "\" failed: " .. tostring(err))
+    end
+end
+
 PVPHUB.frame:HookScript("OnEvent", function(self, event, ...)
     -- Capture the arguments before the pcall
     local args = {...}
@@ -5898,277 +5909,323 @@ PVPHUB.frame:HookScript("OnEvent", function(self, event, ...)
         if event == "ADDON_LOADED" then
             local addonName = args[1]
             if addonName == "PVPHUB" then
-                -- One-time cleanup: remove injected test characters
-                if not PVPHUB_SETTINGS.cleanedTestData_v1 then
-                    local testChars = { "Sünde-Silvermoon", "Veryrare-Silvermoon", "Xehanort-Silvermoon" }
-                    for _, key in ipairs(testChars) do
-                        if PVPHUB_DB then PVPHUB_DB[key] = nil end
+                -- Each step below runs in its own pcall via SafeInitStep so a
+                -- failure partway through login init can't silently skip the
+                -- rest of initialization for the whole session — only that
+                -- one step is skipped, and it's reported in chat.
+                SafeInitStep("cleanup test data", function()
+                    -- One-time cleanup: remove injected test characters
+                    if not PVPHUB_SETTINGS.cleanedTestData_v1 then
+                        local testChars = { "Sünde-Silvermoon", "Veryrare-Silvermoon", "Xehanort-Silvermoon" }
+                        for _, key in ipairs(testChars) do
+                            if PVPHUB_DB then PVPHUB_DB[key] = nil end
+                        end
+                        PVPHUB_SETTINGS.cleanedTestData_v1 = true
                     end
-                    PVPHUB_SETTINGS.cleanedTestData_v1 = true
-                end
+                end)
 
-                -- Validate data integrity on addon load
-                ValidateAndRestoreData()
+                SafeInitStep("validate data integrity", function()
+                    -- Validate data integrity on addon load
+                    ValidateAndRestoreData()
+                end)
 
-                -- DB schema versioning: increment CURRENT_DB_VERSION when the
-                -- character data structure changes between releases.
-                -- Add a migration block (if PVPHUB_DB.__dbVersion < N then ... end)
-                -- before bumping the constant so existing users upgrade cleanly.
-                local CURRENT_DB_VERSION = 1
-                PVPHUB_DB.__dbVersion = PVPHUB_DB.__dbVersion or 0
-                -- (future migrations go here: if PVPHUB_DB.__dbVersion < 2 then ... end)
-                PVPHUB_DB.__dbVersion = CURRENT_DB_VERSION
+                SafeInitStep("DB schema versioning", function()
+                    -- DB schema versioning: increment CURRENT_DB_VERSION when the
+                    -- character data structure changes between releases.
+                    -- Add a migration block (if PVPHUB_DB.__dbVersion < N then ... end)
+                    -- before bumping the constant so existing users upgrade cleanly.
+                    local CURRENT_DB_VERSION = 1
+                    PVPHUB_DB.__dbVersion = PVPHUB_DB.__dbVersion or 0
+                    -- (future migrations go here: if PVPHUB_DB.__dbVersion < 2 then ... end)
+                    PVPHUB_DB.__dbVersion = CURRENT_DB_VERSION
+                end)
 
-                -- GUID-based rename/transfer detection.
-                -- Store the current character's GUID so future sessions can detect
-                -- if the character was renamed or server-transferred between logins.
-                local playerGUID = UnitGUID("player")
-                local charKey = GetFullName()
-                if playerGUID and charKey and charKey ~= "" and charKey ~= "-" then
-                    PVPHUB_DB[charKey] = PVPHUB_DB[charKey] or {}
-                    PVPHUB_DB[charKey].guid = playerGUID
-                    -- Scan for a stale entry under the old name/realm
-                    for oldKey, oldData in pairs(PVPHUB_DB) do
-                        if oldKey ~= charKey
-                           and oldKey ~= "__dbVersion"
-                           and type(oldData) == "table"
-                           and oldData.guid == playerGUID then
-                            -- Merge: copy fields the new key doesn't already have
-                            for k, v in pairs(oldData) do
-                                if PVPHUB_DB[charKey][k] == nil then
-                                    PVPHUB_DB[charKey][k] = v
+                SafeInitStep("GUID rename/transfer migration", function()
+                    -- GUID-based rename/transfer detection.
+                    -- Store the current character's GUID so future sessions can detect
+                    -- if the character was renamed or server-transferred between logins.
+                    local playerGUID = UnitGUID("player")
+                    local charKey = GetFullName()
+                    if playerGUID and charKey and charKey ~= "" and charKey ~= "-" then
+                        PVPHUB_DB[charKey] = PVPHUB_DB[charKey] or {}
+                        PVPHUB_DB[charKey].guid = playerGUID
+                        -- Scan for a stale entry under the old name/realm
+                        for oldKey, oldData in pairs(PVPHUB_DB) do
+                            if oldKey ~= charKey
+                               and oldKey ~= "__dbVersion"
+                               and type(oldData) == "table"
+                               and oldData.guid == playerGUID then
+                                -- Merge: copy fields the new key doesn't already have
+                                for k, v in pairs(oldData) do
+                                    if PVPHUB_DB[charKey][k] == nil then
+                                        PVPHUB_DB[charKey][k] = v
+                                    end
                                 end
-                            end
-                            PVPHUB_DB[oldKey] = nil
-                            PVPHubPrint("|cff00ff00[PVPHUB]|r Character data migrated from " .. oldKey .. " to " .. charKey .. ".")
-                            break
-                        end
-                    end
-                end
-
-                -- Build hidden character hash set for O(1) lookups
-                RebuildHiddenSet()
-
-                -- Initialise the shared data font from saved settings.
-                -- Register PVPHUB's bundled fonts with LibSharedMedia so they always
-                -- appear in the font picker regardless of what other addons are installed.
-                if LibStub then
-                    local LSM = LibStub("LibSharedMedia-3.0", true)
-                    if LSM then
-                        local base = "Interface\\AddOns\\PVPHUB\\media\\fonts\\"
-                        local bundled = {
-                            { "PVP - Expressway",           "Expressway.ttf"          },
-                            { "PVP - Prototype",            "Prototype.ttf"           },
-                            { "PVP - Accidental Presidency","AccidentalPresidency.ttf"},
-                            { "PVP - Exo 2 Bold",           "Exo2-Bold.ttf"           },
-                            { "PVP - Inter Bold",           "Inter-Bold.ttf"          },
-                            { "PVP - Oswald Bold",          "Oswald-Bold.ttf"         },
-                            { "PVP - Rajdhani SemiBold",    "Rajdhani-SemiBold.ttf"   },
-                            { "PVP - Bebas Neue",           "BebasNeue-Regular.ttf"   },
-                            { "PVP - Barlow Condensed Bold","BarlowCondensed-Bold.ttf"},
-                            { "PVP - Titillium Bold",       "TitilliumWeb-Bold.ttf"   },
-                            { "PVP - 2002 Bold",            "2002Bold.ttf"            },
-                            { "PVP - Avant Garde",          "AvantGarde.ttf"          },
-                        }
-                        -- Only register fonts whose TTF files actually exist on disk.
-                        -- SetFont returns false (not an error) for missing files, so we
-                        -- use a throwaway FontString to validate before registering.
-                        local _validationFS = UIParent:CreateFontString(nil, "ARTWORK")
-                        local validBundled = {}
-                        for _, entry in ipairs(bundled) do
-                            local path = base .. entry[2]
-                            local ok, result = pcall(function() return _validationFS:SetFont(path, 12) end)
-                            if ok and result then
-                                LSM:Register("font", entry[1], path)
-                                table.insert(validBundled, entry)
+                                PVPHUB_DB[oldKey] = nil
+                                PVPHubPrint("|cff00ff00[PVPHUB]|r Character data migrated from " .. oldKey .. " to " .. charKey .. ".")
+                                break
                             end
                         end
-                        _validationFS:Hide()
-                        -- Store for GetAvailableFonts / GetFontPath (only valid entries)
-                        PVPHUB.bundledFonts = validBundled
-                        PVPHUB.bundledFontBase = base
                     end
-                end
+                end)
 
-                -- Must run after SavedVariables are loaded so selectedFont is ready.
-                -- Deferred by one tick so LSM (OptionalDep) is guaranteed to be fully loaded.
-                C_Timer.After(0, function()
-                    local sel  = (PVPHUB_SETTINGS and PVPHUB_SETTINGS.selectedFont) or "Friz Quadrata TT"
-                    local size = 12
-                    local path
+                SafeInitStep("rebuild hidden character set", function()
+                    -- Build hidden character hash set for O(1) lookups
+                    RebuildHiddenSet()
+                end)
+
+                SafeInitStep("register bundled fonts", function()
+                    -- Initialise the shared data font from saved settings.
+                    -- Register PVPHUB's bundled fonts with LibSharedMedia so they always
+                    -- appear in the font picker regardless of what other addons are installed.
                     if LibStub then
                         local LSM = LibStub("LibSharedMedia-3.0", true)
                         if LSM then
-                            local ok, p = pcall(function() return LSM:Fetch("font", sel) end)
-                            if ok and p then path = p end
+                            local base = "Interface\\AddOns\\PVPHUB\\media\\fonts\\"
+                            local bundled = {
+                                { "PVP - Expressway",           "Expressway.ttf"          },
+                                { "PVP - Prototype",            "Prototype.ttf"           },
+                                { "PVP - Accidental Presidency","AccidentalPresidency.ttf"},
+                                { "PVP - Exo 2 Bold",           "Exo2-Bold.ttf"           },
+                                { "PVP - Inter Bold",           "Inter-Bold.ttf"          },
+                                { "PVP - Oswald Bold",          "Oswald-Bold.ttf"         },
+                                { "PVP - Rajdhani SemiBold",    "Rajdhani-SemiBold.ttf"   },
+                                { "PVP - Bebas Neue",           "BebasNeue-Regular.ttf"   },
+                                { "PVP - Barlow Condensed Bold","BarlowCondensed-Bold.ttf"},
+                                { "PVP - Titillium Bold",       "TitilliumWeb-Bold.ttf"   },
+                                { "PVP - 2002 Bold",            "2002Bold.ttf"            },
+                                { "PVP - Avant Garde",          "AvantGarde.ttf"          },
+                            }
+                            -- Only register fonts whose TTF files actually exist on disk.
+                            -- SetFont returns false (not an error) for missing files, so we
+                            -- use a throwaway FontString to validate before registering.
+                            local _validationFS = UIParent:CreateFontString(nil, "ARTWORK")
+                            local validBundled = {}
+                            for _, entry in ipairs(bundled) do
+                                local path = base .. entry[2]
+                                local ok, result = pcall(function() return _validationFS:SetFont(path, 12) end)
+                                if ok and result then
+                                    LSM:Register("font", entry[1], path)
+                                    table.insert(validBundled, entry)
+                                end
+                            end
+                            _validationFS:Hide()
+                            -- Store for GetAvailableFonts / GetFontPath (only valid entries)
+                            PVPHUB.bundledFonts = validBundled
+                            PVPHUB.bundledFontBase = base
                         end
                     end
-                    local _b = {["Friz Quadrata TT"]="Fonts\\FRIZQT__.TTF",["Arial Narrow"]="Fonts\\ARIALN.TTF",["Morpheus"]="Fonts\\MORPHEUS.TTF",["Skurri"]="Fonts\\skurri.ttf"}
-                    path = path or _b[sel] or "Fonts\\FRIZQT__.TTF"
-                    PVPHUB.currentFontPath = path
-                    PVPHUB.dataFont:SetFont(path, size, "OUTLINE")
                 end)
-                
-                -- Migration: Rename "Ungrouped" to "No Group" in existing saved data
-                if PVPHUB_SETTINGS.characterGroups and PVPHUB_SETTINGS.characterGroups.groups then
-                    for _, group in ipairs(PVPHUB_SETTINGS.characterGroups.groups) do
-                        if group.name == "Ungrouped" then
-                            group.name = "No Group"
+
+                SafeInitStep("schedule font apply", function()
+                    -- Must run after SavedVariables are loaded so selectedFont is ready.
+                    -- Deferred by one tick so LSM (OptionalDep) is guaranteed to be fully loaded.
+                    C_Timer.After(0, function()
+                        local sel  = (PVPHUB_SETTINGS and PVPHUB_SETTINGS.selectedFont) or "Friz Quadrata TT"
+                        local size = 12
+                        local path
+                        if LibStub then
+                            local LSM = LibStub("LibSharedMedia-3.0", true)
+                            if LSM then
+                                local ok, p = pcall(function() return LSM:Fetch("font", sel) end)
+                                if ok and p then path = p end
+                            end
                         end
-                    end
-                end
-                
-                -- Initialize MMR data
-                UpdateMMRData()
-                
-                -- Force refresh PvP data to prevent stale ratings from previous characters
-                C_Timer.After(1, function()
-                    if C_PvP.RequestBracketStats then
-                        C_PvP.RequestBracketStats()
-                    end
-                    if C_PvP.RequestSeasonBestInfo then
-                        C_PvP.RequestSeasonBestInfo()
-                    end
-                    -- Refresh the UI after requesting fresh data
-                    C_Timer.After(0.5, function()
-                        PVPHUB_RefreshUI()
+                        local _b = {["Friz Quadrata TT"]="Fonts\\FRIZQT__.TTF",["Arial Narrow"]="Fonts\\ARIALN.TTF",["Morpheus"]="Fonts\\MORPHEUS.TTF",["Skurri"]="Fonts\\skurri.ttf"}
+                        path = path or _b[sel] or "Fonts\\FRIZQT__.TTF"
+                        PVPHUB.currentFontPath = path
+                        PVPHUB.dataFont:SetFont(path, size, "OUTLINE")
                     end)
                 end)
-                
-                -- Clean up any dummy/example data from testing
-                if PVPHUB_DB["Shadowmage-Stormrage"] then
-                    PVPHUB_DB["Shadowmage-Stormrage"] = nil
-                end
-                if PVPHUB_DB["Holyknight-TichondiusDemoExampleData"] then
-                    PVPHUB_DB["Holyknight-TichondiusDemoExampleData"] = nil
-                end
-                
-                -- Clean up any existing dummy MMR history data for current character
-                local charKey = GetFullName()
-                if charKey and PVPHUB_DB[charKey] and PVPHUB_DB[charKey].mmrHistory then
-                -- Check if there are suspicious dummy entries (0 MMR changes)
-                for bracketKey, history in pairs(PVPHUB_DB[charKey].mmrHistory) do
-                    local allZeroes = true
-                    for _, match in ipairs(history) do
-                        if match.mmrChange ~= 0 or match.preMatchMMR ~= 0 or match.postMatchMMR ~= 0 then
-                            allZeroes = false
-                            break
+
+                SafeInitStep("migrate Ungrouped group name", function()
+                    -- Migration: Rename "Ungrouped" to "No Group" in existing saved data
+                    if PVPHUB_SETTINGS.characterGroups and PVPHUB_SETTINGS.characterGroups.groups then
+                        for _, group in ipairs(PVPHUB_SETTINGS.characterGroups.groups) do
+                            if group.name == "Ungrouped" then
+                                group.name = "No Group"
+                            end
                         end
                     end
-                    -- Remove histories that are all dummy/zero data
-                    if allZeroes then
-                        PVPHUB_DB[charKey].mmrHistory[bracketKey] = {}
+                end)
+
+                SafeInitStep("initialize MMR data", function()
+                    -- Initialize MMR data
+                    UpdateMMRData()
+                end)
+
+                SafeInitStep("schedule PvP data refresh", function()
+                    -- Force refresh PvP data to prevent stale ratings from previous characters
+                    C_Timer.After(1, function()
+                        if C_PvP.RequestBracketStats then
+                            C_PvP.RequestBracketStats()
+                        end
+                        if C_PvP.RequestSeasonBestInfo then
+                            C_PvP.RequestSeasonBestInfo()
+                        end
+                        -- Refresh the UI after requesting fresh data
+                        C_Timer.After(0.5, function()
+                            PVPHUB_RefreshUI()
+                        end)
+                    end)
+                end)
+
+                SafeInitStep("clean up dummy character data", function()
+                    -- Clean up any dummy/example data from testing
+                    if PVPHUB_DB["Shadowmage-Stormrage"] then
+                        PVPHUB_DB["Shadowmage-Stormrage"] = nil
                     end
-                end
-            end
-            
-            -- Initialize settings with protection
-            PVPHUB_SETTINGS = PVPHUB_SETTINGS or {
-                visibleColumns = {
-                    character = true,
-                    honor = true,
-                    conquest = true,
-                    bloodstones = true,
-                    rating2v2 = true,
-                    rating3v3 = true,
-                    ratingShuffle = true,
-                    ratingBlitz = true,
-                    ratingRBG = true,
-                    delete = true
-                },
-                compactMode = {
-                    enabled = false,
-                    selectedChars = {},
-                    showRatings = {
+                    if PVPHUB_DB["Holyknight-TichondiusDemoExampleData"] then
+                        PVPHUB_DB["Holyknight-TichondiusDemoExampleData"] = nil
+                    end
+                end)
+
+                SafeInitStep("clean up dummy MMR history", function()
+                    -- Clean up any existing dummy MMR history data for current character
+                    local charKey = GetFullName()
+                    if charKey and PVPHUB_DB[charKey] and PVPHUB_DB[charKey].mmrHistory then
+                        -- Check if there are suspicious dummy entries (0 MMR changes)
+                        for bracketKey, history in pairs(PVPHUB_DB[charKey].mmrHistory) do
+                            local allZeroes = true
+                            for _, match in ipairs(history) do
+                                if match.mmrChange ~= 0 or match.preMatchMMR ~= 0 or match.postMatchMMR ~= 0 then
+                                    allZeroes = false
+                                    break
+                                end
+                            end
+                            -- Remove histories that are all dummy/zero data
+                            if allZeroes then
+                                PVPHUB_DB[charKey].mmrHistory[bracketKey] = {}
+                            end
+                        end
+                    end
+                end)
+
+                SafeInitStep("initialize settings defaults", function()
+                    -- Initialize settings with protection
+                    PVPHUB_SETTINGS = PVPHUB_SETTINGS or {
+                        visibleColumns = {
+                            character = true,
+                            honor = true,
+                            conquest = true,
+                            bloodstones = true,
+                            rating2v2 = true,
+                            rating3v3 = true,
+                            ratingShuffle = true,
+                            ratingBlitz = true,
+                            ratingRBG = true,
+                            delete = true
+                        },
+                        compactMode = {
+                            enabled = false,
+                            selectedChars = {},
+                            showRatings = {
+                                rating2v2 = true,
+                                rating3v3 = true,
+                                ratingShuffle = true,
+                                ratingBlitz = false,
+                                ratingRBG = false
+                            }
+                        },
+                        colorTheme = "BLUE", -- Default theme
+                        welcomeShown = false -- Track if welcome popup has been shown
+                    }
+                    if not PVPHUB_SETTINGS.colorTheme then
+                        PVPHUB_SETTINGS.colorTheme = "BLUE"
+                    end
+                    if not PVPHUB_SETTINGS.mainWindow then
+                        PVPHUB_SETTINGS.mainWindow = {}
+                    end
+                    if PVPHUB_SETTINGS.mainWindow.roundedFrame == nil then
+                        PVPHUB_SETTINGS.mainWindow.roundedFrame = true
+                    end
+                    -- Ensure scale settings exist
+                    if not PVPHUB_SETTINGS.windowScale then
+                        PVPHUB_SETTINGS.windowScale = 1.0
+                    end
+                    if not PVPHUB_SETTINGS.compactWindowScale then
+                        PVPHUB_SETTINGS.compactWindowScale = 1.0
+                    end
+                end)
+
+                SafeInitStep("apply theme and refresh windows", function()
+                    ApplyTheme()
+                    RefreshAllWindows()
+                end)
+
+                SafeInitStep("backfill settings defaults for upgrades", function()
+                    if not PVPHUB_SETTINGS.compactMode then
+                        PVPHUB_SETTINGS.compactMode = {
+                            enabled = false,
+                            selectedChars = {},
+                            showRatings = {
+                                rating2v2 = true,
+                                rating3v3 = true,
+                                ratingShuffle = true,
+                                ratingBlitz = false,
+                                ratingRBG = false
+                            }
+                        }
+                    end
+                    local defaultColumns = {
+                        character = true,
+                        honor = true,
+                        conquest = true,
+                        bloodstones = true,
                         rating2v2 = true,
                         rating3v3 = true,
                         ratingShuffle = true,
-                        ratingBlitz = false,
-                        ratingRBG = false
+                        ratingBlitz = true,
+                        ratingRBG = true,
+                        delete = true
                     }
-                },
-                colorTheme = "BLUE", -- Default theme
-                welcomeShown = false -- Track if welcome popup has been shown
-            }
-            if not PVPHUB_SETTINGS.colorTheme then
-                PVPHUB_SETTINGS.colorTheme = "BLUE"
-            end
-            if not PVPHUB_SETTINGS.mainWindow then
-                PVPHUB_SETTINGS.mainWindow = {}
-            end
-            if PVPHUB_SETTINGS.mainWindow.roundedFrame == nil then
-                PVPHUB_SETTINGS.mainWindow.roundedFrame = true
-            end
-            -- Ensure scale settings exist
-            if not PVPHUB_SETTINGS.windowScale then
-                PVPHUB_SETTINGS.windowScale = 1.0
-            end
-            if not PVPHUB_SETTINGS.compactWindowScale then
-                PVPHUB_SETTINGS.compactWindowScale = 1.0
-            end
-            ApplyTheme()
-            RefreshAllWindows()
-            if not PVPHUB_SETTINGS.compactMode then
-                PVPHUB_SETTINGS.compactMode = {
-                    enabled = false,
-                    selectedChars = {},
-                    showRatings = {
-                        rating2v2 = true,
-                        rating3v3 = true,
-                        ratingShuffle = true,
-                        ratingBlitz = false,
-                        ratingRBG = false
-                    }
-                }
-            end
-            local defaultColumns = {
-                character = true,
-                honor = true,
-                conquest = true,
-                bloodstones = true,
-                rating2v2 = true,
-                rating3v3 = true,
-                ratingShuffle = true,
-                ratingBlitz = true,
-                ratingRBG = true,
-                delete = true
-            }
-            for column, default in pairs(defaultColumns) do
-                if PVPHUB_SETTINGS.visibleColumns[column] == nil then
-                    PVPHUB_SETTINGS.visibleColumns[column] = default
-                end
-            end
-            local currentVersion = C_AddOns.GetAddOnMetadata("PVPHUB", "Version") or "Unknown"
-            if not PVPHUB_SETTINGS.welcomeShown then
-                -- Fresh install: show welcome, record version, skip update popup
-                PVPHUB_SETTINGS.lastSeenVersion = currentVersion
-                C_Timer.After(1, function()
-                    PVPHUB:ShowWelcomePopup()
+                    for column, default in pairs(defaultColumns) do
+                        if PVPHUB_SETTINGS.visibleColumns[column] == nil then
+                            PVPHUB_SETTINGS.visibleColumns[column] = default
+                        end
+                    end
                 end)
-            elseif PVPHUB_SETTINGS.lastSeenVersion ~= currentVersion then
-                -- Existing user, version changed: show update popup
-                PVPHUB_SETTINGS.lastSeenVersion = currentVersion
-                C_Timer.After(2, function()
-                    PVPHUB:ShowUpdatePopup(currentVersion)
+
+                SafeInitStep("welcome/update popup", function()
+                    local currentVersion = C_AddOns.GetAddOnMetadata("PVPHUB", "Version") or "Unknown"
+                    if not PVPHUB_SETTINGS.welcomeShown then
+                        -- Fresh install: show welcome, record version, skip update popup
+                        PVPHUB_SETTINGS.lastSeenVersion = currentVersion
+                        C_Timer.After(1, function()
+                            PVPHUB:ShowWelcomePopup()
+                        end)
+                    elseif PVPHUB_SETTINGS.lastSeenVersion ~= currentVersion then
+                        -- Existing user, version changed: show update popup
+                        PVPHUB_SETTINGS.lastSeenVersion = currentVersion
+                        C_Timer.After(2, function()
+                            PVPHUB:ShowUpdatePopup(currentVersion)
+                        end)
+                    end
                 end)
-            end
-            if PVPHUB_SETTINGS.compactWindowStayOpen and not PVPHUB_SETTINGS.disableStreamerMode then
-                C_Timer.After(1, function()
-                    PVPHUB:CreateCompactWindow()
+
+                SafeInitStep("schedule compact window auto-open", function()
+                    if PVPHUB_SETTINGS.compactWindowStayOpen and not PVPHUB_SETTINGS.disableStreamerMode then
+                        C_Timer.After(1, function()
+                            PVPHUB:CreateCompactWindow()
+                        end)
+                    end
                 end)
+
+                SafeInitStep("schedule title tracker restore", function()
+                    -- Restore the floating title tracker (no-ops if nothing is
+                    -- ticked "track" in PVPHUB_SETTINGS.trackedTitles).
+                    C_Timer.After(1, function()
+                        if PVPHUB.UpdateTitleTracker then PVPHUB:UpdateTitleTracker() end
+                    end)
+                end)
+
+                SafeInitStep("schedule initial backup", function()
+                    -- Create initial backup after settings load
+                    C_Timer.After(3, CreateDataBackup)
+                end)
+
+                PVPHubPrint("|cffff0000[PVP HUB]|r Addon loaded!")
             end
-
-            -- Restore the floating title tracker (no-ops if nothing is
-            -- ticked "track" in PVPHUB_SETTINGS.trackedTitles).
-            C_Timer.After(1, function()
-                if PVPHUB.UpdateTitleTracker then PVPHUB:UpdateTitleTracker() end
-            end)
-
-            -- Create initial backup after settings load
-            C_Timer.After(3, CreateDataBackup)
-
-            PVPHubPrint("|cffff0000[PVP HUB]|r Addon loaded!")
-        end
     elseif event == "PLAYER_SPECIALIZATION_CHANGED" then
         -- Handle spec changes - simple version without notification system
         local charKey = GetFullName()
@@ -13394,41 +13451,44 @@ local function RegisterAddonCompartment()
     _G["PVPHUB_AddonCompartmentFuncOnEnter"] = PVPHUB_AddonCompartmentFuncOnEnter
     _G["PVPHUB_AddonCompartmentFuncOnLeave"] = PVPHUB_AddonCompartmentFuncOnLeave
     
-    -- LibDBIcon compatibility for addon collection tools
-    -- Create a minimal LibDataBroker object for PVPHUB
-    if not LibStub then
-        -- Create a minimal LibStub if it doesn't exist
-        LibStub = setmetatable({}, {
-            __call = function(self, major, minor)
-                if major == "LibDataBroker-1.1" then
-                    return {
-                        NewDataObject = function(self, name, obj)
-                            _G["LibDataBroker_" .. name] = obj
-                            return obj
-                        end
-                    }
-                elseif major == "LibDBIcon-1.0" then
-                    return {
-                        Register = function(self, name, obj, settings)
-                            -- Minimal registration for collection addon detection
-                            _G["LibDBIcon_" .. name] = {
-                                button = obj.miniMapButton,
-                                icon = obj.icon,
-                                IsRegistered = function() return true end,
-                                Show = function() end,
-                                Hide = function() end
-                            }
-                        end,
-                        IsRegistered = function(self, name) return _G["LibDBIcon_" .. name] ~= nil end
-                    }
+    -- LibDBIcon compatibility for addon collection tools.
+    -- IMPORTANT: never assign a stand-in to _G.LibStub. A real LibStub that
+    -- loads later (from another addon) checks `LibStub.minor < LIBSTUB_MINOR`
+    -- during its own setup; our stand-in has no .minor field, so that
+    -- comparison (nil < number) throws and aborts the real LibStub's init,
+    -- breaking every other addon that depends on it. Keep the fallback local
+    -- and only use it when the real LibStub genuinely isn't present.
+    local function GetLib(major)
+        if LibStub then
+            return LibStub(major, true)
+        end
+        if major == "LibDataBroker-1.1" then
+            return {
+                NewDataObject = function(self, name, obj)
+                    _G["LibDataBroker_" .. name] = obj
+                    return obj
                 end
-                return nil
-            end
-        })
+            }
+        elseif major == "LibDBIcon-1.0" then
+            return {
+                Register = function(self, name, obj, settings)
+                    -- Minimal registration for collection addon detection
+                    _G["LibDBIcon_" .. name] = {
+                        button = obj.miniMapButton,
+                        icon = obj.icon,
+                        IsRegistered = function() return true end,
+                        Show = function() end,
+                        Hide = function() end
+                    }
+                end,
+                IsRegistered = function(self, name) return _G["LibDBIcon_" .. name] ~= nil end
+            }
+        end
+        return nil
     end
-    
+
     -- Create LibDataBroker data object
-    local LDB = LibStub("LibDataBroker-1.1", true)
+    local LDB = GetLib("LibDataBroker-1.1")
     if LDB then
         local dataObj = LDB:NewDataObject("PVPHUB", {
             type = "launcher",
@@ -13457,7 +13517,7 @@ local function RegisterAddonCompartment()
         
         -- Register with LibDBIcon using saved minimap settings with retry logic
         local function TryRegisterIcon()
-            local LDBIcon = LibStub("LibDBIcon-1.0", true)
+            local LDBIcon = GetLib("LibDBIcon-1.0")
             if LDBIcon then
                 -- Unregister first if already registered to prevent conflicts
                 if LDBIcon:IsRegistered("PVPHUB") then
