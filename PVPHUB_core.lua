@@ -5960,9 +5960,33 @@ PVPHUB.frame:HookScript("OnEvent", function(self, event, ...)
                     -- character data structure changes between releases.
                     -- Add a migration block (if PVPHUB_DB.__dbVersion < N then ... end)
                     -- before bumping the constant so existing users upgrade cleanly.
-                    local CURRENT_DB_VERSION = 1
+                    local CURRENT_DB_VERSION = 2
                     PVPHUB_DB.__dbVersion = PVPHUB_DB.__dbVersion or 0
-                    -- (future migrations go here: if PVPHUB_DB.__dbVersion < 2 then ... end)
+
+                    if PVPHUB_DB.__dbVersion < 2 then
+                        -- One-time cleanup for anyone who hit the old bug before
+                        -- ClearCharacterSeasonData existed: the season-data reset
+                        -- (automatic boundary detection or "Start Fresh") used to
+                        -- clear bracketStats/wlData/etc. but not the legacy flat
+                        -- rating fields (rating2v2/rating3v3/ratingRBG/
+                        -- ratingShuffle/ratingBlitz) that the UI actually reads.
+                        -- A character reset while not logged in is left with
+                        -- bracketStats already nil but those fields still
+                        -- carrying stale values from before the reset — detect
+                        -- exactly that combination and finish the cleanup.
+                        for charKey, cdata in pairs(PVPHUB_DB) do
+                            if type(cdata) == "table" and charKey ~= "settings"
+                               and cdata.bracketStats == nil
+                               and IsCharacterStaleThisSeason(charKey) then
+                                cdata.rating2v2     = nil
+                                cdata.rating3v3     = nil
+                                cdata.ratingRBG     = nil
+                                cdata.ratingShuffle = nil
+                                cdata.ratingBlitz   = nil
+                            end
+                        end
+                    end
+
                     PVPHUB_DB.__dbVersion = CURRENT_DB_VERSION
                 end)
 
