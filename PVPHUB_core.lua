@@ -983,8 +983,36 @@ local function ValidateAndRestoreData()
         -- Silent: No backup available, initialized empty database
         return false
     end
-    
+
     return true
+end
+
+-- Single canonical list of what "this character's season-scoped PvP data"
+-- means, used by every place that clears it: the automatic season-boundary
+-- detection in UpdateCurrencyData AND the manual "Start Fresh" button. Before
+-- this existed, each site kept its own ad-hoc field list and they drifted out
+-- of sync — the button once forgot the legacy rating fields, and the
+-- automatic path was (and, absent this fix, would still be) missing those
+-- plus mmrHistory/lastKnownMMR/mmrData too. rating2v2/rating3v3/ratingRBG/
+-- ratingShuffle/ratingBlitz are the "legacy flat" fields every rating display
+-- in the addon actually reads (see pvp_tracking.lua's header comment) —
+-- bracketStats is the richer structure, but leaving the flat fields alone
+-- meant a character you hadn't logged into since the reset kept showing (and
+-- counting as "has a rating" for) last season's numbers.
+local function ClearCharacterSeasonData(data)
+    if type(data) ~= "table" then return end
+    data.conquestWeeklyData     = nil
+    data.bloodytokensWeeklyData = nil
+    data.bracketStats           = nil
+    data.wlData                 = nil
+    data.mmrHistory             = nil
+    data.lastKnownMMR           = nil
+    data.mmrData                = nil
+    data.rating2v2              = nil
+    data.rating3v3              = nil
+    data.ratingRBG              = nil
+    data.ratingShuffle          = nil
+    data.ratingBlitz            = nil
 end
 
 -- Global Variables with Protection
@@ -3138,18 +3166,17 @@ local function UpdateCurrencyData()
     if seasonChangedByID or seasonChangedByCap then
         DebugPrint(string.format("Season change detected (season %d -> %d, conquest cap %d -> %d)",
             lastSeason, currentSeason, lastConquestCap, conquestCapNow))
-        -- Clear all per-character seasonal tracking for every stored toon.
-        -- bracketStats/wlData feed the Stats tab's "this season" totals and
-        -- are each tagged with the season they were written under, but that
-        -- guard only works once fresh, correctly-tagged data replaces them -
-        -- wiping them here means an alt that hasn't logged in yet shows "no
-        -- data this season" instead of last season's numbers indefinitely.
+        -- Clear all per-character seasonal tracking for every stored toon —
+        -- see ClearCharacterSeasonData for the full field list and why it's
+        -- centralized. bracketStats/wlData feed the Stats tab's "this
+        -- season" totals and are each tagged with the season they were
+        -- written under, but that guard only works once fresh,
+        -- correctly-tagged data replaces them - wiping them here means an
+        -- alt that hasn't logged in yet shows "no data this season" instead
+        -- of last season's numbers indefinitely.
         for key, data in pairs(PVPHUB_DB) do
-            if type(data) == "table" then
-                data.conquestWeeklyData = nil
-                data.bloodytokensWeeklyData = nil
-                data.bracketStats = nil
-                data.wlData = nil
+            if type(data) == "table" and key ~= "settings" then
+                ClearCharacterSeasonData(data)
             end
         end
 
@@ -12619,26 +12646,7 @@ end)
 function PVPHUB:ExecuteSeasonFreshStart()
     for charKey, data in pairs(PVPHUB_DB) do
         if type(data) == "table" and charKey ~= "settings" then
-            data.conquestWeeklyData     = nil
-            data.bloodytokensWeeklyData = nil
-            data.bracketStats           = nil
-            data.wlData                 = nil
-            data.mmrHistory             = nil
-            data.lastKnownMMR           = nil
-            data.mmrData                = nil
-            -- Legacy flat/per-spec rating keys (see pvp_tracking.lua's header
-            -- comment: "PVPHUB_DB[charKey][bracketKey] — legacy flat/per-spec
-            -- keys, UI reads these"). bracketStats above is the newer rich
-            -- structure, but every rating display in the addon (Characters
-            -- tab, Streamer Mode list, "Hide No Rating") actually reads these
-            -- instead — they only get refreshed when a character logs back
-            -- in, so leaving them alone here meant every character you
-            -- hadn't logged into yet kept showing last season's ratings.
-            data.rating2v2     = nil
-            data.rating3v3     = nil
-            data.ratingRBG     = nil
-            data.ratingShuffle = nil
-            data.ratingBlitz   = nil
+            ClearCharacterSeasonData(data)
         end
     end
 
