@@ -381,16 +381,22 @@ function PVPHUB:ShowUpdatePopup(version)
     -- language instead of a plain bulleted list.
     local changes = {
         {
-            title = "Draggable Column Order",
-            desc  = "Drag any column header to reorder the Characters tab exactly how you want it — your custom order is remembered automatically.",
-            icon  = "Interface\\Icons\\INV_Scroll_11",
-            color = { 0.85, 0.65, 0.15 },
+            title = "Season Reset, Fully Fixed",
+            desc  = "\"Start Fresh\" (and the automatic new-season reset) now properly clears every character's old ratings, including alts you haven't logged into yet. If you were already affected, it's cleaned up automatically — no action needed.",
+            icon  = "Interface\\Icons\\INV_Misc_Broom_01",
+            color = { 0.3, 0.85, 0.45 },
         },
         {
-            title = "Aurora Theme",
-            desc  = "A new dark glass + indigo/violet color theme with a gradient background, plus a Window Glow toggle in Settings " .. CreateAtlasMarkup("common-icon-forwardarrow", 9, 12) .. " Appearance.",
-            icon  = "Interface\\Icons\\INV_Misc_Gem_Amethyst_02",
-            color = { 0.42, 0.38, 0.98 },
+            title = "Streamer Mode Polish",
+            desc  = "The bottom toolbar now matches your window's theme and color and sits flush against the panel, instead of looking like a separate mismatched bar underneath.",
+            icon  = "Interface\\Icons\\INV_Misc_Gear_02",
+            color = { 0.35, 0.7, 1.0 },
+        },
+        {
+            title = "Stability & Performance",
+            desc  = "A batch of under-the-hood fixes: less chance of a hitch right as a match ends, no more memory buildup during long streaming sessions, and a compatibility fix that could have interfered with other addons.",
+            icon  = "Interface\\Icons\\Trade_Engineering",
+            color = { 0.85, 0.65, 0.15 },
         },
     }
 
