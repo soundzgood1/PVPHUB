@@ -373,7 +373,7 @@ function PVPHUB:ShowUpdatePopup(version)
         {
             title = "Season Reset, Fully Fixed",
             desc  = "\"Start Fresh\" (and the automatic new-season reset) now properly clears every character's old ratings, including alts you haven't logged into yet. If you were already affected, it's cleaned up automatically — no action needed.",
-            icon  = "Interface\\Icons\\INV_Misc_Broom_01",
+            icon  = "Interface\\Icons\\Spell_Holy_Renew",
             color = { 0.3, 0.85, 0.45 },
         },
         {
@@ -403,7 +403,7 @@ function PVPHUB:ShowUpdatePopup(version)
         {
             title = "Warband Bank Tracking",
             desc  = "Total Gold now includes your Warband Bank balance, shown as its own line at the top of the breakdown.",
-            icon  = "Interface\\Icons\\Achievement_Guild_Bankdeposit",
+            icon  = "Interface\\Icons\\INV_Misc_Coin_01",
             color = { 0.2, 0.75, 0.75 },
         },
     }
