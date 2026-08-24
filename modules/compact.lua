@@ -244,14 +244,25 @@ function PVPHUB:CreateCompactWindow()
         
         -- Toolbar sits BELOW the content window; dragging the parent moves both.
         -- Controls fade in on hover and fade out after 3 s of inactivity.
+        -- Flush against the window (no gap) and matching its 1px backdrop
+        -- inset, so the visible background reads as one continuous panel
+        -- instead of a separate, differently-sized bar. Its color is set (and
+        -- kept in sync with the window's) in UpdateCompactWindow — not here —
+        -- since it must track theme changes and the custom background color
+        -- setting exactly like the window above it does.
         local toolbarHeight = 20
         local toolbar = CreateFrame("Frame", nil, PVPHUB.compactWindow, "BackdropTemplate")
-        toolbar:SetPoint("TOPLEFT",  PVPHUB.compactWindow, "BOTTOMLEFT",  0, -1)
-        toolbar:SetPoint("TOPRIGHT", PVPHUB.compactWindow, "BOTTOMRIGHT", 0, -1)
+        toolbar:SetPoint("TOPLEFT",  PVPHUB.compactWindow, "BOTTOMLEFT",  0, 0)
+        toolbar:SetPoint("TOPRIGHT", PVPHUB.compactWindow, "BOTTOMRIGHT", 0, 0)
         toolbar:SetHeight(toolbarHeight)
         toolbar:SetFrameLevel(PVPHUB.compactWindow:GetFrameLevel() + 1)
-        toolbar:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8x8", tile = false })
-        toolbar:SetBackdropColor(0, 0, 0, 0.72)
+        toolbar:SetBackdrop({
+            bgFile   = "Interface\\Buttons\\WHITE8x8",
+            edgeFile = "Interface\\Buttons\\WHITE8x8",
+            tile = false,
+            edgeSize = 1,
+            insets = { left = 1, right = 1, top = 0, bottom = 1 }
+        })
 
         PVPHUB.compactWindow.toolbar = toolbar
 
@@ -398,7 +409,7 @@ function PVPHUB:CreateCompactWindow()
         PVPHUB.compactWindow:SetClampedToScreen(true)
         -- Reserve space below the window equal to the toolbar height so the
         -- toolbar (anchored below the content frame) is never pushed off-screen.
-        PVPHUB.compactWindow:SetClampRectInsets(0, 0, 0, toolbarHeight + 1)
+        PVPHUB.compactWindow:SetClampRectInsets(0, 0, 0, toolbarHeight)
         PVPHUB.compactWindow:SetScript("OnDragStart", PVPHUB.compactWindow.StartMoving)
         PVPHUB.compactWindow:SetScript("OnDragStop", function(self)
             self:StopMovingOrSizing()
@@ -643,7 +654,21 @@ local function UpdateCompactWindowImpl()
         PVPHUB.compactWindow:SetBackdropColor(color[1], color[2], color[3], color[4] or 0.8)
         PVPHUB.compactWindow:SetBackdropBorderColor(0, 0, 0, 0)
     end
-    
+
+    -- Keep the toolbar's background matched to the window above it — same
+    -- color source (theme default or the custom background color), same
+    -- hideBackground behavior — so it reads as one continuous panel rather
+    -- than a mismatched bar bolted on underneath.
+    if PVPHUB.compactWindow.toolbar then
+        if PVPHUB_SETTINGS.compactMode.hideBackground then
+            PVPHUB.compactWindow.toolbar:SetBackdropColor(0, 0, 0, 0)
+        else
+            local tbColor = PVPHUB_SETTINGS.compactMode.backgroundColor or {unpack(UI_CONSTANTS.COLORS.COMPACT_BG)}
+            PVPHUB.compactWindow.toolbar:SetBackdropColor(tbColor[1], tbColor[2], tbColor[3], tbColor[4] or 0.8)
+        end
+        PVPHUB.compactWindow.toolbar:SetBackdropBorderColor(0, 0, 0, 0)
+    end
+
     -- If nothing is selected AND nothing is pinned, add current character by
     -- default. Checking pinnedSpecs too matters because graduating to
     -- pinned-spec rows (PromoteToMultiSpecIfNeeded) removes a character from
