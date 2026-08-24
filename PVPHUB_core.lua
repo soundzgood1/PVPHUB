@@ -4725,7 +4725,10 @@ local function ShowTotalsPopup(triggerBtn, titleText, titleColor, entries)
             row:SetPoint("TOPLEFT", TP_PAD, y)
             row.name:SetText(entry.coloredName)
             row.value:SetText(entry.value)
+            -- Entries with no char (e.g. Warband Bank — account-wide, not a
+            -- character) get no delete button; there's nothing to delete.
             row.deleteBtn.charKey = entry.char
+            row.deleteBtn:SetShown(entry.char ~= nil)
             row:Show()
             y = y - TP_ROW_H
         end
@@ -5954,6 +5957,22 @@ local function UpdatePvPRatings()
     end
 end
 
+-- Warband Bank gold is account-wide (shared across every character on the
+-- account), not per-character like GetMoney() — so unlike data.gold it's
+-- stored once in PVPHUB_SETTINGS rather than per charKey in PVPHUB_DB, and
+-- added to the Total Gold summary once rather than per character. Guarded
+-- against the API not existing (older client, or a future rename) since
+-- this hasn't been verified against a live game session.
+local function FetchWarbandGold()
+    if not C_Bank or not C_Bank.FetchDepositedMoney then return nil end
+    if not Enum or not Enum.BankType or not Enum.BankType.Account then return nil end
+    local ok, amount = pcall(C_Bank.FetchDepositedMoney, Enum.BankType.Account)
+    if ok and type(amount) == "number" then
+        return amount
+    end
+    return nil
+end
+
 local function UpdateAllData()
     -- Ensure database integrity before updates
     if not ValidateAndRestoreData() then
@@ -5971,7 +5990,13 @@ local function UpdateAllData()
 
     -- Get gold
     PVPHUB_DB[charKey].gold = GetMoney() or 0
-    
+
+    -- Get Warband Bank gold (account-wide, see FetchWarbandGold)
+    local warbandGold = FetchWarbandGold()
+    if warbandGold then
+        PVPHUB_SETTINGS.warbandGold = warbandGold
+    end
+
     -- Get regular item level
     local avgItemLevel, avgItemLevelEquipped = GetAverageItemLevel()
     PVPHUB_DB[charKey].itemLevel = avgItemLevelEquipped or avgItemLevel or 0
@@ -6799,6 +6824,12 @@ PVPHUB.frame:HookScript("OnEvent", function(self, event, ...)
         local charKey    = playerName .. "-" .. realmName
         if PVPHUB_DB and PVPHUB_DB[charKey] then
             PVPHUB_DB[charKey].gold = GetMoney() or 0
+        end
+        -- A deposit/withdrawal also changes Warband Bank's balance; catch it
+        -- here too instead of waiting for the next full UpdateAllData.
+        local warbandGold = FetchWarbandGold()
+        if warbandGold then
+            PVPHUB_SETTINGS.warbandGold = warbandGold
         end
     elseif event == "PLAYER_REGEN_ENABLED" then
         -- Player left combat - mark combat status and check for pending window open
@@ -10820,6 +10851,12 @@ SlashCmdList["PVPHUB"] = function(msg)
                     end
                 end
             end
+
+            -- Warband Bank is account-wide, not per-character — add it once
+            -- rather than in the per-character loop above (which would count
+            -- it once per character and wildly overstate the total).
+            totalGold = totalGold + (PVPHUB_SETTINGS.warbandGold or 0)
+
             -- Hoisted out of the comparator: table.sort calls this O(n log n)
             -- times, and UnitName/GetRealmName/concat don't change mid-sort.
             local currentPlayer = UnitName("player")
@@ -12166,24 +12203,37 @@ SlashCmdList["PVPHUB"] = function(msg)
                     -- Sort by highest gold
                     table.sort(charData, function(a, b) return a.gold > b.gold end)
 
+                    local function FormatGoldCopper(copper)
+                        local goldAmount = copper / 10000 -- Convert copper to gold
+                        if goldAmount >= 1000000 then
+                            return string.format("%.1fM", goldAmount / 1000000)
+                        elseif goldAmount >= 1000 then
+                            return string.format("%.1fk", goldAmount / 1000)
+                        else
+                            return string.format("%.0f", goldAmount)
+                        end
+                    end
+
                     local entries = {}
+
+                    -- Warband Bank first — account-wide, not a character, so
+                    -- it has no delete button (nil char) and isn't part of
+                    -- the per-character loop above. Only shown once we've
+                    -- actually fetched a value (see FetchWarbandGold).
+                    if PVPHUB_SETTINGS.warbandGold then
+                        table.insert(entries, {
+                            char = nil,
+                            coloredName = "|cff00ccffWarband Bank|r",
+                            value = "|cffffffff" .. FormatGoldCopper(PVPHUB_SETTINGS.warbandGold) .. "|r",
+                        })
+                    end
+
                     for _, entry in ipairs(charData) do
                         local classColor = RAID_CLASS_COLORS[entry.class] or RAID_CLASS_COLORS["WARRIOR"]
                         local coloredName = string.format("|cff%02x%02x%02x%s|r",
                             classColor.r * 255, classColor.g * 255, classColor.b * 255, entry.char)
-
-                        local goldAmount = entry.gold / 10000 -- Convert copper to gold
-                        local goldFormatted = ""
-                        if goldAmount >= 1000000 then
-                            goldFormatted = string.format("%.1fM", goldAmount / 1000000)
-                        elseif goldAmount >= 1000 then
-                            goldFormatted = string.format("%.1fk", goldAmount / 1000)
-                        else
-                            goldFormatted = string.format("%.0f", goldAmount)
-                        end
-
                         table.insert(entries, { char = entry.char, coloredName = coloredName,
-                            value = "|cffffffff" .. goldFormatted .. "|r" })
+                            value = "|cffffffff" .. FormatGoldCopper(entry.gold) .. "|r" })
                     end
 
                     ShowTotalsPopup(f.goldTooltipBtn, "Total Gold", { 1, 1, 0 }, entries)
