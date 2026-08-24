@@ -8164,7 +8164,11 @@ SlashCmdList["PVPHUB"] = function(msg)
 
                 local editBox = CreateFrame("EditBox", nil, dispContent, "InputBoxTemplate")
                 editBox:SetSize(60, 20)
-                editBox:SetPoint("LEFT", label, "RIGHT", 14, -1)
+                -- Fixed offset from each label's own LEFT edge (not its RIGHT
+                -- edge) — since every label starts at the same x, this lines
+                -- all three editboxes up in one column regardless of how
+                -- long "Honor Threshold:" vs. "Conquest Threshold:" is.
+                editBox:SetPoint("LEFT", label, "LEFT", 150, -1)
                 editBox:SetAutoFocus(false)
                 editBox:SetNumeric(true)
                 editBox:SetMaxLetters(9)
