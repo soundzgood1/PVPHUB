@@ -388,6 +388,24 @@ function PVPHUB:ShowUpdatePopup(version)
             icon  = "Interface\\Icons\\Trade_Engineering",
             color = { 0.85, 0.65, 0.15 },
         },
+        {
+            title = "Clean Up Stale Characters",
+            desc  = "Hovering Total Honor, Conquest, or Gold now shows an interactive list — click the |cffff5555x|r next to any character to permanently remove it. Handy after a realm transfer, since PVPHUB can't always auto-detect that old entry.",
+            icon  = "Interface\\Icons\\INV_Misc_Bomb_01",
+            color = { 0.9, 0.3, 0.3 },
+        },
+        {
+            title = "Currency Display Thresholds",
+            desc  = "New in Settings " .. CreateAtlasMarkup("common-icon-forwardarrow", 9, 12) .. " Display: set a minimum Honor, Conquest, or Gold amount, and characters below it are left out of the totals — so a pile of low-value alts doesn't dilute the number.",
+            icon  = "Interface\\Icons\\INV_Misc_Wrench_01",
+            color = { 0.6, 0.4, 0.9 },
+        },
+        {
+            title = "Warband Bank Tracking",
+            desc  = "Total Gold now includes your Warband Bank balance, shown as its own line at the top of the breakdown.",
+            icon  = "Interface\\Icons\\Achievement_Guild_Bankdeposit",
+            color = { 0.2, 0.75, 0.75 },
+        },
     }
 
     -- Fixed layout constants for each card, used both to build it and to
