@@ -8198,18 +8198,21 @@ SlashCmdList["PVPHUB"] = function(msg)
                 end)
                 editBox:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
-                return editBox
+                return label, editBox
             end
 
-            local honorThresholdBox = CreateThresholdRow(enableGroupsCheckbox,
+            -- Each row anchors to the previous row's LABEL (not its editbox,
+            -- which sits further right) so every label stays in one flush
+            -- left-aligned column instead of drifting right with each row.
+            local honorLabel, honorThresholdBox = CreateThresholdRow(enableGroupsCheckbox,
                 "Honor Threshold:",
                 "Only count characters with more than this much Honor toward Total Honor. 0 includes everyone.",
                 "honorThreshold")
-            local conquestThresholdBox = CreateThresholdRow(honorThresholdBox,
+            local conquestLabel, conquestThresholdBox = CreateThresholdRow(honorLabel,
                 "Conquest Threshold:",
                 "Only count characters with more than this much Conquest toward Total Conquest. 0 includes everyone.",
                 "conquestThreshold")
-            local goldThresholdBox = CreateThresholdRow(conquestThresholdBox,
+            local goldLabel, goldThresholdBox = CreateThresholdRow(conquestLabel,
                 "Gold Threshold:",
                 "Only count characters with more than this much Gold toward Total Gold. Value is in gold, not copper. 0 includes everyone.",
                 "goldThreshold")
