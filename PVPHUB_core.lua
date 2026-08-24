@@ -5960,10 +5960,10 @@ PVPHUB.frame:HookScript("OnEvent", function(self, event, ...)
                     -- character data structure changes between releases.
                     -- Add a migration block (if PVPHUB_DB.__dbVersion < N then ... end)
                     -- before bumping the constant so existing users upgrade cleanly.
-                    local CURRENT_DB_VERSION = 3
+                    local CURRENT_DB_VERSION = 4
                     PVPHUB_DB.__dbVersion = PVPHUB_DB.__dbVersion or 0
 
-                    if PVPHUB_DB.__dbVersion < 3 then
+                    if PVPHUB_DB.__dbVersion < 4 then
                         -- One-time cleanup for anyone who hit the old bug before
                         -- ClearCharacterSeasonData existed: the season-data reset
                         -- (automatic boundary detection or "Start Fresh") used to
@@ -5971,27 +5971,48 @@ PVPHUB.frame:HookScript("OnEvent", function(self, event, ...)
                         -- rating fields (rating2v2/rating3v3/ratingRBG/
                         -- ratingShuffle/ratingBlitz) that the UI actually reads.
                         --
-                        -- bracketStats and the legacy fields are always written
-                        -- together by SaveBracketStats, in the same call — there
-                        -- is no code path where bracketStats is nil but a legacy
-                        -- field genuinely holds current data. So bracketStats
-                        -- being nil is sufficient on its own to identify leftover
-                        -- stale values; an earlier version of this migration also
-                        -- required IsCharacterStaleThisSeason(), but that only
-                        -- reflects general login recency (stamped by any
-                        -- UpdateAllData call), not whether this character's PvP
-                        -- data specifically ever re-synced — a character logged
-                        -- into this season without a full rated-stats round trip
-                        -- completing reads as "not stale" while still carrying
-                        -- the exact leftover values this cleanup exists to catch.
-                        for charKey, cdata in pairs(PVPHUB_DB) do
-                            if type(cdata) == "table" and charKey ~= "settings"
-                               and cdata.bracketStats == nil then
-                                cdata.rating2v2     = nil
-                                cdata.rating3v3     = nil
-                                cdata.ratingRBG     = nil
-                                cdata.ratingShuffle = nil
-                                cdata.ratingBlitz   = nil
+                        -- Earlier versions of this migration (v2, v3) gated on
+                        -- "is bracketStats nil", but that signal doesn't survive
+                        -- a respec: ratingShuffle/ratingBlitz are stored per spec
+                        -- (specID -> rating), and SaveBracketStats only ever
+                        -- refreshes the CURRENTLY active spec's slot — a fresh
+                        -- game on the new spec repopulates bracketStats entirely,
+                        -- masking the fact that the OLD spec's slot in the same
+                        -- table is untouched leftover from before the reset.
+                        --
+                        -- Each bracketStats entry carries its own `season` tag,
+                        -- so instead compare per-slot: a legacy value survives
+                        -- only if bracketStats has a same-season entry backing
+                        -- it specifically (per bracket for 2v2/3v3/RBG, per
+                        -- spec for Shuffle/Blitz) — anything else is leftover.
+                        local currentSeason = (C_PvP and C_PvP.GetUIDisplaySeason and C_PvP.GetUIDisplaySeason()) or 0
+                        if currentSeason > 0 then
+                            for charKey, cdata in pairs(PVPHUB_DB) do
+                                if type(cdata) == "table" and charKey ~= "settings" then
+                                    local bs = cdata.bracketStats
+
+                                    for _, key in ipairs({"rating2v2", "rating3v3", "ratingRBG"}) do
+                                        local entry = type(bs) == "table" and bs[key]
+                                        local isFresh = type(entry) == "table" and entry.season == currentSeason
+                                        if not isFresh then
+                                            cdata[key] = nil
+                                        end
+                                    end
+
+                                    for _, key in ipairs({"ratingShuffle", "ratingBlitz"}) do
+                                        local legacy = cdata[key]
+                                        if type(legacy) == "table" then
+                                            local bsBracket = type(bs) == "table" and bs[key]
+                                            for specID in pairs(legacy) do
+                                                local entry = type(bsBracket) == "table" and bsBracket[specID]
+                                                local isFresh = type(entry) == "table" and entry.season == currentSeason
+                                                if not isFresh then
+                                                    legacy[specID] = nil
+                                                end
+                                            end
+                                        end
+                                    end
+                                end
                             end
                         end
                     end
