@@ -11851,10 +11851,21 @@ SlashCmdList["PVPHUB"] = function(msg)
                     if #charData == 0 then
                         GameTooltip:AddLine("No honor found", 0.6, 0.6, 0.6)
                     end
-                    
+
+                    -- A character that transferred realms shows up under
+                    -- every realm it's ever been on — PVPHUB can't reliably
+                    -- tell that apart from two genuinely different
+                    -- characters (see the GUID rename/transfer migration
+                    -- comment near ADDON_LOADED), so it can't auto-merge or
+                    -- auto-remove these. Point at the manual fix instead.
+                    if #charData > 0 then
+                        GameTooltip:AddLine(" ", 1, 1, 1)
+                        GameTooltip:AddLine("Realm transfer left an old entry? Right-click it in the roster and choose Delete Character.", 0.55, 0.55, 0.55, true)
+                    end
+
                     GameTooltip:Show()
                 end)
-                
+
                 f.honorTooltipBtn:SetScript("OnLeave", function()
                     GameTooltip:Hide()
                 end)
@@ -11905,10 +11916,15 @@ SlashCmdList["PVPHUB"] = function(msg)
                     if #charData == 0 then
                         GameTooltip:AddLine("No conquest found", 0.6, 0.6, 0.6)
                     end
-                    
+
+                    if #charData > 0 then
+                        GameTooltip:AddLine(" ", 1, 1, 1)
+                        GameTooltip:AddLine("Realm transfer left an old entry? Right-click it in the roster and choose Delete Character.", 0.55, 0.55, 0.55, true)
+                    end
+
                     GameTooltip:Show()
                 end)
-                
+
                 f.conquestTooltipBtn:SetScript("OnLeave", function()
                     GameTooltip:Hide()
                 end)
@@ -11963,10 +11979,15 @@ SlashCmdList["PVPHUB"] = function(msg)
                     if #charData == 0 then
                         GameTooltip:AddLine("No gold found", 0.6, 0.6, 0.6)
                     end
-                    
+
+                    if #charData > 0 then
+                        GameTooltip:AddLine(" ", 1, 1, 1)
+                        GameTooltip:AddLine("Realm transfer left an old entry? Right-click it in the roster and choose Delete Character.", 0.55, 0.55, 0.55, true)
+                    end
+
                     GameTooltip:Show()
                 end)
-                
+
                 f.goldTooltipBtn:SetScript("OnLeave", function()
                     GameTooltip:Hide()
                 end)
