@@ -2006,15 +2006,14 @@ function PVPHUB:RefreshCompactTheme()
         -- CreateFrame call that would otherwise snap back to the default
         -- SetPoint("CENTER") every time the theme changes.
         local point, relativeTo, relativePoint, xOfs, yOfs = PVPHUB.compactSettingsWindow:GetPoint(1)
-        local name = PVPHUB.compactSettingsWindow:GetName()
-        if name then
-            for i = #UISpecialFrames, 1, -1 do
-                if UISpecialFrames[i] == name then
-                    table.remove(UISpecialFrames, i)
-                    break
-                end
-            end
-        end
+        -- Deliberately NOT removing this frame's name from UISpecialFrames here.
+        -- UISpecialFrames is a shared Blizzard table, and repeatedly
+        -- table.remove()-ing from it at runtime (shifting every later index)
+        -- taints it — Blizzard's own Escape-key handling then throws "attempted
+        -- to iterate a table that cannot be accessed while tainted" the next
+        -- time it needs to walk the list. A stale leftover name is harmless:
+        -- ClearNamedGlobalsRecursive (below) nils out _G[name], and Blizzard's
+        -- iteration already skips any entry whose global no longer resolves.
         PVPHUB.compactSettingsWindow:Hide()
         -- Clear this frame's and every named descendant's _G entry (e.g. the
         -- font picker) before dropping our own reference — otherwise each
