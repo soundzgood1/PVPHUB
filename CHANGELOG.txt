@@ -1,3 +1,6 @@
+## v6.6.2 Hotfix - Bug Fixes
+- Fixed: A rare taint error ("attempted to iterate a table that cannot be accessed while tainted") that could occur when the compact/streamer window's theme changed, caused by repeatedly modifying a shared Blizzard UI table on every theme rebuild
+
 ## v6.6.1 - Season Popup & Stale-Tag Fixes
 - Changed: The "Start Fresh for New Season" popup no longer opens itself automatically at login — it's now only reachable via the "Start Fresh" button beside Streamer Mode
 - Fixed: A never-logged-in character (e.g. a brand new alt right after installing PVPHUB) could incorrectly show the "(last season)" dimmed tag; that tag is now only applied to characters that actually have recorded activity predating the season boundary
