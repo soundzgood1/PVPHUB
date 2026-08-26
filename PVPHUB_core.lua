@@ -1196,7 +1196,11 @@ local function ArchiveSignature()
                     end
                 end
             end
-            n = n + (data.honor or 0) + (data.conquest or 0)
+            -- seasonTag belongs in here too: it decides whether the stored
+            -- values count as current, so two snapshots differing only by tag
+            -- are NOT the same backup, and skipping one would archive the
+            -- stale tag alongside otherwise-identical data.
+            n = n + (data.honor or 0) + (data.conquest or 0) + (data.seasonTag or 0)
             total = total + n
         end
     end
