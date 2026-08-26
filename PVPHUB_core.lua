@@ -2048,6 +2048,28 @@ local function ShowBackupsWindow()
     -- released first (otherwise every refresh would stack another set on top).
     local rows = {}
 
+    -- When a backup was taken, as an absolute date — "34 minutes ago" is the
+    -- wrong unit for a backup browser, where the question is which day you
+    -- want to go back to. The relative age is kept as a secondary hint.
+    --
+    -- SecondsToTime(0) returns an empty string, which rendered a heading of
+    -- just " ago" for a snapshot taken seconds earlier, so anything under a
+    -- minute is worded rather than formatted.
+    local function FormatWhen(ts)
+        if not ts then return "unknown time", "" end
+        local absolute = date("%d.%m.%Y  %H:%M", ts)
+        local age = GetServerTime() - ts
+        local relative
+        if age < 60 then
+            relative = "just now"
+        elseif SecondsToTime then
+            relative = SecondsToTime(age) .. " ago"
+        else
+            relative = math.floor(age / 60) .. " min ago"
+        end
+        return absolute, relative
+    end
+
     function window.UpdateContent()
         for _, r in ipairs(rows) do
             r:Hide()
@@ -2078,11 +2100,10 @@ local function ShowBackupsWindow()
             row:SetBackdropColor(1, 1, 1, 0.04)
             row:SetBackdropBorderColor(0.35, 0.35, 0.42, 0.8)
 
-            local age = (SecondsToTime and snap.timestamp)
-                        and SecondsToTime(GetServerTime() - snap.timestamp) or "unknown age"
+            local absolute, relative = FormatWhen(snap.timestamp)
             local heading = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
             heading:SetPoint("TOPLEFT", row, "TOPLEFT", 10, -8)
-            heading:SetText(string.format("%s ago  |cff888888(%s)|r", age, snap.reason or "snapshot"))
+            heading:SetText(string.format("%s  |cff888888(%s)|r", absolute, snap.reason or "snapshot"))
             heading:SetTextColor(1, 1, 1, 1)
 
             local plan = FindDataFromArchive(i)
@@ -2092,7 +2113,8 @@ local function ShowBackupsWindow()
             detail:SetJustifyH("LEFT")
 
             if not plan then
-                detail:SetText(string.format("%d characters saved — nothing missing right now", snap.chars or 0))
+                detail:SetText(string.format("|cff777777%s|r — %d characters saved, nothing missing right now",
+                    relative, snap.chars or 0))
                 detail:SetTextColor(0.6, 0.6, 0.6, 1)
             else
                 local bits = {}
@@ -2102,8 +2124,8 @@ local function ShowBackupsWindow()
                 if plan.fillCount > 0 then
                     table.insert(bits, string.format("%d with missing season data", plan.fillCount))
                 end
-                detail:SetText(string.format("%d saved — |cffffd100can restore: %s|r",
-                    snap.chars or 0, table.concat(bits, ", ")))
+                detail:SetText(string.format("|cff777777%s|r — %d saved, |cffffd100can restore: %s|r",
+                    relative, snap.chars or 0, table.concat(bits, ", ")))
                 detail:SetTextColor(0.85, 0.85, 0.85, 1)
             end
 
@@ -2126,8 +2148,8 @@ local function ShowBackupsWindow()
                     end
                     PVPHUB._pendingWipeRestorePlan = plan
                     StaticPopup_Show("PVPHUB_RESTORE_LAST_WIPE", string.format(
-                        "Restore from the backup taken %s ago (%s)?\n\nThis will %s.\n\nNothing you currently have is overwritten.",
-                        age, snap.reason or "snapshot", table.concat(what, ", and ")))
+                        "Restore from the backup taken %s (%s)?\n\nThis will %s.\n\nNothing you currently have is overwritten.",
+                        absolute, snap.reason or "snapshot", table.concat(what, ", and ")))
                 end)
             else
                 restoreBtn:SetScript("OnEnter", function(self)
@@ -7570,7 +7592,9 @@ SlashCmdList["PVPHUB"] = function(msg)
         end
         print("|cffff0000[PVPHUB]|r Available backups:")
         for i, snap in ipairs(archive) do
-            local age  = SecondsToTime and SecondsToTime(GetServerTime() - (snap.timestamp or GetServerTime())) or "?"
+            -- Absolute date, same as the Manage Backups window — you pick a
+            -- backup by when it was taken, not by how long ago that was.
+            local when = snap.timestamp and date("%d.%m.%Y %H:%M", snap.timestamp) or "unknown time"
             local plan = FindDataFromArchive(i)
             local detail
             if not plan then
@@ -7585,8 +7609,8 @@ SlashCmdList["PVPHUB"] = function(msg)
                 end
                 detail = table.concat(bits, ", ")
             end
-            print(string.format("  |cff00ff00%d|r  %s ago  —  %d chars saved  —  %s  (%s)",
-                i, age, snap.chars or 0, detail, snap.reason or "snapshot"))
+            print(string.format("  |cff00ff00%d|r  %s  —  %d chars saved  —  %s  (%s)",
+                i, when, snap.chars or 0, detail, snap.reason or "snapshot"))
         end
         print("  Use |cff00ff00/pvphub restore <number>|r to restore one.")
         return
@@ -7605,7 +7629,7 @@ SlashCmdList["PVPHUB"] = function(msg)
             PVPHubPrint("|cffff0000[PVPHUB]|r Nothing to restore from backup #" .. index .. " — your current data already has everything it holds.")
             return
         end
-        local ageText = (SecondsToTime and SecondsToTime(GetServerTime() - (snapshot.timestamp or GetServerTime()))) or "a while"
+        local whenText = snapshot.timestamp and date("%d.%m.%Y %H:%M", snapshot.timestamp) or "an earlier time"
         local what = {}
         if plan.recreateCount > 0 then
             table.insert(what, string.format("bring back %d character(s) that are missing entirely", plan.recreateCount))
@@ -7615,8 +7639,8 @@ SlashCmdList["PVPHUB"] = function(msg)
         end
         PVPHUB._pendingWipeRestorePlan = plan
         StaticPopup_Show("PVPHUB_RESTORE_LAST_WIPE", string.format(
-            "Restore from the backup taken %s ago (%s)?\n\nThis will %s.\n\nNothing you currently have is overwritten.",
-            ageText, snapshot.reason or "snapshot", table.concat(what, ", and ")))
+            "Restore from the backup taken %s (%s)?\n\nThis will %s.\n\nNothing you currently have is overwritten.",
+            whenText, snapshot.reason or "snapshot", table.concat(what, ", and ")))
         return
     elseif command == "resetpos" then
         -- Reset window positions to center of screen
