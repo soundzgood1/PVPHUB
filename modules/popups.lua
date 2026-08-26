@@ -516,22 +516,27 @@ function PVPHUB:ShowUpdatePopup(version)
 end
 
 -- New Spec Popup Functions
+--
+-- The window is built once and reused. Re-showing it used to just call :Show()
+-- and ignore the specName argument entirely, so the second and every later
+-- respec still displayed the FIRST spec's name and icon. The cached window now
+-- refreshes its text before showing.
 function PVPHUB:ShowNewSpecPopup(specName)
     if PVPHUB.newSpecWindow then
+        if PVPHUB.newSpecWindow.SetSpec then
+            PVPHUB.newSpecWindow:SetSpec(specName)
+        end
         PVPHUB.newSpecWindow:Show()
         return
     end
-    
-    -- Get current spec icon
-    local specIndex = GetSpecialization()
+
+    -- Get current spec icon (deprecated-API safe, see modules/compat.lua)
     local specIcon = "Interface\\Icons\\INV_Misc_QuestionMark"
-    if specIndex then
-        local specID = GetSpecializationInfo(specIndex)
-        if specID then
-            local _si = GetCachedSpecInfo(specID)
-            if _si and _si.icon then
-                specIcon = _si.icon
-            end
+    local specID = PVPHUB.Compat.GetCurrentSpecID()
+    if specID then
+        local _si = GetCachedSpecInfo(specID)
+        if _si and _si.icon then
+            specIcon = _si.icon
         end
     end
     
@@ -618,168 +623,22 @@ function PVPHUB:ShowNewSpecPopup(specName)
     closeBtn:SetScript("OnClick", function()
         f:Hide()
     end)
-    
+
+    -- Re-points every spec-dependent string at the current spec, so the reused
+    -- window never shows a previous respec's name or icon.
+    function f:SetSpec(newSpecName)
+        local icon = "Interface\\Icons\\INV_Misc_QuestionMark"
+        local sid  = PVPHUB.Compat.GetCurrentSpecID()
+        if sid then
+            local si = GetCachedSpecInfo(sid)
+            if si and si.icon then icon = si.icon end
+        end
+        newSpecName = newSpecName or "your new specialization"
+        specText:SetText("|T" .. icon .. ":20:20|t " .. newSpecName .. " detected!")
+        warningText:SetText("|T" .. icon .. ":16:16|t Ratings for " .. newSpecName ..
+            " will appear shortly.\nIf they don't update within a few seconds, try playing a rated match.")
+    end
+
     PVPHUB.newSpecWindow = f
     f:Show()
 end
-
--- "Start Fresh for New Season" popup — offers to clear last season's ratings,
--- W/L, match history, and conquest/token progress across every tracked
--- character. Only reachable via the "Start Fresh" button beside Streamer
--- Mode — it no longer opens itself automatically at login. Branded like the
--- rest of the addon's popups instead of a generic StaticPopup — logo, theme
--- colors, custom buttons.
---
--- Either decision button marks the season resolved (PVPHUB_SETTINGS.
--- seasonFreshStartResolvedForSeason).
-function PVPHUB:ShowSeasonFreshStartPopup()
-    if PVPHUB.seasonFreshStartWindow then
-        PVPHUB.seasonFreshStartWindow:Show()
-        return
-    end
-
-    local f = CreateFrame("Frame", "PVPHUBSeasonFreshStartWindow", UIParent, "BackdropTemplate")
-    f:SetFrameStrata("FULLSCREEN_DIALOG")
-    f:SetSize(440, 400) -- height is a placeholder; recomputed from content at the end
-    f:SetPoint("CENTER")
-    f:SetMovable(true)
-    f:EnableMouse(true)
-    f:RegisterForDrag("LeftButton")
-    f:SetClampedToScreen(true)
-    f:SetScript("OnDragStart", f.StartMoving)
-    f:SetScript("OnDragStop", f.StopMovingOrSizing)
-
-    f:SetBackdrop({
-        bgFile = "Interface\\Buttons\\WHITE8x8",
-        edgeFile = "Interface\\Buttons\\WHITE8x8",
-        tile = false, tileSize = 0, edgeSize = 2,
-        insets = { left = 2, right = 2, top = 2, bottom = 2 }
-    })
-    f:SetBackdropColor(unpack(UI_CONSTANTS.COLORS.WINDOW_BG))
-    f:SetBackdropBorderColor(unpack(UI_CONSTANTS.COLORS.WINDOW_BORDER))
-
-    local glowFrame = CreateFrame("Frame", nil, f, "BackdropTemplate")
-    glowFrame:SetBackdrop({
-        bgFile = "Interface\\Buttons\\WHITE8x8",
-        edgeFile = "Interface\\Buttons\\WHITE8x8",
-        tile = false, edgeSize = 8,
-        insets = { left = -8, right = -8, top = -8, bottom = -8 }
-    })
-    glowFrame:SetBackdropColor(0, 0, 0, 0)
-    glowFrame:SetBackdropBorderColor(unpack(UI_CONSTANTS.COLORS.WINDOW_GLOW))
-    glowFrame:SetPoint("TOPLEFT", f, "TOPLEFT", -8, 8)
-    glowFrame:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", 8, -8)
-    glowFrame:SetFrameLevel(f:GetFrameLevel() - 1)
-
-    -- Logo + title, centered like the Welcome popup — this is a seasonal
-    -- moment worth a bit of presence, not just a settings confirmation.
-    local logo = f:CreateTexture(nil, "OVERLAY")
-    logo:SetTexture("Interface\\AddOns\\PVPHUB\\media\\PVPHUB.png")
-    logo:SetSize(40, 40)
-    logo:SetPoint("TOP", 0, -20)
-
-    local title = f:CreateFontString(nil, "OVERLAY")
-    title:SetPoint("TOP", logo, "BOTTOM", 0, -10)
-    title:SetFont("Fonts\\FRIZQT__.TTF", 19, "OUTLINE")
-    title:SetText("Start Fresh for the New Season")
-    title:SetTextColor(unpack(UI_CONSTANTS.COLORS.TITLE_COLOR))
-
-    local divider1 = f:CreateTexture(nil, "OVERLAY")
-    divider1:SetColorTexture(unpack(UI_CONSTANTS.COLORS.ACCENT_LINE))
-    divider1:SetSize(380, 1)
-    divider1:SetPoint("TOP", title, "BOTTOM", 0, -14)
-
-    local cursorY = 20 + logo:GetHeight() + 10 + title:GetStringHeight() + 14 + 1
-
-    -- Body copy
-    local bodyText = f:CreateFontString(nil, "OVERLAY")
-    bodyText:SetPoint("TOP", divider1, "BOTTOM", 0, -16)
-    bodyText:SetFont("Fonts\\FRIZQT__.TTF", 13)
-    bodyText:SetTextColor(1, 1, 1, 1)
-    bodyText:SetWidth(370)
-    bodyText:SetWordWrap(true)
-    bodyText:SetJustifyH("CENTER")
-    bodyText:SetText("This clears last season's ratings, win/loss records, match history, and conquest/token progress for every tracked character — so your dashboard starts clean for the new season.")
-    cursorY = cursorY + 16 + bodyText:GetStringHeight()
-
-    local keptText = f:CreateFontString(nil, "OVERLAY")
-    keptText:SetPoint("TOP", bodyText, "BOTTOM", 0, -12)
-    keptText:SetFont("Fonts\\FRIZQT__.TTF", 12)
-    keptText:SetTextColor(unpack(UI_CONSTANTS.COLORS.HEADER_COLOR))
-    keptText:SetWidth(370)
-    keptText:SetWordWrap(true)
-    keptText:SetJustifyH("CENTER")
-    keptText:SetText("Honor, gold, notes, and settings are kept.")
-    cursorY = cursorY + 12 + keptText:GetStringHeight()
-
-    local warnText = f:CreateFontString(nil, "OVERLAY")
-    warnText:SetPoint("TOP", keptText, "BOTTOM", 0, -10)
-    warnText:SetFont("Fonts\\FRIZQT__.TTF", 11)
-    warnText:SetTextColor(0.55, 0.55, 0.55, 1)
-    warnText:SetText("This can't be undone.")
-    cursorY = cursorY + 10 + warnText:GetStringHeight()
-
-    local divider2 = f:CreateTexture(nil, "OVERLAY")
-    divider2:SetColorTexture(unpack(UI_CONSTANTS.COLORS.ACCENT_LINE))
-    divider2:SetSize(380, 1)
-    divider2:SetPoint("TOP", warnText, "BOTTOM", 0, -16)
-    cursorY = cursorY + 16 + 1
-
-    -- Primary action — green-tinted to read as the positive/recommended path
-    -- without overriding the window's own theme color everywhere else.
-    local acceptBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    acceptBtn:SetSize(260, 30)
-    acceptBtn:SetPoint("TOP", divider2, "BOTTOM", 0, -16)
-    acceptBtn:SetText("Yes, Start Fresh")
-    acceptBtn:GetFontString():SetTextColor(0.4, 1, 0.55, 1)
-    cursorY = cursorY + 16 + 30
-
-    -- Secondary action — long label, so this button is taller and its
-    -- fontstring wraps to two lines instead of overflowing/clipping.
-    local declineBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-    declineBtn:SetSize(300, 36)
-    declineBtn:SetPoint("TOP", acceptBtn, "BOTTOM", 0, -10)
-    declineBtn:SetText("I'll log into every character myself, no reset needed")
-    local declineFS = declineBtn:GetFontString()
-    declineFS:SetWidth(270)
-    declineFS:SetWordWrap(true)
-    declineFS:SetJustifyH("CENTER")
-    declineFS:SetTextColor(0.75, 0.75, 0.75, 1)
-    cursorY = cursorY + 10 + 36
-
-    -- X close — makes no decision, so seasonFreshStartResolvedForSeason is
-    -- left untouched; both buttons below explicitly resolve it. Since this
-    -- popup only opens via the "Start Fresh" button, closing it this way
-    -- just requires clicking that button again to reopen it.
-    local xBtn = CreateFrame("Button", nil, f, "UIPanelCloseButton")
-    xBtn:SetPoint("TOPRIGHT", -5, -5)
-    xBtn:SetScript("OnClick", function() f:Hide() end)
-
-    -- The actual data wipe/decline logic lives in PVPHUB_core.lua (it needs
-    -- several locals — UpdateCurrencyData, CURRENCY_IDS, PVPHubPrint — that
-    -- only exist in that file's chunk); this module stays UI-only and just
-    -- calls the exported handles.
-    --
-    -- "Yes, Start Fresh" doesn't wipe immediately — it sits right next to
-    -- the decline button, so a misclick here would otherwise be irreversible
-    -- in one press. It opens a final native "are you sure?" confirm
-    -- (PVPHUB_CONFIRM_SEASON_FRESH_START) instead; only accepting that
-    -- actually runs the wipe.
-    acceptBtn:SetScript("OnClick", function()
-        f:Hide()
-        StaticPopup_Show("PVPHUB_CONFIRM_SEASON_FRESH_START")
-    end)
-
-    declineBtn:SetScript("OnClick", function()
-        PVPHUB:DeclineSeasonFreshStart()
-        f:Hide()
-    end)
-
-    -- Now that every element's actual size is known, size the window to fit
-    -- it exactly instead of an earlier fixed guess.
-    f:SetHeight(cursorY + 26)
-
-    PVPHUB.seasonFreshStartWindow = f
-    f:Show()
-end
-

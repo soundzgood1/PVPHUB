@@ -1,9 +1,9 @@
 ## Interface: 120007, 120100
 ## Title: |cffffd100PVPHUB|r
-## Version: 6.6.4
+## Version: 6.6.5
 ## Author: Soundz
 ## Notes: Thanks for using PVPHUB — your feedback keeps making it better ♥
-## SavedVariables: PVPHUB_DB, PVPHUB_DB_BACKUP, PVPHUB_IGNORED, PVPHUB_SETTINGS
+## SavedVariables: PVPHUB_DB, PVPHUB_DB_BACKUP, PVPHUB_DB_ARCHIVE, PVPHUB_IGNORED, PVPHUB_SETTINGS
 ## IconTexture: Interface\AddOns\PVPHUB\media\PVPHUB.png
 ## AddonCompartmentFunc: PVPHUB_AddonCompartmentFunc
 ## AddonCompartmentFuncOnEnter: PVPHUB_AddonCompartmentFuncOnEnter
@@ -14,6 +14,10 @@
 ## X-Curse-Project-ID: 1278845
 ## X-WoWI-ID: 
 ## X-Wago-ID: 
+
+# Compatibility wrappers must load before everything else — every other file
+# aliases PVPHUB.Compat at its own load time.
+modules\compat.lua
 
 # Load modules first
 modules\themes.lua

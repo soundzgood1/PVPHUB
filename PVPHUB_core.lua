@@ -1,5 +1,14 @@
 ﻿local _, PVPHUB = ...
 
+-- Deprecated-API wrappers (modules/compat.lua, loaded first — see its header
+-- for why these exist). Aliased here so call sites stay short.
+-- NOTE: this chunk is close to Lua's hard limit of 200 file-level locals
+-- (currently ~183). Prefer PVPHUB.Compat.X at the call site over adding new
+-- aliases here until the file is split up — see the audit's F-09.
+local GetSpecIndex      = PVPHUB.Compat.GetSpecIndex
+local GetSpecInfo       = PVPHUB.Compat.GetSpecInfo
+local GetItemCountSafe  = PVPHUB.Compat.GetItemCount
+
 -- Shared named font object used as the template for ALL data rows and column
 -- headers. Updating this one object instantly changes every FontString that
 -- uses "PVPHUBDataFont" as its template — no UpdateContent rebuild needed for
@@ -68,16 +77,42 @@ end
 -- immediately and remembers the FontString so PVPHUB:RefreshTrackedFonts()
 -- (called from ApplyFontChanges when the user picks a new font) can push the
 -- change to it live.
+--
+-- Scopes: FontStrings belonging to UI that gets rebuilt (currently the Season
+-- tab, which recreates every card and tile on each render) must be registered
+-- under a scope name, and that scope cleared before the rebuild. Without it
+-- this table only ever grew: it holds a hard reference to every FontString it
+-- has ever seen, so orphaned ones could never be collected and
+-- RefreshTrackedFonts got slower with every render. Long-lived chrome that is
+-- built once needs no scope and stays in the default bucket forever.
 PVPHUB._trackedFontStrings = PVPHUB._trackedFontStrings or {}
-local function RegisterTrackedFont(fontString, size, flags)
+PVPHUB._trackedFontScopes  = PVPHUB._trackedFontScopes  or {}
+local function RegisterTrackedFont(fontString, size, flags, scope)
     if not fontString then return fontString end
     size = size or 12
     flags = flags or "OUTLINE"
-    table.insert(PVPHUB._trackedFontStrings, { fs = fontString, size = size, flags = flags })
+    local bucket = PVPHUB._trackedFontStrings
+    if scope then
+        bucket = PVPHUB._trackedFontScopes[scope]
+        if not bucket then
+            bucket = {}
+            PVPHUB._trackedFontScopes[scope] = bucket
+        end
+    end
+    table.insert(bucket, { fs = fontString, size = size, flags = flags })
     SafeSetFont(fontString, PVPHUB_ResolveFontPath(), size, flags)
     return fontString
 end
+
+-- Drops every FontString registered under a scope. Call immediately before
+-- rebuilding that scope's widgets.
+local function ClearTrackedFontScope(scope)
+    if scope and PVPHUB._trackedFontScopes[scope] then
+        PVPHUB._trackedFontScopes[scope] = {}
+    end
+end
 PVPHUB._RegisterTrackedFont = RegisterTrackedFont
+PVPHUB._ClearTrackedFontScope = ClearTrackedFontScope
 PVPHUB._ResolveFontPath = PVPHUB_ResolveFontPath
 PVPHUB._SafeSetFont = SafeSetFont
 
@@ -86,6 +121,13 @@ function PVPHUB:RefreshTrackedFonts()
     for _, entry in ipairs(PVPHUB._trackedFontStrings) do
         if entry.fs then
             SafeSetFont(entry.fs, path, entry.size, entry.flags)
+        end
+    end
+    for _, bucket in pairs(PVPHUB._trackedFontScopes) do
+        for _, entry in ipairs(bucket) do
+            if entry.fs then
+                SafeSetFont(entry.fs, path, entry.size, entry.flags)
+            end
         end
     end
 end
@@ -666,8 +708,11 @@ local function CalculateOptimalWindowSize()
     local contentHeight = 0
     if PVPHUB_DB then
         local characterCount = 0
-        for _ in pairs(PVPHUB_DB) do
-            characterCount = characterCount + 1
+        for _, v in pairs(PVPHUB_DB) do
+            -- type check: __dbVersion is a number stored alongside the
+            -- character tables and would otherwise size the window for a row
+            -- that doesn't exist.
+            if type(v) == "table" then characterCount = characterCount + 1 end
         end
         
         -- Calculate height based on actual content
@@ -923,9 +968,12 @@ local function DeepCopyTable(t)
     return copy
 end
 
-local function CreateDataBackup()
+-- force=true skips the interval throttle. Used at logout, where this is the
+-- last chance to capture the session and the 5-minute gate would otherwise
+-- drop the final state on the floor.
+local function CreateDataBackup(force)
     local now = GetTime()
-    if now - _lastBackupTime < _BACKUP_INTERVAL then return end
+    if not force and (now - _lastBackupTime) < _BACKUP_INTERVAL then return end
     _lastBackupTime = now
 
     if not PVPHUB_DB or type(PVPHUB_DB) ~= "table" then
@@ -933,17 +981,31 @@ local function CreateDataBackup()
     end
     
     local charCount = 0
-    for _ in pairs(PVPHUB_DB) do 
-        charCount = charCount + 1 
+    for _, v in pairs(PVPHUB_DB) do
+        -- Only count real character tables: __dbVersion is a number living in
+        -- the same table and must not make an empty database look populated.
+        if type(v) == "table" then charCount = charCount + 1 end
     end
-    
+
     if charCount > 0 then
         PVPHUB_DB_BACKUP = PVPHUB_DB_BACKUP or {}
-        -- Keep last 3 backups to prevent memory bloat
-        PVPHUB_DB_BACKUP[3] = PVPHUB_DB_BACKUP[2]
+        -- Two slots, not three.
+        --
+        -- This ring exists purely so ValidateAndRestoreData can rebuild the DB
+        -- if PVPHUB_DB itself comes back corrupted — and that function only
+        -- ever reads slot [1]. Slot [3] was written on every rotation and read
+        -- by nothing, costing a full extra copy of the database in the saved
+        -- variables file (~80 KB here, more on a full roster) for no benefit.
+        -- Slot [2] is kept as the one spare generation in case [1] is itself
+        -- the corrupted write.
+        --
+        -- Recovering from DELETED (rather than corrupted) data is not this
+        -- ring's job — it rotates completely within an hour of play. That is
+        -- what PVPHUB_DB_ARCHIVE is for.
+        PVPHUB_DB_BACKUP[3] = nil
         PVPHUB_DB_BACKUP[2] = PVPHUB_DB_BACKUP[1]
         PVPHUB_DB_BACKUP[1] = {}
-        
+
         -- Deep copy current data (unbounded depth — see DeepCopyTable)
         for char, data in pairs(PVPHUB_DB) do
             if type(data) == "table" then
@@ -987,30 +1049,24 @@ local function ValidateAndRestoreData()
     return true
 end
 
--- Single canonical list of what "this character's season-scoped PvP data"
--- means, used by every place that clears it: the automatic season-boundary
--- detection in UpdateCurrencyData AND the manual "Start Fresh" button. Before
--- this existed, each site kept its own ad-hoc field list and they drifted out
--- of sync — the button once forgot the legacy rating fields, and the
--- automatic path was (and, absent this fix, would still be) missing those
--- plus mmrHistory/lastKnownMMR/mmrData too. rating2v2/rating3v3/ratingRBG/
--- ratingShuffle/ratingBlitz are the "legacy flat" fields every rating display
--- in the addon actually reads (see pvp_tracking.lua's header comment) —
--- bracketStats is the richer structure, but leaving the flat fields alone
--- meant a character you hadn't logged into since the reset kept showing (and
--- counting as "has a rating" for) last season's numbers.
+-- Single canonical list of what counts as "this character's season-scoped PvP
+-- data". rating2v2/rating3v3/ratingRBG/ratingShuffle/ratingBlitz are the
+-- "legacy flat" fields every rating display in the addon actually reads (see
+-- pvp_tracking.lua's header comment); bracketStats is the richer structure
+-- behind them.
+--
+-- Nothing deletes these any more. The list is now used only to decide what an
+-- archive snapshot must capture and what a restore may put back
+-- (ArchiveSnapshot / FindDataFromArchive). It previously also drove
+-- ClearCharacterSeasonData, which wiped all of it on a detected season change
+-- and on the "Start Fresh" button — both of which are gone: season changes are
+-- handled by filtering at display time (IsSeasonDataCurrent), and the button
+-- was removed along with its popup once that made it pointless.
 local SEASON_SCOPED_FIELDS = {
     "conquestWeeklyData", "bloodytokensWeeklyData", "bracketStats", "wlData",
     "mmrHistory", "lastKnownMMR", "mmrData",
     "rating2v2", "rating3v3", "ratingRBG", "ratingShuffle", "ratingBlitz",
 }
-
-local function ClearCharacterSeasonData(data)
-    if type(data) ~= "table" then return end
-    for _, field in ipairs(SEASON_SCOPED_FIELDS) do
-        data[field] = nil
-    end
-end
 
 -- Emergency recovery for the v6.6.0-6.6.2 cap-based season-wipe bug (see
 -- CHANGELOG v6.6.3): a mid-season Conquest cap ramp-up could get mistaken
@@ -1071,6 +1127,258 @@ local function ApplyRecoveredSeasonData(plan)
         end
     end
     return charCount
+end
+
+-- Durable pre-wipe snapshot (v6.6.5+), separate from the fast-rotating
+-- PVPHUB_DB_BACKUP ring above. That ring exists to survive a crash/corrupted
+-- write - it's throttled to once per 5 minutes and only keeps 3 copies, so
+-- under normal play it rotates away within well under an hour, which is
+-- exactly what let the original season-wipe incident's pre-wipe data get
+-- lost before anyone could restore it (see CHANGELOG v6.6.3/v6.6.4).
+--
+-- This snapshot is event-driven instead of timer-driven: it's taken once,
+-- right before any of the three things that clear season-scoped data for
+-- every character (the automatic season-boundary wipe, "Start Fresh", and
+-- "Reset All Data"), and it simply sits there - untouched by ordinary
+-- play - until the next such reset overwrites it. So whenever "something
+-- like this happens," there's always exactly one clean recovery point
+-- available, no matter how long it's been since.
+--
+-- PVPHUB_DB_ARCHIVE is the addon's actual safety net, and it exists because
+-- neither previous mechanism was one:
+--
+--   * PVPHUB_DB_BACKUP is a 3-slot ring throttled to one write per 5 minutes.
+--     It was built to survive a CORRUPTED WRITE, and for that it's fine — but
+--     under normal play it cycles completely within the hour. When a bad
+--     season detection wiped 45 characters, every slot had already rotated to
+--     post-wipe state before anyone could look. It cannot protect against
+--     deletion, only against garbage.
+--   * The pre-wipe snapshot that replaced it held exactly ONE state: whatever
+--     the last reset overwrote. A second reset destroyed the first one's
+--     recovery point.
+--
+-- This keeps ARCHIVE_MAX dated snapshots spaced at least ARCHIVE_MIN_GAP
+-- apart, so they span days rather than minutes, and it only stores
+-- season-scoped fields (roughly 35-100 KB per snapshot for a large roster)
+-- rather than the whole database.
+--
+-- Note WoW gives addons no filesystem access — SavedVariables is the only
+-- place anything can be written, and it is only flushed on a clean logout or
+-- /reload. There is no way to put this somewhere safer.
+local ARCHIVE_MAX     = 3
+local ARCHIVE_MIN_GAP = 20 * 60 * 60   -- 20h: consecutive logins don't churn it
+
+-- Order-independent checksum of everything a snapshot would store. Used to
+-- avoid keeping two archive entries that hold identical data — which is
+-- otherwise the normal case, because the forced pre-wipe snapshot and a
+-- manual or daily one taken minutes earlier capture the exact same state and
+-- burn two of only three slots between them.
+--
+-- pairs() order is undefined, so this sums per-character values rather than
+-- concatenating them: addition is commutative, iteration order isn't.
+local function ArchiveSignature()
+    if type(PVPHUB_DB) ~= "table" then return 0 end
+    local total = 0
+    for charKey, data in pairs(PVPHUB_DB) do
+        if type(data) == "table" and charKey ~= "settings" then
+            local n = #charKey
+            for i, field in ipairs(SEASON_SCOPED_FIELDS) do
+                local v = data[field]
+                if v ~= nil then
+                    n = n + i * 7
+                    if type(v) == "number" then
+                        n = n + v
+                    elseif type(v) == "table" then
+                        for _, sv in pairs(v) do
+                            n = n + 13
+                            if type(sv) == "number" then n = n + sv end
+                        end
+                    end
+                end
+            end
+            n = n + (data.honor or 0) + (data.conquest or 0)
+            total = total + n
+        end
+    end
+    return total
+end
+
+-- Drops one entry when over capacity, choosing the one whose removal costs the
+-- least history — NOT simply the oldest.
+--
+-- Dropping the oldest is what lets a bad afternoon erase the good state you're
+-- looking for: a season change, then "Start Fresh", then "Reset All Data" each
+-- force a snapshot, and three forced writes in a row would flush every older
+-- entry. Keeping the newest and the oldest and discarding whichever middle
+-- entry sits in the tightest cluster turns "the last three events" into
+-- "today, recently, and a while ago" for the same storage.
+local function TrimArchive()
+    local a = PVPHUB_DB_ARCHIVE
+    if type(a) ~= "table" then return end
+    while #a > ARCHIVE_MAX do
+        if #a <= 2 then
+            table.remove(a)
+        else
+            -- Entries are newest-first. Never consider index 1 (newest) or
+            -- #a (oldest); among the rest, drop the one whose neighbours are
+            -- closest together in time.
+            local dropIndex, smallestSpan = 2, math.huge
+            for i = 2, #a - 1 do
+                local prev = a[i - 1] and a[i - 1].timestamp
+                local next_ = a[i + 1] and a[i + 1].timestamp
+                if prev and next_ then
+                    local span = prev - next_
+                    if span < smallestSpan then
+                        smallestSpan, dropIndex = span, i
+                    end
+                end
+            end
+            table.remove(a, dropIndex)
+        end
+    end
+end
+
+-- force=true bypasses the spacing rule. Used before anything destructive,
+-- where this is the last chance to capture the state about to be lost.
+local function ArchiveSnapshot(reason, force)
+    if type(PVPHUB_DB) ~= "table" then return end
+    PVPHUB_DB_ARCHIVE = type(PVPHUB_DB_ARCHIVE) == "table" and PVPHUB_DB_ARCHIVE or {}
+
+    local now = GetServerTime()
+    local newest = PVPHUB_DB_ARCHIVE[1]
+    if not force and newest and newest.timestamp
+       and (now - newest.timestamp) < ARCHIVE_MIN_GAP then
+        return
+    end
+
+    -- Identical to what's already on top? Then there is nothing new to keep.
+    -- Re-label and re-date the existing entry instead of spending a slot on a
+    -- duplicate — the data is the same either way, and this keeps the reason
+    -- accurate ("before Start Fresh" is more useful than "manual").
+    local signature = ArchiveSignature()
+    if newest and newest.signature == signature then
+        newest.timestamp = now
+        newest.reason    = reason
+        return
+    end
+
+    local snapshot = {
+        timestamp = now,
+        reason    = reason,
+        season    = PVPHUB_SETTINGS and PVPHUB_SETTINGS.lastKnownSeasonID or 0,
+        signature = signature,
+        chars     = 0,
+        data      = {},
+    }
+
+    -- The WHOLE character table is stored, not just the season-scoped fields.
+    -- An earlier version archived only those, which left the archive unable to
+    -- help after the single most destructive action available: "Reset All Data"
+    -- empties PVPHUB_DB entirely, so there was no character entry left to fill
+    -- fields back into, and gold/honor/notes/identity were never captured at
+    -- all. A backup that cannot recover from the worst case is not a backup.
+    -- Measured cost of going full: roughly 2x the season-only payload.
+    for charKey, data in pairs(PVPHUB_DB) do
+        if type(data) == "table" and charKey ~= "settings" then
+            snapshot.data[charKey] = DeepCopyTable(data)
+            snapshot.chars = snapshot.chars + 1
+        end
+    end
+
+    -- An empty snapshot is worse than none: it would push a real one out.
+    if snapshot.chars == 0 then return end
+
+    table.insert(PVPHUB_DB_ARCHIVE, 1, snapshot)
+    TrimArchive()
+end
+
+-- Kept under its old name so existing call sites read naturally: every
+-- destructive path forces an archive entry first.
+local function SnapshotWipeBackup(reason)
+    ArchiveSnapshot("before " .. tostring(reason), true)
+end
+
+-- Computes what restoring a given archive snapshot would fill in.
+--
+-- Same nil-only, never-overwrite contract used everywhere else in this file:
+-- it can only put back fields that are currently missing, so it can never
+-- clobber newer data or undo a deliberate "Start Fresh". Restoring is always
+-- an explicit user action (see /pvphub backups) — after a genuine season
+-- change, putting last season's numbers back would recreate the very problem
+-- the season handling exists to avoid, and only the player knows which case
+-- they're in.
+-- Returns a plan describing two distinct kinds of recovery, or nil:
+--   plan.fills[charKey]     = { field = value }  -- character exists, add what's missing
+--   plan.recreates[charKey] = { whole table }    -- character is gone entirely
+--   plan.fillCount / plan.recreateCount
+--
+-- Recreating whole characters is what makes the archive useful after "Reset
+-- All Data"; without it the restore silently did nothing in exactly the case
+-- it mattered most.
+local function FindDataFromArchive(index)
+    if type(PVPHUB_DB) ~= "table" or type(PVPHUB_DB_ARCHIVE) ~= "table" then
+        return nil
+    end
+    local snapshot = PVPHUB_DB_ARCHIVE[index or 1]
+    if type(snapshot) ~= "table" or type(snapshot.data) ~= "table" then
+        return nil
+    end
+
+    local plan = { fills = {}, recreates = {}, fillCount = 0, recreateCount = 0 }
+
+    for charKey, backupData in pairs(snapshot.data) do
+        if type(backupData) == "table" then
+            local liveData = PVPHUB_DB[charKey]
+            if type(liveData) ~= "table" then
+                -- Character no longer present at all.
+                plan.recreates[charKey] = backupData
+                plan.recreateCount = plan.recreateCount + 1
+            else
+                -- Present: only ever add back season-scoped fields that are
+                -- currently missing. Never touch anything already there, so a
+                -- restore can't undo newer play or a deliberate Start Fresh.
+                local fields = nil
+                for _, field in ipairs(SEASON_SCOPED_FIELDS) do
+                    if liveData[field] == nil and backupData[field] ~= nil then
+                        fields = fields or {}
+                        fields[field] = backupData[field]
+                    end
+                end
+                if fields then
+                    plan.fills[charKey] = fields
+                    plan.fillCount = plan.fillCount + 1
+                end
+            end
+        end
+    end
+
+    if plan.fillCount == 0 and plan.recreateCount == 0 then return nil end
+    return plan
+end
+
+-- Applies a FindDataFromArchive plan. Returns filled, recreated counts.
+local function ApplyArchivePlan(plan)
+    if type(plan) ~= "table" then return 0, 0 end
+    local filled, recreated = 0, 0
+
+    for charKey, fields in pairs(plan.fills or {}) do
+        if type(PVPHUB_DB[charKey]) == "table" then
+            for field, value in pairs(fields) do
+                PVPHUB_DB[charKey][field] = (type(value) == "table")
+                                            and DeepCopyTable(value) or value
+            end
+            filled = filled + 1
+        end
+    end
+
+    for charKey, whole in pairs(plan.recreates or {}) do
+        if PVPHUB_DB[charKey] == nil then
+            PVPHUB_DB[charKey] = DeepCopyTable(whole)
+            recreated = recreated + 1
+        end
+    end
+
+    return filled, recreated
 end
 
 -- Global Variables with Protection
@@ -1652,6 +1960,196 @@ function PVPHUB:ShowGroupManagementWindow()
 end
 
 
+
+-- Backup browser (Settings > Advanced > Manage Backups).
+--
+-- The restore path existed only as a slash command, which is no use in the
+-- situation it was built for: someone whose data has just vanished is not
+-- going to discover /pvphub restore. This lists what's actually recoverable
+-- and puts a button next to it.
+--
+-- Rebuilt from scratch on every open rather than pooled — it shows at most
+-- ARCHIVE_MAX rows, opens rarely, and the contents change between openings.
+local function ShowBackupsWindow()
+    if PVPHUB.backupsWindow then
+        PVPHUB.backupsWindow:Show()
+        PVPHUB.backupsWindow.UpdateContent()
+        return
+    end
+
+    local window = CreateFrame("Frame", "PVPHUBBackupsWindow", UIParent, "BackdropTemplate")
+    window:SetSize(470, 340)
+    window:SetPoint("CENTER")
+    window:SetBackdrop({
+        bgFile   = "Interface\\DialogFrame\\UI-DialogBox-Background",
+        edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+        tile = true, tileSize = 16, edgeSize = 16,
+        insets = { left = 8, right = 8, top = 8, bottom = 8 }
+    })
+    window:SetBackdropColor(0.1, 0.1, 0.1, 0.9)
+    window:SetBackdropBorderColor(0.4, 0.4, 0.4, 1)
+    window:SetFrameStrata("DIALOG")
+    window:SetMovable(true)
+    window:EnableMouse(true)
+    window:RegisterForDrag("LeftButton")
+    window:SetClampedToScreen(true)
+    window:SetScript("OnDragStart", window.StartMoving)
+    window:SetScript("OnDragStop", window.StopMovingOrSizing)
+    tinsert(UISpecialFrames, "PVPHUBBackupsWindow")
+
+    local title = window:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    title:SetPoint("TOP", window, "TOP", 0, -15)
+    title:SetText("Data Backups")
+    title:SetTextColor(1, 0.8, 0, 1)
+
+    local note = window:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    note:SetPoint("TOP", window, "TOP", 0, -38)
+    note:SetWidth(420)
+    note:SetJustifyH("CENTER")
+    note:SetWordWrap(true)
+    note:SetText("Taken automatically at login, at logout, and before anything that clears data. Restoring only fills in what's missing — it never overwrites data you still have.")
+    note:SetTextColor(0.65, 0.65, 0.65, 1)
+
+    local closeBtn = CreateFrame("Button", nil, window, "UIPanelCloseButton")
+    closeBtn:SetPoint("TOPRIGHT", window, "TOPRIGHT", -5, -5)
+    closeBtn:SetScript("OnClick", function() window:Hide() end)
+
+    local scrollFrame = CreateFrame("ScrollFrame", nil, window, "UIPanelScrollFrameTemplate")
+    scrollFrame:SetPoint("TOPLEFT", window, "TOPLEFT", 18, -82)
+    scrollFrame:SetPoint("BOTTOMRIGHT", window, "BOTTOMRIGHT", -38, 50)
+    local scrollChild = CreateFrame("Frame", nil, scrollFrame)
+    scrollFrame:SetScrollChild(scrollChild)
+    scrollChild:SetSize(400, 200)
+
+    local emptyMsg = scrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    emptyMsg:SetPoint("TOP", scrollChild, "TOP", 0, -40)
+    emptyMsg:SetWidth(380)
+    emptyMsg:SetJustifyH("CENTER")
+    emptyMsg:SetWordWrap(true)
+    emptyMsg:SetTextColor(0.7, 0.7, 0.7, 1)
+
+    local backupNowBtn = CreateFrame("Button", nil, window, "UIPanelButtonTemplate")
+    backupNowBtn:SetSize(150, 25)
+    backupNowBtn:SetPoint("BOTTOMLEFT", window, "BOTTOMLEFT", 20, 15)
+    backupNowBtn:SetText("Back Up Now")
+    backupNowBtn:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
+        GameTooltip:SetText("Create a backup now", 1, 0.8, 0)
+        GameTooltip:AddLine("Useful before doing anything risky. Backups otherwise happen at most once a day.", 1, 1, 1, true)
+        GameTooltip:Show()
+    end)
+    backupNowBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+    -- Rows are recreated per refresh; keep handles so the previous set can be
+    -- released first (otherwise every refresh would stack another set on top).
+    local rows = {}
+
+    function window.UpdateContent()
+        for _, r in ipairs(rows) do
+            r:Hide()
+            r:SetParent(nil)
+        end
+        wipe(rows)
+
+        local archive = type(PVPHUB_DB_ARCHIVE) == "table" and PVPHUB_DB_ARCHIVE or {}
+        if #archive == 0 then
+            emptyMsg:SetText("No backups yet.\n\nOne is created shortly after you log in, so this fills up on its own.")
+            emptyMsg:Show()
+            scrollChild:SetHeight(200)
+            return
+        end
+        emptyMsg:Hide()
+
+        local y = -6
+        for i, snap in ipairs(archive) do
+            local row = CreateFrame("Frame", nil, scrollChild, "BackdropTemplate")
+            row:SetSize(390, 62)
+            row:SetPoint("TOPLEFT", scrollChild, "TOPLEFT", 4, y)
+            row:SetBackdrop({
+                bgFile   = "Interface\\Buttons\\WHITE8x8",
+                edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+                tile = false, edgeSize = 10,
+                insets = { left = 3, right = 3, top = 3, bottom = 3 },
+            })
+            row:SetBackdropColor(1, 1, 1, 0.04)
+            row:SetBackdropBorderColor(0.35, 0.35, 0.42, 0.8)
+
+            local age = (SecondsToTime and snap.timestamp)
+                        and SecondsToTime(GetServerTime() - snap.timestamp) or "unknown age"
+            local heading = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            heading:SetPoint("TOPLEFT", row, "TOPLEFT", 10, -8)
+            heading:SetText(string.format("%s ago  |cff888888(%s)|r", age, snap.reason or "snapshot"))
+            heading:SetTextColor(1, 1, 1, 1)
+
+            local plan = FindDataFromArchive(i)
+            local detail = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            detail:SetPoint("TOPLEFT", heading, "BOTTOMLEFT", 0, -4)
+            detail:SetWidth(250)
+            detail:SetJustifyH("LEFT")
+
+            if not plan then
+                detail:SetText(string.format("%d characters saved — nothing missing right now", snap.chars or 0))
+                detail:SetTextColor(0.6, 0.6, 0.6, 1)
+            else
+                local bits = {}
+                if plan.recreateCount > 0 then
+                    table.insert(bits, string.format("%d character(s) missing entirely", plan.recreateCount))
+                end
+                if plan.fillCount > 0 then
+                    table.insert(bits, string.format("%d with missing season data", plan.fillCount))
+                end
+                detail:SetText(string.format("%d saved — |cffffd100can restore: %s|r",
+                    snap.chars or 0, table.concat(bits, ", ")))
+                detail:SetTextColor(0.85, 0.85, 0.85, 1)
+            end
+
+            local restoreBtn = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
+            restoreBtn:SetSize(96, 24)
+            restoreBtn:SetPoint("RIGHT", row, "RIGHT", -10, 0)
+            restoreBtn:SetText("Restore")
+            restoreBtn:SetEnabled(plan ~= nil)
+            -- A disabled button drops mouse scripts, which would silently
+            -- swallow the tooltip explaining WHY it's disabled.
+            restoreBtn:SetMotionScriptsWhileDisabled(true)
+            if plan then
+                restoreBtn:SetScript("OnClick", function()
+                    local what = {}
+                    if plan.recreateCount > 0 then
+                        table.insert(what, string.format("bring back %d character(s) that are missing entirely", plan.recreateCount))
+                    end
+                    if plan.fillCount > 0 then
+                        table.insert(what, string.format("fill in missing season data for %d character(s)", plan.fillCount))
+                    end
+                    PVPHUB._pendingWipeRestorePlan = plan
+                    StaticPopup_Show("PVPHUB_RESTORE_LAST_WIPE", string.format(
+                        "Restore from the backup taken %s ago (%s)?\n\nThis will %s.\n\nNothing you currently have is overwritten.",
+                        age, snap.reason or "snapshot", table.concat(what, ", and ")))
+                end)
+            else
+                restoreBtn:SetScript("OnEnter", function(self)
+                    GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
+                    GameTooltip:SetText("Nothing to restore", 1, 0.8, 0)
+                    GameTooltip:AddLine("Your current data already contains everything this backup holds.", 1, 1, 1, true)
+                    GameTooltip:Show()
+                end)
+                restoreBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+            end
+
+            table.insert(rows, row)
+            y = y - 68
+        end
+
+        scrollChild:SetHeight(math.abs(y) + 10)
+    end
+
+    backupNowBtn:SetScript("OnClick", function()
+        ArchiveSnapshot("manual", true)
+        window.UpdateContent()
+    end)
+
+    window.UpdateContent()
+    PVPHUB.backupsWindow = window
+end
 
 -- Function to show the hidden characters management window
 local function ShowHiddenCharactersWindow()
@@ -3030,6 +3528,31 @@ local function GetRatingColor(rating)
 end
 
 -- Function to format numbers with periods as thousand separators (e.g., 15000 -> 15.000)
+-- Is this character's stored season-scoped data from the CURRENT season?
+--
+-- This is what replaced deleting the data outright on a season boundary. The
+-- old design cleared every character's ratings/history the moment a season
+-- change was detected, which meant one false positive destroyed the whole
+-- roster's data irreversibly — and that is exactly what happened when a weekly
+-- Conquest cap bump was mistaken for a new season (CHANGELOG v6.6.3).
+--
+-- Keeping the data and filtering it at display time makes a misdetection
+-- cosmetic instead of destructive: the numbers show as "last season" until the
+-- character logs in and reports fresh data, which re-stamps the tag.
+--
+-- seasonTag is written by pvp_tracking's SaveBracketStats alongside the flat
+-- rating fields. Data saved before this existed carries no tag at all — that
+-- is treated as current rather than stale, so upgrading doesn't make everyone's
+-- ratings vanish behind a "(last season)" label on first login.
+local function IsSeasonDataCurrent(data)
+    if type(data) ~= "table" then return false end
+    local tag = data.seasonTag
+    if not tag then return true end          -- pre-tag data: benefit of the doubt
+    local current = PVPHUB_SETTINGS and PVPHUB_SETTINGS.lastKnownSeasonID
+    if not current or current <= 0 then return true end
+    return tag == current
+end
+
 local function GetCurrencyColor(amount, currencyType, data)
     local currencyID = CURRENCY_IDS[currencyType]
     local cap = nil
@@ -3049,7 +3572,13 @@ local function GetCurrencyColor(amount, currencyType, data)
         local weeklyDataKey = currencyType .. "WeeklyData"
         local seasonData = data[weeklyDataKey]
         
-        if seasonData and seasonData.seasonMaximum and cap and cap > 0 then
+        -- Only colour by season progress when that progress is actually from
+        -- the current season. Clearing conquestWeeklyData used to be part of
+        -- the season wipe precisely so a stale seasonMaximum wouldn't paint
+        -- every alt red ("fully capped") on day one of a new season. Nothing
+        -- is deleted any more, so the staleness is filtered here instead.
+        if seasonData and seasonData.seasonMaximum and cap and cap > 0
+           and IsSeasonDataCurrent(data) then
             -- Color based on season maximum progress, not weekly progress
             local seasonPercentage = seasonData.seasonMaximum / cap
             
@@ -3089,9 +3618,14 @@ local function GetShuffleDisplayInfo(data, charKey, bracketKey)
     bracketKey = bracketKey or "ratingShuffle"
     local bracketData = data[bracketKey]
 
+    -- 5th return is "is this from the current season" — callers that dim or
+    -- exclude last-season values read it; older callers ignoring it are
+    -- unaffected, since extra Lua return values are simply dropped.
+    local isCurrent = IsSeasonDataCurrent(data)
+
     -- Flat number: 2v2/3v3, or legacy format before per-spec storage
     if type(bracketData) == "number" then
-        return bracketData, nil, 1, bracketData
+        return bracketData, nil, 1, bracketData, isCurrent
     end
 
     -- Per-spec table: Shuffle and Blitz
@@ -3123,10 +3657,10 @@ local function GetShuffleDisplayInfo(data, charKey, bracketKey)
             displaySpecID = highestSpecID
         end
 
-        return currentSpecRating, displaySpecID, specCount, highestRating
+        return currentSpecRating, displaySpecID, specCount, highestRating, isCurrent
     end
 
-    return 0, nil, 0, 0
+    return 0, nil, 0, 0, isCurrent
 end
 
 local function CreateCharacterName(entry, isCompactMode, suppressSpecIcon, suppressCurrentIndicator)
@@ -3219,26 +3753,34 @@ local function UpdateCurrencyData()
 
     if seasonChangedByID then
         DebugPrint(string.format("Season change detected (season %d -> %d)", lastSeason, currentSeason))
-        -- Clear all per-character seasonal tracking for every stored toon —
-        -- see ClearCharacterSeasonData for the full field list and why it's
-        -- centralized. bracketStats/wlData feed the Stats tab's "this
-        -- season" totals and are each tagged with the season they were
-        -- written under, but that guard only works once fresh,
-        -- correctly-tagged data replaces them - wiping them here means an
-        -- alt that hasn't logged in yet shows "no data this season" instead
-        -- of last season's numbers indefinitely.
-        for key, data in pairs(PVPHUB_DB) do
-            if type(data) == "table" and key ~= "settings" then
-                ClearCharacterSeasonData(data)
-            end
-        end
+
+        -- NOTHING IS DELETED HERE. This block used to call
+        -- ClearCharacterSeasonData for every stored character, which made a
+        -- single false-positive season detection destroy the entire roster's
+        -- ratings, win/loss records and match history irreversibly — and that
+        -- is precisely what happened when a weekly Conquest cap increase was
+        -- read as a season change (CHANGELOG v6.6.3): 45 of 54 characters lost
+        -- everything, unrecoverably, because the rotating backup had already
+        -- cycled past the pre-wipe state.
+        --
+        -- The stated reason for deleting was a DISPLAY concern: an alt that
+        -- hasn't logged in yet would otherwise keep showing last season's
+        -- numbers as if they were current. That doesn't require deletion —
+        -- IsSeasonDataCurrent() now filters those values at display time
+        -- instead, and the data stays put. A misdetection is therefore
+        -- cosmetic and self-healing (logging the character in re-stamps it)
+        -- rather than destructive.
+        --
+        -- Explicit, user-initiated wipes ("Start Fresh", "Reset All Data")
+        -- still delete, because there deletion is the intent.
+        SnapshotWipeBackup("automatic season change")
 
         PVPHUB_SETTINGS.lastKnownSeasonID = currentSeason
         -- Anchor point for IsCharacterStaleThisSeason: any character whose
         -- lastSeen predates this moment hasn't reported in since the season
         -- changed and gets dimmed in the roster until it logs in again.
         PVPHUB_SETTINGS.seasonStartTimestamp = GetServerTime()
-        PVPHubPrint("|cffff0000[PVPHUB]|r New PvP season detected! Season tracking data has been automatically reset for all characters.")
+        PVPHubPrint("|cff33ff66[PVPHUB]|r New PvP season detected. Last season's numbers are kept and shown as \"(last season)\" until each character logs in.")
     end
 
     -- Bootstrap: if a season boundary was already detected and reset under an
@@ -3398,15 +3940,15 @@ local function UpdateCurrencyData()
     end
 
     -- Update heliotrope with error protection
-    local success, itemCount = pcall(GetItemCount, BLOODSTONE_ITEM_ID)
+    local success, itemCount = pcall(GetItemCountSafe, BLOODSTONE_ITEM_ID)
     if success then
         PVPHUB_DB[charKey].bloodstones = itemCount or 0
     end
 
     -- Update character info with error protection
-    local specIndex = GetSpecialization()
+    local specIndex = GetSpecIndex()
     if specIndex then
-        local success, specID = pcall(GetSpecializationInfo, specIndex)
+        local success, specID = pcall(GetSpecInfo, specIndex)
         -- Guard against specID=0: in Lua 0 is truthy, so an explicit > 0 check is required
         if success and specID and specID > 0 then
             PVPHUB_DB[charKey].specID = specID
@@ -3529,10 +4071,10 @@ local function UpdateMMRData()
         local bracket = C_PvP.GetActiveMatchBracket and C_PvP.GetActiveMatchBracket()
         if bracket and PVPHUB_TO_MMR_BRACKET then
             -- Get current specialization
-            local specIndex = GetSpecialization()
+            local specIndex = GetSpecIndex()
             local currentSpecID = nil
             if specIndex then
-                local success_spec, specID = pcall(GetSpecializationInfo, specIndex)
+                local success_spec, specID = pcall(GetSpecInfo, specIndex)
                 if success_spec and specID then
                     currentSpecID = specID
                 end
@@ -5846,12 +6388,25 @@ function PVPHUB:ShowQueueBracketTooltip(anchor, displayName)
     ShowPVPHUBRatingTooltip(anchor, charKey, bracketKey, PVPHUB_DB[charKey][bracketKey])
 end
 
+-- Ask the server to push fresh rated stats; PVP_RATED_STATS_UPDATE fires when
+-- it responds.
+--
+-- This wrapper used to call C_PvP.RequestBracketStats / C_PvP.RequestSeasonBestInfo.
+-- Neither exists (verified against the 12.1 UI source and the generated API
+-- documentation), and both were behind `if X then` guards — so this function
+-- silently did nothing, while shadowing the REAL global of the same name for
+-- every caller in this file. Ratings still refreshed only because
+-- modules/pvp_tracking.lua independently calls the genuine global.
+--
+-- Resolved through _G at call time rather than captured at load time: the
+-- lookup can't accidentally bind to this wrapper (a `local function` shadows
+-- the global only for this chunk, not in _G), and it stays correct no matter
+-- when the global becomes available. The identity check is belt-and-braces
+-- against infinite recursion if anything ever assigns this into _G.
 local function RequestRatedInfo()
-    if C_PvP.RequestBracketStats then
-        C_PvP.RequestBracketStats()
-    end
-    if C_PvP.RequestSeasonBestInfo then
-        C_PvP.RequestSeasonBestInfo()
+    local fn = _G.RequestRatedInfo
+    if type(fn) == "function" and fn ~= RequestRatedInfo then
+        fn()
     end
 end
 
@@ -5874,55 +6429,23 @@ local function UpdatePvPRatings()
         
         -- Try different API calls for different brackets
         if bracket.key == "ratingShuffle" then
-            -- Try multiple Solo Shuffle API calls
-            local methods = {
-                function() return GetPersonalRatedInfo(7) end,
-                function()
-                    -- Try to force fresh data by calling RequestBracketStats first
-                    if C_PvP.RequestBracketStats then
-                        C_PvP.RequestBracketStats()
-                    end
-                    return GetPersonalRatedInfo(7)
-                end
-            }
-            
-            for i, method in ipairs(methods) do
-                local success, result = pcall(method)
-                if success and result and result > 0 then
-                    rating = result
-                    break
-                end
+            -- This used to try two "methods", the second of which called the
+            -- non-existent C_PvP.RequestBracketStats before retrying. With that
+            -- removed the two were identical, so a single guarded read is all
+            -- that ever did any work. Fresh data is requested via
+            -- RequestRatedInfo() on the events that need it.
+            local success, result = pcall(GetPersonalRatedInfo, 7)
+            if success and result and result > 0 then
+                rating = result
             end
         elseif bracket.key == "ratingBlitz" then
-            -- Try multiple Blitz API calls
-            local methods = {
-                function() return GetPersonalRatedInfo(9) end,
-                function()
-                    -- Try to force fresh data by calling RequestBracketStats first
-                    if C_PvP.RequestBracketStats then
-                        C_PvP.RequestBracketStats()
-                    end
-                    return GetPersonalRatedInfo(9)
-                end,
-                function()
-                    -- Try to get from PvP frame data if available
-                    if PVPRatedFrame and PVPRatedFrame.seasonBest then
-                        for _, data in pairs(PVPRatedFrame.seasonBest) do
-                            if data.bracket == 9 then
-                                return data.rating or 0
-                            end
-                        end
-                    end
-                    return 0
-                end
-            }
-            
-            for i, method in ipairs(methods) do
-                local success, result = pcall(method)
-                if success and result and result > 0 then
-                    rating = result
-                    break
-                end
+            -- Same as the Shuffle branch above: the second "method" called the
+            -- non-existent C_PvP.RequestBracketStats and the third read
+            -- PVPRatedFrame.seasonBest, a frame field that does not exist in
+            -- 12.1 either. Only the plain read ever produced a value.
+            local success, result = pcall(GetPersonalRatedInfo, 9)
+            if success and result and result > 0 then
+                rating = result
             end
         else
             -- Regular 2v2/3v3 brackets
@@ -5940,9 +6463,9 @@ local function UpdatePvPRatings()
             -- PLAYER_SPECIALIZATION_CHANGED fires mid-transition and the DB specID still
             -- points to the OLD spec, causing a 0-rating to overwrite the old spec's entry.
             local currentSpecID = nil
-            local specIndex = GetSpecialization()
+            local specIndex = GetSpecIndex()
             if specIndex then
-                local ok, sid = pcall(GetSpecializationInfo, specIndex)
+                local ok, sid = pcall(GetSpecInfo, specIndex)
                 if ok and sid and sid > 0 then
                     currentSpecID = sid
                     -- Keep DB in sync while we're here
@@ -6062,68 +6585,25 @@ local function UpdateAllData()
         PVPHUB_SETTINGS.warbandGold = warbandGold
     end
 
-    -- Get regular item level
-    local avgItemLevel, avgItemLevelEquipped = GetAverageItemLevel()
+    -- GetAverageItemLevel returns: overall average, equipped average, PvP average.
+    -- Blizzard reads the PvP value the same way (LFGList.lua: `local _, _,
+    -- avgItemLevelPvP = GetAverageItemLevel()`).
+    --
+    -- This block used to try five "methods" in sequence. Three of them were
+    -- dead: PaperDollFrame_GetEffectiveItemLevel and C_PvP.GetAverageItemLevel
+    -- do not exist in 12.1, and CharacterStatsPane.ItemLevelFrame.pvpItemLevel
+    -- is not a real field — so the only fallback that could ever run was a
+    -- hardcoded 1.0884 scaling factor that silently went stale every season.
+    -- The first method already returns the real value.
+    local avgItemLevel, avgItemLevelEquipped, avgItemLevelPvP = GetAverageItemLevel()
     PVPHUB_DB[charKey].itemLevel = avgItemLevelEquipped or avgItemLevel or 0
-    
-    -- Get PvP item level using Blizzard's exact methods
+
     local pvpItemLevel = 0
-    local detectionMethod = "none"
-    
-    -- Method 1: Use GetAverageItemLevel with PvP context like Blizzard does
-    if GetAverageItemLevel then
-        local avgEquipped, avgInventory, avgItemLevelPvP = GetAverageItemLevel()
-        if avgItemLevelPvP and avgItemLevelPvP > 0 then
-            pvpItemLevel = avgItemLevelPvP
-            detectionMethod = "GetAverageItemLevel_PvP"
-        end
+    if avgItemLevelPvP and avgItemLevelPvP > 0 then
+        pvpItemLevel = math.floor(avgItemLevelPvP + 0.5)
     end
-    
-    -- Method 2: Try PaperDollFrame's internal PvP calculation
-    if pvpItemLevel == 0 and PaperDollFrame_GetEffectiveItemLevel then
-        local effectiveIL = PaperDollFrame_GetEffectiveItemLevel()
-        if effectiveIL and effectiveIL > 0 and effectiveIL ~= avgItemLevelEquipped then
-            pvpItemLevel = effectiveIL
-            detectionMethod = "PaperDollFrame_GetEffectiveItemLevel"
-        end
-    end
-    
-    -- Method 3: Check if we're in a PvP instance and use C_PvP
-    if pvpItemLevel == 0 and C_PvP then
-        if C_PvP.GetAverageItemLevel then
-            local pvpIL = C_PvP.GetAverageItemLevel()
-            if pvpIL and pvpIL > 0 then
-                pvpItemLevel = pvpIL
-                detectionMethod = "C_PvP.GetAverageItemLevel"
-            end
-        end
-    end
-    
-    -- Method 4: Access the CharacterStatsPane directly when it's loaded
-    if pvpItemLevel == 0 and CharacterStatsPane and CharacterStatsPane.ItemLevelFrame then
-        local frame = CharacterStatsPane.ItemLevelFrame
-        if frame.pvpItemLevel and frame.pvpItemLevel > 0 then
-            pvpItemLevel = frame.pvpItemLevel
-            detectionMethod = "CharacterStatsPane.pvpItemLevel"
-        end
-    end
-    
-    -- Method 5: Use PvP template scaling (more accurate than fixed +58)
-    if pvpItemLevel == 0 and avgItemLevelEquipped and avgItemLevelEquipped > 0 then
-        -- Use template scaling based on current season
-        local scalingFactor = 1.0884 -- Current season scaling factor
-        pvpItemLevel = math.floor(avgItemLevelEquipped * scalingFactor + 0.5)
-        detectionMethod = "template_scaling"
-    end
-    
-    -- Round to nearest integer if we got a decimal value
-    if pvpItemLevel > 0 then
-        pvpItemLevel = math.floor(pvpItemLevel + 0.5)
-    end
-    
-    -- Store both regular and PvP item levels
     PVPHUB_DB[charKey].pvpItemLevel = pvpItemLevel
-    
+
     UpdateCurrencyData()
     C_Timer.After(0.5, UpdatePvPRatings)
     C_Timer.After(1.0, UpdateMMRData) -- Update MMR data after PvP ratings
@@ -6171,6 +6651,8 @@ PVPHUB.frame:RegisterEvent("UI_SCALE_CHANGED")
 -- Add combat events for combat-aware window opening
 PVPHUB.frame:RegisterEvent("PLAYER_REGEN_DISABLED")
 PVPHUB.frame:RegisterEvent("PLAYER_REGEN_ENABLED")
+-- Last chance to snapshot the session before SavedVariables are written out.
+PVPHUB.frame:RegisterEvent("PLAYER_LOGOUT")
 
 -- Runs one login-init step in its own pcall so a failure partway through
 -- ADDON_LOADED (a bad font file, a malformed SavedVariables entry, etc.)
@@ -6404,12 +6886,7 @@ PVPHUB.frame:HookScript("OnEvent", function(self, event, ...)
                 SafeInitStep("schedule PvP data refresh", function()
                     -- Force refresh PvP data to prevent stale ratings from previous characters
                     C_Timer.After(1, function()
-                        if C_PvP.RequestBracketStats then
-                            C_PvP.RequestBracketStats()
-                        end
-                        if C_PvP.RequestSeasonBestInfo then
-                            C_PvP.RequestSeasonBestInfo()
-                        end
+                        RequestRatedInfo()
                         -- Refresh the UI after requesting fresh data
                         C_Timer.After(0.5, function()
                             PVPHUB_RefreshUI()
@@ -6606,6 +7083,11 @@ PVPHUB.frame:HookScript("OnEvent", function(self, event, ...)
                 SafeInitStep("schedule initial backup", function()
                     -- Create initial backup after settings load
                     C_Timer.After(3, CreateDataBackup)
+                    -- Archive snapshot (self-throttled to at most one per
+                    -- ARCHIVE_MIN_GAP, so logging several alts in a row keeps
+                    -- one entry rather than flushing the whole archive).
+                    -- Delayed so the roster has been populated first.
+                    C_Timer.After(10, function() ArchiveSnapshot("daily") end)
                 end)
 
                 PVPHubPrint("|cffff0000[PVP HUB]|r Addon loaded!")
@@ -6616,10 +7098,10 @@ PVPHUB.frame:HookScript("OnEvent", function(self, event, ...)
         if charKey and charKey ~= "" and charKey ~= "-" and not PVPHUB_IGNORED[charKey] then
             PVPHUB_DB[charKey] = PVPHUB_DB[charKey] or {}
             
-            local specIndex = GetSpecialization()
+            local specIndex = GetSpecIndex()
             if specIndex then
-                local specID = GetSpecializationInfo(specIndex)
-                if specID then
+                local okSpec, specID = pcall(GetSpecInfo, specIndex)
+                if okSpec and specID and specID > 0 then
                     -- Update spec information
                     PVPHUB_DB[charKey].specID = specID
                     PVPHUB_DB[charKey].lastActiveSpecID = specID
@@ -6655,18 +7137,14 @@ PVPHUB.frame:HookScript("OnEvent", function(self, event, ...)
                     -- The delayed call below is a fallback only; the 3.5s delay
                     -- ensures the server has responded and the client-side
                     -- GetPersonalRatedInfo() cache is no longer stale.
-                    if C_PvP.RequestBracketStats then
-                        C_PvP.RequestBracketStats()
-                    end
+                    RequestRatedInfo()
                     -- Do NOT call UpdatePvPRatings() directly here: the client cache
                     -- may still be stale at 3.5s if only one PVP_RATED_STATS_UPDATE
                     -- fired (within the 1.5s stale window).  Re-request instead to
                     -- force the server to send a fresh response, which the
                     -- PVP_RATED_STATS_UPDATE handler will then persist correctly.
                     C_Timer.After(3.5, function()
-                        if C_PvP.RequestBracketStats then
-                            C_PvP.RequestBracketStats()
-                        end
+                        RequestRatedInfo()
                     end)
 
                     -- Refresh windows if they're open
@@ -6705,12 +7183,7 @@ PVPHUB.frame:HookScript("OnEvent", function(self, event, ...)
         -- PVP_RATED_STATS_UPDATE fires after the match and triggers the real update.
         if not enteringPvP then
             C_Timer.After(1, function()
-                if C_PvP.RequestBracketStats then
-                    C_PvP.RequestBracketStats()
-                end
-                if C_PvP.RequestSeasonBestInfo then
-                    C_PvP.RequestSeasonBestInfo()
-                end
+                RequestRatedInfo()
                 -- Refresh the UI after requesting fresh data
                 C_Timer.After(0.5, function()
                     UpdateMMRData()
@@ -6916,6 +7389,15 @@ PVPHUB.frame:HookScript("OnEvent", function(self, event, ...)
                 end
             end
         end
+    elseif event == "PLAYER_LOGOUT" then
+        -- The rotating backup ring is throttled to once per 5 minutes and only
+        -- keeps 3 slots, so under normal play it cycles past anything useful
+        -- within the hour. Forcing one here guarantees there is always a
+        -- snapshot from the end of the session to fall back on.
+        CreateDataBackup(true)
+        -- Also offer the archive a dated entry. Self-throttled, so this only
+        -- lands when the newest one is already a day old.
+        ArchiveSnapshot("logout")
     elseif event == "PLAYER_REGEN_DISABLED" then
         -- Player entered combat - mark combat status
         PVPHUB._inCombat = true
@@ -7056,6 +7538,82 @@ SlashCmdList["PVPHUB"] = function(msg)
             PVPHubPrint("|cffff0000[PVPHUB]|r No data found for current character.")
         end
         return
+    elseif command == "backup" then
+        -- Force a snapshot right now, bypassing the once-per-20h spacing.
+        -- Two reasons this needs to exist: you may be about to do something
+        -- risky and want a known-good point first, and without it a freshly
+        -- installed or freshly fixed version can't produce a snapshot to look
+        -- at for the better part of a day.
+        local before = (type(PVPHUB_DB_ARCHIVE) == "table") and #PVPHUB_DB_ARCHIVE or 0
+        ArchiveSnapshot("manual", true)
+        local after = (type(PVPHUB_DB_ARCHIVE) == "table") and #PVPHUB_DB_ARCHIVE or 0
+        local snap = PVPHUB_DB_ARCHIVE and PVPHUB_DB_ARCHIVE[1]
+        if snap then
+            PVPHubPrint(string.format(
+                "|cff00ff00[PVPHUB]|r Backup created — %d character(s) saved. Now holding %d backup(s). See |cff00ff00/pvphub backups|r.",
+                snap.chars or 0, after))
+        else
+            PVPHubPrint("|cffff0000[PVPHUB]|r Nothing to back up — no character data found.")
+        end
+        return
+    elseif command == "backups" then
+        -- List every archived snapshot with its age, reason and how much of it
+        -- is actually missing from the live DB right now.
+        local archive = PVPHUB_DB_ARCHIVE
+        if type(archive) ~= "table" or #archive == 0 then
+            PVPHubPrint("|cffff0000[PVPHUB]|r No backups yet. One is taken on login (at most once a day), at logout, and always before any reset.")
+            return
+        end
+        print("|cffff0000[PVPHUB]|r Available backups:")
+        for i, snap in ipairs(archive) do
+            local age  = SecondsToTime and SecondsToTime(GetServerTime() - (snap.timestamp or GetServerTime())) or "?"
+            local plan = FindDataFromArchive(i)
+            local detail
+            if not plan then
+                detail = "|cff888888nothing missing|r"
+            else
+                local bits = {}
+                if plan.recreateCount > 0 then
+                    table.insert(bits, string.format("|cffff8844%d missing chars|r", plan.recreateCount))
+                end
+                if plan.fillCount > 0 then
+                    table.insert(bits, string.format("|cffffd100%d with gaps|r", plan.fillCount))
+                end
+                detail = table.concat(bits, ", ")
+            end
+            print(string.format("  |cff00ff00%d|r  %s ago  —  %d chars saved  —  %s  (%s)",
+                i, age, snap.chars or 0, detail, snap.reason or "snapshot"))
+        end
+        print("  Use |cff00ff00/pvphub restore <number>|r to restore one.")
+        return
+    elseif command == "restore" then
+        -- Restore missing season data from an archived snapshot. Never
+        -- overwrites anything present — see FindDataFromArchive.
+        local index = tonumber(args[2]) or 1
+        local archive = PVPHUB_DB_ARCHIVE
+        if type(archive) ~= "table" or not archive[index] then
+            PVPHubPrint("|cffff0000[PVPHUB]|r No backup #" .. index .. ". Use |cff00ff00/pvphub backups|r to see what's available.")
+            return
+        end
+        local snapshot = archive[index]
+        local plan = FindDataFromArchive(index)
+        if not plan then
+            PVPHubPrint("|cffff0000[PVPHUB]|r Nothing to restore from backup #" .. index .. " — your current data already has everything it holds.")
+            return
+        end
+        local ageText = (SecondsToTime and SecondsToTime(GetServerTime() - (snapshot.timestamp or GetServerTime()))) or "a while"
+        local what = {}
+        if plan.recreateCount > 0 then
+            table.insert(what, string.format("bring back %d character(s) that are missing entirely", plan.recreateCount))
+        end
+        if plan.fillCount > 0 then
+            table.insert(what, string.format("fill in missing season data (ratings, win/loss, match history) for %d character(s)", plan.fillCount))
+        end
+        PVPHUB._pendingWipeRestorePlan = plan
+        StaticPopup_Show("PVPHUB_RESTORE_LAST_WIPE", string.format(
+            "Restore from the backup taken %s ago (%s)?\n\nThis will %s.\n\nNothing you currently have is overwritten.",
+            ageText, snapshot.reason or "snapshot", table.concat(what, ", and ")))
+        return
     elseif command == "resetpos" then
         -- Reset window positions to center of screen
         PVPHUB_SETTINGS.compactWindowPos = nil
@@ -7106,6 +7664,9 @@ SlashCmdList["PVPHUB"] = function(msg)
         print("  |cff00ff00/pvphub resetpos|r - Reset window positions to center")
         print("  |cff00ff00/pvphub resethonor|r - Reset honor warnings")
         print("  |cff00ff00/pvphub resetseason|r - Reset season data")
+        print("  |cff00ff00/pvphub backup|r - Create a data backup right now")
+        print("  |cff00ff00/pvphub backups|r - List saved data backups")
+        print("  |cff00ff00/pvphub restore <n>|r - Restore missing season data from backup <n>")
         print("  |cff00ff00/pvphub seasonlabel <name>|r - Rename the current season shown in the Season tab (no name clears it)")
         print("")
         print("|cffff0000[PVPHUB]|r You can also set a custom keybind in:")
@@ -9184,10 +9745,27 @@ SlashCmdList["PVPHUB"] = function(msg)
             end)
             hiddenCharsButton:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
+            -- Manage Backups — deliberately sits directly above "Reset All
+            -- Data": the moment someone is looking at the destructive button
+            -- is exactly when they should see that a way back exists.
+            local backupsButton = CreateFrame("Button", nil, advContent, "UIPanelButtonTemplate")
+            backupsButton:SetSize(190, 25)
+            backupsButton:SetPoint("TOPLEFT", hiddenCharsButton, "BOTTOMLEFT", 0, -5)
+            backupsButton:SetText("Manage Backups")
+            backupsButton:SetScript("OnClick", function() ShowBackupsWindow() end)
+            backupsButton:SetScript("OnEnter", function(self)
+                GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
+                GameTooltip:SetText("Data Backups", 1, 0.8, 0)
+                GameTooltip:AddLine("View saved backups and restore data that has gone missing", 1, 1, 1, true)
+                GameTooltip:AddLine("Restoring never overwrites data you still have.", 0.6, 0.9, 0.6, true)
+                GameTooltip:Show()
+            end)
+            backupsButton:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
             -- Reset All Data button
             local resetButton = CreateFrame("Button", nil, advContent, "UIPanelButtonTemplate")
             resetButton:SetSize(190, 25)
-            resetButton:SetPoint("TOPLEFT", hiddenCharsButton, "BOTTOMLEFT", 0, -5)
+            resetButton:SetPoint("TOPLEFT", backupsButton, "BOTTOMLEFT", 0, -5)
             resetButton:SetText("Reset All Data")
             resetButton:GetFontString():SetTextColor(1, 1, 1)
             resetButton:SetScript("OnClick", function() StaticPopup_Show("PVPHUB_RESET_ALL_DATA") end)
@@ -9219,7 +9797,7 @@ SlashCmdList["PVPHUB"] = function(msg)
             sApp.contentHeight   = 245
             sNotif.contentHeight = 75
             sQT.contentHeight    = 215
-            sAdv.contentHeight   = 115
+            sAdv.contentHeight   = 145  -- +30 for the Manage Backups button
             RecalcPositions()
 
             -- Remeasure after one frame when GetBottom() is valid
@@ -9460,13 +10038,13 @@ SlashCmdList["PVPHUB"] = function(msg)
 
                 local titleText = header:CreateFontString(nil, "OVERLAY", "GameFontNormal")
                 titleText:SetPoint("LEFT", iconTex, "RIGHT", 7, 0)
-                RegisterTrackedFont(titleText, 13, "OUTLINE")
+                RegisterTrackedFont(titleText, 13, "OUTLINE", "stats")
                 titleText:SetText(title)
                 titleText:SetTextColor(1, 1, 1, 1)
 
                 local arrowText = header:CreateFontString(nil, "OVERLAY", "GameFontNormal")
                 arrowText:SetPoint("LEFT", titleText, "RIGHT", 8, 0)
-                RegisterTrackedFont(arrowText, 11, "OUTLINE")
+                RegisterTrackedFont(arrowText, 11, "OUTLINE", "stats")
                 arrowText:SetText(expanded and CreateAtlasMarkup("auctionhouse-ui-sortarrow", 10, 10) or CreateAtlasMarkup("common-icon-forwardarrow", 8, 13))
                 arrowText:SetTextColor(1, 1, 1, 0.65)
 
@@ -9509,7 +10087,7 @@ SlashCmdList["PVPHUB"] = function(msg)
             local function AddRow(body, rowYPos, label, value, valueColor)
                 local l = body:CreateFontString(nil, "OVERLAY", "GameFontNormal")
                 l:SetPoint("TOPLEFT", body, "TOPLEFT", 14, rowYPos)
-                RegisterTrackedFont(l, 12, "")
+                RegisterTrackedFont(l, 12, "", "stats")
                 l:SetTextColor(0.75, 0.75, 0.75, 1)
                 l:SetText(label)
 
@@ -9521,7 +10099,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                 v:SetPoint("TOPLEFT", l, "TOPRIGHT", 8, 0)
                 v:SetJustifyH("RIGHT")
                 v:SetWordWrap(true)
-                RegisterTrackedFont(v, 12, "OUTLINE")
+                RegisterTrackedFont(v, 12, "OUTLINE", "stats")
                 v:SetTextColor(unpack(valueColor or {1, 1, 1, 1}))
                 v:SetText(value)
 
@@ -9565,13 +10143,13 @@ SlashCmdList["PVPHUB"] = function(msg)
 
                     local valueText = tileFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
                     valueText:SetPoint("TOP", tileFrame, "TOP", 0, -15)
-                    RegisterTrackedFont(valueText, 20, "OUTLINE")
+                    RegisterTrackedFont(valueText, 20, "OUTLINE", "stats")
                     valueText:SetTextColor(unpack(tile.color))
                     valueText:SetText(tile.value)
 
                     local labelText = tileFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
                     labelText:SetPoint("TOP", valueText, "BOTTOM", 0, -4)
-                    RegisterTrackedFont(labelText, 10, "")
+                    RegisterTrackedFont(labelText, 10, "", "stats")
                     labelText:SetTextColor(0.75, 0.75, 0.75, 1)
                     labelText:SetText(tile.label)
 
@@ -9588,7 +10166,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                         -- past its edges into neighboring tiles.
                         subText:SetWidth(tileWidth - 10)
                         subText:SetWordWrap(true)
-                        RegisterTrackedFont(subText, 9, "")
+                        RegisterTrackedFont(subText, 9, "", "stats")
                         subText:SetTextColor(0.55, 0.55, 0.55, 1)
                         subText:SetText(tile.sub)
                         table.insert(cardWidgets, subText)
@@ -9639,7 +10217,7 @@ SlashCmdList["PVPHUB"] = function(msg)
 
                 local header = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
                 header:SetPoint("TOP", panel, "TOP", 0, -pad + 2)
-                RegisterTrackedFont(header, 13, "OUTLINE")
+                RegisterTrackedFont(header, 13, "OUTLINE", "stats")
                 header:SetTextColor(1, 0.82, 0, 1)
                 header:SetText("Season Titles")
 
@@ -9775,13 +10353,13 @@ SlashCmdList["PVPHUB"] = function(msg)
 
                     local nameText = tileFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
                     nameText:SetPoint("TOP", tileFrame, "TOP", 0, -29)
-                    RegisterTrackedFont(nameText, 12, "OUTLINE")
+                    RegisterTrackedFont(nameText, 12, "OUTLINE", "stats")
                     nameText:SetTextColor(1, 1, 1, 1)
                     nameText:SetText(meta.name)
 
                     local valueText = tileFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
                     valueText:SetPoint("TOP", tileFrame, "TOP", 0, -46)
-                    RegisterTrackedFont(valueText, 16, "OUTLINE")
+                    RegisterTrackedFont(valueText, 16, "OUTLINE", "stats")
 
                     local subText = tileFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
                     subText:SetPoint("TOP", tileFrame, "TOP", 0, -85)
@@ -9790,7 +10368,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                     -- doesn't actually clip a FontString's rendering to its set
                     -- width, so a long name would still overflow past the tile.
                     subText:SetWordWrap(true)
-                    RegisterTrackedFont(subText, 9, "")
+                    RegisterTrackedFont(subText, 9, "", "stats")
                     subText:SetTextColor(0.65, 0.65, 0.65, 1)
 
                     local barWidth = tileWidth - 16 -- 8px padding each side, matches the old barBG footprint
@@ -9918,7 +10496,7 @@ SlashCmdList["PVPHUB"] = function(msg)
 
                     local labelText = tileFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
                     labelText:SetPoint("TOPLEFT", tileFrame, "TOPLEFT", 10, -11)
-                    RegisterTrackedFont(labelText, 10, "")
+                    RegisterTrackedFont(labelText, 10, "", "stats")
                     labelText:SetTextColor(0.65, 0.65, 0.65, 1)
                     labelText:SetText(tile.label)
 
@@ -9945,7 +10523,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                             if entry.count and entry.count > 1 then
                                 local countText = tileFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
                                 countText:SetPoint("BOTTOMRIGHT", iconTex, "BOTTOMRIGHT", 3, -2)
-                                RegisterTrackedFont(countText, 10, "OUTLINE")
+                                RegisterTrackedFont(countText, 10, "OUTLINE", "stats")
                                 countText:SetTextColor(1, 0.9, 0.3, 1)
                                 countText:SetShadowColor(0, 0, 0, 1)
                                 countText:SetShadowOffset(1, -1)
@@ -9995,7 +10573,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                         end
                         valueText:SetPoint("RIGHT", tileFrame, "RIGHT", -8, 0)
                         valueText:SetJustifyH("LEFT")
-                        RegisterTrackedFont(valueText, 11, "OUTLINE")
+                        RegisterTrackedFont(valueText, 11, "OUTLINE", "stats")
                         valueText:SetTextColor(1, 1, 1, 1)
                         valueText:SetWordWrap(true)
                         valueText:SetText(tile.value)
@@ -10006,7 +10584,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                             subText:SetPoint("TOPLEFT", valueText, "BOTTOMLEFT", 0, -2)
                             subText:SetPoint("RIGHT",   tileFrame, "RIGHT", -8, 0)
                             subText:SetJustifyH("LEFT")
-                            RegisterTrackedFont(subText, 9, "")
+                            RegisterTrackedFont(subText, 9, "", "stats")
                             subText:SetTextColor(0.65, 0.65, 0.65, 1)
                             subText:SetWordWrap(true)
                             subText:SetText(tile.sub)
@@ -10017,7 +10595,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                         valueText:SetPoint("TOPLEFT",  labelText, "BOTTOMLEFT", 0, -4)
                         valueText:SetPoint("RIGHT",    tileFrame, "RIGHT", -10, 0)
                         valueText:SetJustifyH("LEFT")
-                        RegisterTrackedFont(valueText, 12, "OUTLINE")
+                        RegisterTrackedFont(valueText, 12, "OUTLINE", "stats")
                         valueText:SetTextColor(1, 1, 1, 1)
                         valueText:SetWordWrap(true)
                         valueText:SetText(tile.value)
@@ -10041,6 +10619,13 @@ SlashCmdList["PVPHUB"] = function(msg)
                     w:SetParent(nil)
                 end
                 cardWidgets = {}
+                -- Drop the font registrations belonging to the widgets we just
+                -- orphaned. Without this the tracked-font table keeps a hard
+                -- reference to every FontString this tab has ever created, so
+                -- none of them can be collected and RefreshTrackedFonts grows
+                -- unboundedly — this render runs after every recorded match
+                -- while the tab is open, not just on tab switches.
+                ClearTrackedFontScope("stats")
 
                 local yPos = 0
 
@@ -10060,7 +10645,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                 local introText = statsScrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
                 introText:SetPoint("TOP", statsScrollChild, "TOP", 0, yPos)
                 introText:SetJustifyH("CENTER")
-                RegisterTrackedFont(introText, 16, "OUTLINE")
+                RegisterTrackedFont(introText, 16, "OUTLINE", "stats")
                 introText:SetText("|cffff8800[BETA]|r This is your " .. seasonLabel .. ", |c" .. nameColorStr .. displayName .. "|r!")
                 table.insert(cardWidgets, introText)
                 yPos = yPos - 20
@@ -10429,26 +11014,18 @@ SlashCmdList["PVPHUB"] = function(msg)
             GameTooltip:Hide()
         end)
 
-        -- Start Fresh for New Season button — placed beside Streamer Mode since
-        -- both are situational, opt-in actions rather than always-relevant window
-        -- controls. Opens the same confirmation as the automatic login-time
-        -- prompt (see UpdateCurrencyData's season-change detection), so this is
-        -- also how to re-trigger it any time after dismissing that prompt.
-        local startFreshBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-        startFreshBtn:SetSize(100, 18)
-        startFreshBtn:SetPoint("BOTTOMRIGHT", compactToggleBtn, "BOTTOMLEFT", -8, 0)
-        startFreshBtn:SetText("Start Fresh")
-        startFreshBtn:GetFontString():SetFont("Fonts\\ARIALN.TTF", 10)
-        f.startFreshBtn = startFreshBtn
-        startFreshBtn:SetScript("OnClick", function() PVPHUB:ShowSeasonFreshStartPopup() end)
-        startFreshBtn:SetScript("OnEnter", function(self)
-            GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
-            GameTooltip:SetText("Start Fresh for New Season", 0.2, 1, 0.4)
-            GameTooltip:AddLine("Clears last season's ratings, W/L, and match history for every tracked character.", 1, 1, 1, true)
-            GameTooltip:AddLine("Honor, gold, notes, and settings are kept.", 0.8, 0.8, 0.8, true)
-            GameTooltip:Show()
-        end)
-        startFreshBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        -- The "Start Fresh for New Season" button used to sit here, beside
+        -- Streamer Mode. It existed because a season change left every
+        -- character showing last season's numbers, and clearing them by hand
+        -- was the only way to get a clean slate.
+        --
+        -- That reason is gone: a season change no longer deletes anything, and
+        -- last season's values are filtered at display time instead
+        -- (IsSeasonDataCurrent / IsCharacterStaleThisSeason), resolving
+        -- themselves as each character logs in. What remained was a
+        -- irreversible, roster-wide delete sitting one misclick away in the
+        -- main window — with no upside left. "Reset All Data" under
+        -- Settings > Advanced still exists for a deliberate full wipe.
 
         -- Use saved window scale or default to 1.0
         PVPHUB_SETTINGS.windowScale = PVPHUB_SETTINGS.windowScale or 1.0
@@ -10894,6 +11471,17 @@ SlashCmdList["PVPHUB"] = function(msg)
             -- isRatingKnown), so checking them here left "Hide Characters
             -- with No Ratings" showing characters tagged "(last season)"
             -- since their old rating numbers were technically still >0.
+            -- Season-aware: every bracketStats entry carries the season it was
+            -- written under, so a character whose only ratings are from last
+            -- season counts as "no rating" for this filter without any of that
+            -- data having to be deleted.
+            local curSeason = PVPHUB_SETTINGS.lastKnownSeasonID or 0
+            local function isCurrentSeasonEntry(entry)
+                if type(entry) ~= "table" then return false end
+                if curSeason <= 0 or entry.season == nil then return true end
+                return entry.season == curSeason
+            end
+
             local function hasAnyRating(data)
                 local bs = data.bracketStats
                 if not bs then return false end
@@ -10902,11 +11490,12 @@ SlashCmdList["PVPHUB"] = function(msg)
                     if entry then
                         if meta.key == "ratingShuffle" or meta.key == "ratingBlitz" then
                             for _, spec in pairs(entry) do
-                                if type(spec) == "table" and (spec.rating or 0) > 0 then
+                                if type(spec) == "table" and (spec.rating or 0) > 0
+                                   and isCurrentSeasonEntry(spec) then
                                     return true
                                 end
                             end
-                        elseif (entry.rating or 0) > 0 then
+                        elseif (entry.rating or 0) > 0 and isCurrentSeasonEntry(entry) then
                             return true
                         end
                     end
@@ -10915,6 +11504,9 @@ SlashCmdList["PVPHUB"] = function(msg)
             end
             
             local totalHonor, totalConquest, totalGold = 0, 0, 0
+            -- Set when a character's Conquest was left out of the total purely
+            -- because it predates the current season (see the loop below).
+            local conquestHiddenByStale = false
 
             -- Display thresholds (Settings > Display) — a character below
             -- the threshold is left out of that currency's total entirely,
@@ -10948,7 +11540,14 @@ SlashCmdList["PVPHUB"] = function(msg)
                     -- changed, it's known to be their stale pre-reset amount,
                     -- not their real current balance. Leave it out of the
                     -- total instead of counting a number we know is wrong.
-                    if not IsCharacterStaleThisSeason(char) and (data.conquest or 0) > conquestThreshold then
+                    if IsCharacterStaleThisSeason(char) then
+                        -- Remember that we suppressed something, so a total of
+                        -- 0 can be shown as "unknown" rather than as a factual
+                        -- zero (see conquestText below).
+                        if (data.conquest or 0) > 0 then
+                            conquestHiddenByStale = true
+                        end
+                    elseif (data.conquest or 0) > conquestThreshold then
                         totalConquest = totalConquest + (data.conquest or 0)
                     end
 
@@ -11485,6 +12084,20 @@ SlashCmdList["PVPHUB"] = function(msg)
                 local CONQUEST_CHECK = "|TInterface\\RaidFrame\\ReadyCheck-Ready:12:12:0:0|t"
                 local function coloredConquestWithCap(data)
                     local amount = data.conquest or 0
+
+                    -- A character that hasn't logged in since the season
+                    -- changed still has last season's Conquest stored, and
+                    -- Conquest is the one currency Blizzard actually zeroes at
+                    -- a season boundary. The summary line already leaves those
+                    -- out of the total for that reason — so render them greyed
+                    -- here too. Otherwise the column shows real-looking numbers
+                    -- while the total underneath says 0, which reads as a bug
+                    -- rather than as "these are historical".
+                    local seasonStart = PVPHUB_SETTINGS and PVPHUB_SETTINGS.seasonStartTimestamp
+                    if seasonStart and data.lastSeen and data.lastSeen < seasonStart then
+                        return string.format("|cff777777%s|r", FormatNumber(amount))
+                    end
+
                     local wd = data.conquestWeeklyData
                     local currentWeek = math.floor(GetServerTime() / (7 * 24 * 60 * 60))
                     if wd and wd.week == currentWeek then
@@ -12397,7 +13010,16 @@ SlashCmdList["PVPHUB"] = function(msg)
             
             -- Each FontString is auto-sized to its content; buttons track them via anchors
             f.honorText:SetText(string.format("%s Honor: %s", honorIcon, formatNumber(totalHonor)))
-            f.conquestText:SetText(string.format("%s Conquest: %s", conquestIcon, formatNumber(totalConquest)))
+            -- "0" and "we can't know yet" are different states. Right after a
+            -- season change every character still holds last season's Conquest,
+            -- all of it gets suppressed, and a flat 0 then looks like the addon
+            -- lost the data rather than like it's waiting for each character to
+            -- log in and report a real balance.
+            local conquestDisplay = formatNumber(totalConquest)
+            if totalConquest == 0 and conquestHiddenByStale then
+                conquestDisplay = "|cff777777—|r"
+            end
+            f.conquestText:SetText(string.format("%s Conquest: %s", conquestIcon, conquestDisplay))
             f.goldText:SetText(string.format("%s Gold: %s", goldIcon, totalGoldFormatted))
 
             -- Update Note section - single line only
@@ -12485,6 +13107,7 @@ PVPHUB._GetCurrentTheme             = GetCurrentTheme
 PVPHUB._IsCharacterHidden           = IsCharacterHidden
 PVPHUB._GetRatingColor              = GetRatingColor
 PVPHUB._GetShuffleDisplayInfo       = GetShuffleDisplayInfo
+PVPHUB._IsSeasonDataCurrent         = IsSeasonDataCurrent
 PVPHUB._ApplyModernScrollbarStyling = ApplyModernScrollbarStyling
 PVPHUB._ApplyModernDropdownStyling  = ApplyModernDropdownStyling
 PVPHUB._FormatNumber                = FormatNumber
@@ -12967,32 +13590,25 @@ local function RegisterAddonCompartment()
         -- Store data object for later use
         PVPHUB.dataObj = dataObj
         
-        -- Register with LibDBIcon using saved minimap settings with retry logic
+        -- Register with LibDBIcon using saved minimap settings, with retry in
+        -- case the library loads after us.
+        --
+        -- Registering twice is what actually caused conflicts, so this simply
+        -- doesn't: if the name is already registered, there is nothing to do.
+        -- (The old code called LDBIcon.Hide here under a comment claiming to
+        -- unregister, then re-registered on top of it.) Visibility is left to
+        -- LibDBIcon, which already honours the `hide` field in the saved
+        -- settings table we hand it.
         local function TryRegisterIcon()
             local LDBIcon = GetLib("LibDBIcon-1.0")
-            if LDBIcon then
-                -- Unregister first if already registered to prevent conflicts
-                if LDBIcon:IsRegistered("PVPHUB") then
-                    pcall(LDBIcon.Hide, LDBIcon, "PVPHUB")
-                end
-                
-                -- Register the icon
+            if not LDBIcon then return false end
+
+            if not LDBIcon:IsRegistered("PVPHUB") then
                 LDBIcon:Register("PVPHUB", dataObj, PVPHUB_SETTINGS.minimap)
-                
-                -- Ensure icon is shown if not hidden in settings
-                if not PVPHUB_SETTINGS.minimap.hide then
-                    C_Timer.After(0.1, function()
-                        if LDBIcon:IsRegistered("PVPHUB") then
-                            pcall(LDBIcon.Show, LDBIcon, "PVPHUB")
-                        end
-                    end)
-                end
-                
-                -- Store reference for later visibility checks
-                PVPHUB.LDBIcon = LDBIcon
-                return true
             end
-            return false
+
+            PVPHUB.LDBIcon = LDBIcon
+            return true
         end
         
         -- Try to register immediately
@@ -13019,7 +13635,7 @@ local function RegisterAddonCompartment()
                 func = "PVPHUB_AddonCompartmentFunc",
                 funcOnEnter = "PVPHUB_AddonCompartmentFuncOnEnter",
                 funcOnLeave = "PVPHUB_AddonCompartmentFuncOnLeave",
-                icon = "Interface\\AddOns\\PVPHUB\\PVPHUB.png",
+                icon = "Interface\\AddOns\\PVPHUB\\media\\PVPHUB.png",
                 title = "PVPHUB"
             }
         end
@@ -13037,29 +13653,14 @@ compartmentFrame:SetScript("OnEvent", function(self, event, addonName)
         RegisterAddonCompartment()
         RegisterOptionsPanel()
 
-        -- Start periodic minimap icon check after initial registration
-        C_Timer.After(5, function()
-            local function CheckMinimapIcon()
-                if PVPHUB.LDBIcon and PVPHUB.dataObj and not PVPHUB_SETTINGS.minimap.hide then
-                    if PVPHUB.LDBIcon:IsRegistered("PVPHUB") then
-                        -- Icon is registered, make sure it's visible
-                        pcall(PVPHUB.LDBIcon.Show, PVPHUB.LDBIcon, "PVPHUB")
-                    else
-                        -- Icon got unregistered somehow, re-register it
-                        pcall(PVPHUB.LDBIcon.Register, PVPHUB.LDBIcon, "PVPHUB", PVPHUB.dataObj, PVPHUB_SETTINGS.minimap)
-                        pcall(PVPHUB.LDBIcon.Show, PVPHUB.LDBIcon, "PVPHUB")
-                    end
-                end
-            end
-            
-            -- Check every 30 seconds
-            local checkTimer
-            checkTimer = C_Timer.NewTicker(30, CheckMinimapIcon)
-            
-            -- Store timer reference for cleanup if needed
-            PVPHUB.minimapCheckTimer = checkTimer
-        end)
-        
+        -- There used to be a C_Timer.NewTicker(30, ...) here that re-showed the
+        -- minimap icon every 30 seconds for the entire session. It was never
+        -- cancelled, and it fought anyone who hid the button through a
+        -- different addon: LibDBIcon owns that visibility, and re-asserting it
+        -- on a loop overrode the player's own choice. LibDBIcon already honours
+        -- the `hide` field in the settings table passed to Register, so nothing
+        -- needs to poll.
+
         -- Unregister to prevent multiple calls
         self:UnregisterEvent("ADDON_LOADED")
         self:SetScript("OnEvent", nil)
@@ -13071,73 +13672,34 @@ compartmentFrame:SetScript("OnEvent", function(self, event, addonName)
     end
 end)
 
--- Handlers for the branded "Start Fresh" popup (modules/popups.lua,
--- PVPHUB:ShowSeasonFreshStartPopup) — kept here rather than in the popup
--- module because they need UpdateCurrencyData/CURRENCY_IDS/PVPHubPrint,
--- which only exist as locals in this file's chunk. The popup module is
--- UI-only and just calls these.
---
--- Only clears season-scoped PvP tracking (ratings, W/L, match history,
--- conquest/token season progress) for every stored character; honor, gold,
--- notes, hidden characters, and settings are all left untouched.
-function PVPHUB:ExecuteSeasonFreshStart()
-    for charKey, data in pairs(PVPHUB_DB) do
-        if type(data) == "table" and charKey ~= "settings" then
-            ClearCharacterSeasonData(data)
-        end
-    end
 
-    -- Re-anchor the season-boundary bookkeeping to right now, so
-    -- UpdateCurrencyData's automatic detection doesn't immediately think
-    -- another season just started, and every character but this one
-    -- correctly shows as "last season" (see IsCharacterStaleThisSeason)
-    -- until it logs in and reports fresh data.
-    local nowSeason = (C_PvP and C_PvP.GetUIDisplaySeason and C_PvP.GetUIDisplaySeason()) or 0
-    if nowSeason > 0 then
-        PVPHUB_SETTINGS.lastKnownSeasonID = nowSeason
-        -- Explicit decision made — stop re-prompting for this season.
-        PVPHUB_SETTINGS.seasonFreshStartResolvedForSeason = nowSeason
-    end
-    PVPHUB_SETTINGS.seasonStartTimestamp = GetServerTime()
-
-    -- Immediately repopulate the current character rather than leaving
-    -- it on a blank state until the next natural update event fires.
-    UpdateCurrencyData()
-    if PVPHUB.PvPTracking and PVPHUB.PvPTracking.SaveBracketStats then
-        PVPHUB.PvPTracking.SaveBracketStats(GetFullName())
-    end
-
-    if PVPHUB.window and PVPHUB.window.UpdateContent then
-        PVPHUB.window:UpdateContent()
-    end
-    if PVPHUB.window and PVPHUB.window:IsShown() and PVPHUB.window.currentTab == "stats"
-       and PVPHUB.window.statsFrame and PVPHUB.window.RenderStatsFor then
-        PVPHUB.window.RenderStatsFor()
-    end
-    if PVPHUB.compactWindow and PVPHUB.compactWindow.UpdateContent then
-        PVPHUB.compactWindow:UpdateContent()
-    end
-
-    PVPHubPrint("|cff33ff66[PVPHUB]|r Fresh start! Season tracking cleared for all characters — honor, gold, and notes were kept.")
-    PlaySound(8959)
-end
-
--- Final safety gate before ExecuteSeasonFreshStart actually runs — clicking
--- "Yes, Start Fresh" on the branded popup (modules/popups.lua) opens this
--- plain native confirm instead of wiping immediately, since that button
--- sits right next to the decline button and a misclick there would
--- otherwise be irreversible with a single click. Canceling here leaves the
--- season unresolved, same as closing the branded popup via its X — reopen
--- the "Start Fresh" button beside Streamer Mode whenever you're ready.
-StaticPopupDialogs["PVPHUB_CONFIRM_SEASON_FRESH_START"] = {
-    text = "|cffff4444Are you sure?|r\n\nThis will permanently clear last season's ratings, win/loss records, and match history for every tracked character.\n\n|cff888888This can't be undone.|r",
-    button1 = "Yes, I'm Sure",
+-- Confirms /pvphub restore <n>. text is a plain "%s" since the actual
+-- message (character count, reset reason, age) is built once in the
+-- command handler and passed as a single arg, rather than relying on
+-- StaticPopup's 2-argument %s substitution for 3 values.
+StaticPopupDialogs["PVPHUB_RESTORE_LAST_WIPE"] = {
+    text = "%s",
+    button1 = "Yes, Restore It",
     button2 = "Cancel",
     OnAccept = function()
-        PVPHUB:ExecuteSeasonFreshStart()
+        local plan = PVPHUB._pendingWipeRestorePlan
+        PVPHUB._pendingWipeRestorePlan = nil
+        if plan then
+            local filled, recreated = ApplyArchivePlan(plan)
+            RebuildHiddenSet()
+            if recreated > 0 then
+                PVPHubPrint(string.format(
+                    "|cff00ff00[PVPHUB]|r Restored: %d character(s) brought back, %d filled in.",
+                    recreated, filled))
+            else
+                PVPHubPrint(string.format(
+                    "|cff00ff00[PVPHUB]|r Restored season data for %d character(s).", filled))
+            end
+            RefreshAllWindows()
+        end
     end,
     OnCancel = function()
-        -- Do nothing — leaves seasonFreshStartResolvedForSeason untouched.
+        PVPHUB._pendingWipeRestorePlan = nil
     end,
     timeout = 0,
     whileDead = true,
@@ -13145,24 +13707,13 @@ StaticPopupDialogs["PVPHUB_CONFIRM_SEASON_FRESH_START"] = {
     preferredIndex = 3,
 }
 
--- Explicit decision to handle it manually — marks the season resolved so
--- the reminder banner/dimming still treats it normally. Only reached via an
--- actual button click (see ShowSeasonFreshStartPopup's X close, which calls
--- neither handler).
-function PVPHUB:DeclineSeasonFreshStart()
-    local nowSeason = (C_PvP and C_PvP.GetUIDisplaySeason and C_PvP.GetUIDisplaySeason()) or 0
-    if nowSeason > 0 then
-        PVPHUB_SETTINGS.seasonFreshStartResolvedForSeason = nowSeason
-    end
-    PVPHubPrint("|cffaaaaaa[PVPHUB]|r No problem — log into each character when you get a chance and PVPHUB will pick up fresh season data automatically.")
-end
-
 -- StaticPopup for confirming reset all data
 StaticPopupDialogs["PVPHUB_RESET_ALL_DATA"] = {
     text = "RESET ALL CHARACTER DATA\n\nThis will permanently delete ALL character PvP data including ratings, honor, conquest, and currencies.\n\n|cffFF0000This action cannot be undone!|r\n\nAre you sure you want to continue?",
     button1 = "Yes, Reset Everything",
     button2 = "Cancel",
     OnAccept = function()
+        SnapshotWipeBackup("Reset All Data")
         -- Clear all character data
         PVPHUB_DB = {}
         PVPHUB_IGNORED = {}

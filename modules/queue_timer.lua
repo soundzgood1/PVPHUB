@@ -163,13 +163,8 @@ local function GetStoredMMR(displayName)
     local charData = PVPHUB_DB[charKey]
     if not charData then return nil end
 
-    -- Resolve current spec ID
-    local specID
-    local idx = GetSpecialization()
-    if idx then
-        local ok, sid = pcall(GetSpecializationInfo, idx)
-        if ok and sid and sid > 0 then specID = sid end
-    end
+    -- Resolve current spec ID (deprecated-API safe, see modules/compat.lua)
+    local specID = PVPHUB.Compat.GetCurrentSpecID()
 
     -- Primary: per-spec MMR stored by the MMR tracker (actual MMR, not CR)
     local lastKnown = charData.lastKnownMMR and charData.lastKnownMMR[bracketKey]
@@ -309,46 +304,56 @@ PVPHUB.QueueTimer.SOUND_OPTIONS = {
     { label = "Raid Boss Defeated"    , id = 50111  }, -- SOUNDKIT.UI_RAID_BOSS_DEFEATED
 }
 
--- Tracks the true pre-scaling SFX volume so rapid replays don't compound the reduction.
--- _sfxRestoreGen increments on every press; each timer callback only restores if it holds
--- the current generation, so stale callbacks from earlier presses are harmlessly skipped
--- without needing C_Timer:Cancel() (which is unreliable when a callback is already queued).
-local _origSFXVol    = nil
-local _sfxRestoreGen = 0
-
 -- Play the configured match-ready sound (once per transition into READY).
+--
+-- This used to implement the volume setting by temporarily scaling the
+-- Sound_SFXVolume CVar down and restoring it from a C_Timer two seconds later.
+-- That could leave the player's game permanently quieter: a /reload, logout or
+-- disconnect inside those two seconds skipped the restore, and because the
+-- pre-scaling value only lived in a session-local, the next press captured the
+-- ALREADY-reduced value as its "original" and scaled again — compounding
+-- toward silence across sessions. A queue pop is exactly when people zone or
+-- reload, so it was reachable in normal play.
+--
+-- PlaySound's own volume is not adjustable, so the setting is now honoured the
+-- only way that stays inside our own domain: full volume, or not at all.
+-- SOUND_VOLUME_THRESHOLD is the point below which we treat the setting as
+-- "off" rather than silently playing at full blast.
+local SOUND_VOLUME_THRESHOLD = 25
+
 local function PlayMatchReadySound()
     local soundKey = PVPHUB_SETTINGS and PVPHUB_SETTINGS.queueTimer and PVPHUB_SETTINGS.queueTimer.readySound
     if soundKey == nil then soundKey = "PvP Queue Ready" end  -- default
     if soundKey == "None" then return end
+
+    local volume = (PVPHUB_SETTINGS.queueTimer and PVPHUB_SETTINGS.queueTimer.readySoundVolume)
+    if volume == nil then volume = 100 end
+    if volume < SOUND_VOLUME_THRESHOLD then return end
+
     for _, opt in ipairs(PVPHUB.QueueTimer.SOUND_OPTIONS) do
         if opt.label == soundKey and opt.id then
-            local volume = (PVPHUB_SETTINGS.queueTimer and PVPHUB_SETTINGS.queueTimer.readySoundVolume)
-            if volume == nil then volume = 100 end
-            if volume == 0 then return end
-            if volume < 100 then
-                -- Only capture and scale on the first press; rapid subsequent presses
-                -- reuse the already-scaled CVar so it never compounds toward zero.
-                if not _origSFXVol then
-                    _origSFXVol = GetCVar("Sound_SFXVolume")
-                    local scaledVol = (tonumber(_origSFXVol) or 1) * (volume / 100)
-                    SetCVar("Sound_SFXVolume", scaledVol)
-                end
-                PlaySound(opt.id, "SFX")
-                -- Bump the generation and capture it; only this generation's callback
-                -- will run the restore, all older pending callbacks will skip it.
-                _sfxRestoreGen = _sfxRestoreGen + 1
-                local gen = _sfxRestoreGen
-                C_Timer.After(2, function()
-                    if _sfxRestoreGen ~= gen then return end
-                    SetCVar("Sound_SFXVolume", _origSFXVol)
-                    _origSFXVol = nil
-                end)
-            else
-                PlaySound(opt.id, "SFX")
-            end
+            PlaySound(opt.id, "SFX")
             return
         end
+    end
+end
+
+-- One-time repair for anyone whose Sound_SFXVolume was left scaled down by the
+-- bug described above. The old code never persisted the original value, so we
+-- can't restore an exact number — but we can stop it compounding, and a stuck
+-- value is silent-failure territory the player would otherwise never connect
+-- back to this addon. Only warns; never changes the CVar behind their back.
+local function WarnIfSFXVolumeLooksStuck()
+    if PVPHUB_SETTINGS.sfxVolumeWarningShown then return end
+    local vol = tonumber(GetCVar("Sound_SFXVolume"))
+    local hadScaling = PVPHUB_SETTINGS.queueTimer
+                       and PVPHUB_SETTINGS.queueTimer.readySoundVolume
+                       and PVPHUB_SETTINGS.queueTimer.readySoundVolume < 100
+    if hadScaling and vol and vol < 0.25 then
+        PVPHUB_SETTINGS.sfxVolumeWarningShown = true
+        print("|cffFFD100[PVPHUB]|r Your Sound Effects volume is very low (" .. math.floor(vol * 100) ..
+              "%). An older version of PVPHUB's queue-ready sound could leave it that way. " ..
+              "You can reset it under Options > Sound. This notice won't show again.")
     end
 end
 
@@ -496,7 +501,7 @@ function PVPHUB.QueueTimer:CreateFrame()
     body:SetPoint("BOTTOMRIGHT", frame,  "BOTTOMRIGHT", -3, 3)
     frame.body = body
 
-    local maxRows = MAX_BATTLEFIELD_QUEUES or 3
+    local maxRows = PVPHUB.Compat.GetMaxBattlefieldQueues()
     frame.slotRows = {}
     for i = 1, maxRows do
         local ROW_H = 56
@@ -837,7 +842,7 @@ function PVPHUB.QueueTimer:Update()
     -- Collect ALL active queue slots
     self.confirmTimes = self.confirmTimes or {}
     local activeSlots = {}
-    local maxSlots = MAX_BATTLEFIELD_QUEUES or 3
+    local maxSlots = PVPHUB.Compat.GetMaxBattlefieldQueues()
     for i = 1, maxSlots do
         local status, mapName, teamSize, registeredMatch, suspendedQueue, queueType = GetBattlefieldStatus(i)
         if status == "confirm" or status == "queued" then
@@ -1059,7 +1064,6 @@ end
 function PVPHUB.QueueTimer:Show()
     if not self.frame then self:CreateFrame() end
     PVPHUB_SETTINGS = PVPHUB_SETTINGS or {}
-    PVPHUB_SETTINGS.queueTimerHidden = false
     self.frame:Show()
     self:StartTick()
 end
@@ -1153,6 +1157,49 @@ function PVPHUB.QueueTimer:_ShowTestPreview()
     end)
 end
 
+-- Shows a single "no active queue" row so the widget can be positioned even
+-- when nothing is queued. Uses a real slot row (the header is hidden by
+-- Update(), so anything written there is invisible).
+function PVPHUB.QueueTimer:_ShowPlaceholder()
+    if not self.frame then self:CreateFrame() end
+    local f = self.frame
+
+    f.header:Hide()
+    f.separator:Hide()
+    f.body:ClearAllPoints()
+    f.body:SetPoint("TOPLEFT",     f, "TOPLEFT",      3, -3)
+    f.body:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -3,  3)
+
+    local row = f.slotRows[1]
+    if row then
+        row:ClearAllPoints()
+        row:SetPoint("TOPLEFT",  f.body, "TOPLEFT",  0, 0)
+        row:SetPoint("TOPRIGHT", f.body, "TOPRIGHT", 0, 0)
+        row.currentDisplayName = nil
+        row.mmrLine:Hide()
+        row.nameLabel:Hide()
+        row.avgLabel:Hide()
+        row.avgValue:Hide()
+        row.inQLabel:Hide()
+        row.inQValue:Hide()
+        row.divider:Hide()
+        row.compactLine:Show()
+        row.compactLine:SetText("|cffaaaaaaNo active queue|r")
+        self:_ApplyRowColors(row, false)
+        row:Show()
+    end
+    for i = 2, #f.slotRows do f.slotRows[i]:Hide() end
+
+    f:Show()
+    C_Timer.After(0, function()
+        if not self.frame or not row then return end
+        row:SetHeight(ComputeRowHeight(row))
+        self.frame:SetHeight(row:GetHeight() + 6)
+        self:ApplyOpacity()
+        ResizeToContent(self.frame)
+    end)
+end
+
 -- Play the configured match-ready sound at the current volume setting.
 function PVPHUB.QueueTimer:PlayReadySound()
     PlayMatchReadySound()
@@ -1175,7 +1222,7 @@ function PVPHUB.QueueTimer:TogglePreview()
         self._previewOverride = nil
         -- Only hide if there is no real queue active
         local hasRealQueue = false
-        local maxSlots = MAX_BATTLEFIELD_QUEUES or 3
+        local maxSlots = PVPHUB.Compat.GetMaxBattlefieldQueues()
         for i = 1, maxSlots do
             local status = GetBattlefieldStatus(i)
             if status == "confirm" or status == "queued" then
@@ -1198,7 +1245,7 @@ function PVPHUB.QueueTimer:StopPreview()
         self._testMode      = false
         self._previewOverride = nil
         local hasRealQueue  = false
-        local maxSlots      = MAX_BATTLEFIELD_QUEUES or 3
+        local maxSlots      = PVPHUB.Compat.GetMaxBattlefieldQueues()
         for i = 1, maxSlots do
             local status = GetBattlefieldStatus(i)
             if status == "confirm" or status == "queued" then
@@ -1309,6 +1356,7 @@ queueEventFrame:SetScript("OnEvent", function(self, event, arg1)
             PVPHUB_SETTINGS.queueTimer.hideInInstances = true
         end
         PVPHUB.QueueTimer:ApplyScale()
+        WarnIfSFXVolumeLooksStuck()
 
         -- If somehow already queued when logging in, show immediately
         C_Timer.After(0.5, function()
@@ -1338,25 +1386,31 @@ end)
 -- Slash command integration  (/pvphub queue  or  /pvpqueue)
 -- --------------------------------------------------------------------------
 
+-- Toggles the same setting the Update() loop actually reads.
+--
+-- This used to write PVPHUB_SETTINGS.queueTimerHidden, which nothing ever read
+-- back — so hiding the timer lasted only until the next UPDATE_BATTLEFIELD_STATUS
+-- called Update() and showed it again. queueTimerEnabled is the flag Update()
+-- checks, so the toggle now sticks (and stays in sync with the settings panel).
+--
+-- The "no active queue" branch also used to write into frame.nameLabel, which
+-- lives in the header — and Update() hides the header unconditionally, so that
+-- text was never visible. A real placeholder row is used instead.
 SLASH_PVPHUBQUEUE1 = "/pvpqueue"
 SlashCmdList["PVPHUBQUEUE"] = function()
-    if not PVPHUB.QueueTimer.frame then
-        PVPHUB.QueueTimer:CreateFrame()
-    end
-    if PVPHUB.QueueTimer.frame:IsShown() then
-        PVPHUB_SETTINGS.queueTimerHidden = true
-        PVPHUB.QueueTimer:Hide()
-        print("|cffFFD100[PVPHUB]|r Queue timer hidden.")
-    else
-        PVPHUB.QueueTimer:Update()
-        if not PVPHUB.QueueTimer.frame:IsShown() then
-            -- No active queue, just show the header so user can position the widget
-            PVPHUB.QueueTimer.frame.nameLabel:SetText("No Active Queue")
-            for _, row in ipairs(PVPHUB.QueueTimer.frame.slotRows) do row:Hide() end
-            PVPHUB.QueueTimer.frame:SetHeight(34)
-            PVPHUB_SETTINGS.queueTimerHidden = false
-            PVPHUB.QueueTimer.frame:Show()
+    local QT = PVPHUB.QueueTimer
+    if not QT.frame then QT:CreateFrame() end
+
+    if PVPHUB_SETTINGS.queueTimerEnabled == false then
+        PVPHUB_SETTINGS.queueTimerEnabled = true
+        QT:Update()
+        if not QT.frame:IsShown() then
+            QT:_ShowPlaceholder()
         end
-        print("|cffFFD100[PVPHUB]|r Queue timer shown. Use /pvpqueue to toggle.")
+        print("|cffFFD100[PVPHUB]|r Queue timer enabled. Use /pvpqueue to toggle.")
+    else
+        PVPHUB_SETTINGS.queueTimerEnabled = false
+        QT:Hide()
+        print("|cffFFD100[PVPHUB]|r Queue timer hidden. Use /pvpqueue to bring it back.")
     end
 end

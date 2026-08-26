@@ -42,12 +42,8 @@ local function GetCurrentCharKey()
     return name .. "-" .. realm
 end
 
-local function GetCurrentSpecID()
-    local idx = GetSpecialization()
-    if not idx then return nil end
-    local ok, specID = pcall(GetSpecializationInfo, idx)
-    return (ok and specID and specID > 0) and specID or nil
-end
+-- Deprecated-API safe (see modules/compat.lua).
+local GetCurrentSpecID = PVPHUB.Compat.GetCurrentSpecID
 
 -- --------------------------------------------------------------------------
 -- Data persistence
@@ -78,6 +74,16 @@ local function SaveBracketStats(charKey)
     local season = (C_PvP.GetUIDisplaySeason and C_PvP.GetUIDisplaySeason()) or 0
     local specID = GetCurrentSpecID()
     local now    = GetServerTime()
+
+    -- Stamp which season the values written below belong to. The flat legacy
+    -- rating fields (rating2v2/ratingShuffle/...) carry no season of their own,
+    -- so this tag is what lets the UI tell current data from last season's
+    -- without having to delete anything — see IsSeasonDataCurrent in core.lua.
+    -- Only stamped once the server has confirmed fresh data for this session
+    -- (guaranteed by the _pvpCacheReady check above).
+    if season > 0 then
+        PVPHUB_DB[charKey].seasonTag = season
+    end
 
     for _, b in ipairs(BRACKETS) do
         -- Single call per bracket, like Blizzard's ConquestFrame_Update

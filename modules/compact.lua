@@ -14,8 +14,15 @@ local ApplyModernDropdownStyling    = PVPHUB._ApplyModernDropdownStyling
 local FormatNumber                  = PVPHUB._FormatNumber
 local PVP_BRACKETS                  = PVPHUB._PVP_BRACKETS
 
+-- Season-aware: last season's numbers are kept in the DB (they are no longer
+-- deleted on a season change — see IsSeasonDataCurrent in core.lua), so this
+-- filter has to ignore them explicitly rather than assume anything present is
+-- current.
 local function compactHasAnyRating(data)
     if not data then return false end
+    if PVPHUB._IsSeasonDataCurrent and not PVPHUB._IsSeasonDataCurrent(data) then
+        return false
+    end
     if (data.rating2v2 or 0) > 0 or (data.rating3v3 or 0) > 0 or (data.ratingRBG or 0) > 0 then return true end
     local function tableMax(t)
         if type(t) == "number" then return t end
