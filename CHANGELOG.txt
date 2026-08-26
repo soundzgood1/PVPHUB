@@ -7,7 +7,6 @@
 - Fixed: A memory leak in the Season tab that grew with every match played while the tab was open
 - Fixed: Hiding the queue timer with /pvpqueue didn't stick — it reappeared as soon as your queue status changed
 - Fixed: The minimap button re-showed itself every 30 seconds, overriding you if you'd hidden it through another addon
-- Fixed: "New Specialization Detected" kept showing the first spec's name and icon after later respecs
 - Fixed: Conquest showed a misleading "0" total after a season change, while the column above it still listed amounts
 - Changed: Updated several World of Warcraft functions Blizzard has deprecated and scheduled for removal, so Solo Shuffle and Blitz ratings keep working once those are gone
 
