@@ -999,20 +999,78 @@ end
 -- bracketStats is the richer structure, but leaving the flat fields alone
 -- meant a character you hadn't logged into since the reset kept showing (and
 -- counting as "has a rating" for) last season's numbers.
+local SEASON_SCOPED_FIELDS = {
+    "conquestWeeklyData", "bloodytokensWeeklyData", "bracketStats", "wlData",
+    "mmrHistory", "lastKnownMMR", "mmrData",
+    "rating2v2", "rating3v3", "ratingRBG", "ratingShuffle", "ratingBlitz",
+}
+
 local function ClearCharacterSeasonData(data)
     if type(data) ~= "table" then return end
-    data.conquestWeeklyData     = nil
-    data.bloodytokensWeeklyData = nil
-    data.bracketStats           = nil
-    data.wlData                 = nil
-    data.mmrHistory             = nil
-    data.lastKnownMMR           = nil
-    data.mmrData                = nil
-    data.rating2v2              = nil
-    data.rating3v3              = nil
-    data.ratingRBG              = nil
-    data.ratingShuffle          = nil
-    data.ratingBlitz            = nil
+    for _, field in ipairs(SEASON_SCOPED_FIELDS) do
+        data[field] = nil
+    end
+end
+
+-- Emergency recovery for the v6.6.0-6.6.2 cap-based season-wipe bug (see
+-- CHANGELOG v6.6.3): a mid-season Conquest cap ramp-up could get mistaken
+-- for a season change and wipe every character's season-scoped data even
+-- though the season hadn't actually changed. CreateDataBackup() snapshots
+-- PVPHUB_DB right before that wipe runs, so anyone hit by it still has
+-- their pre-wipe data sitting in PVPHUB_DB_BACKUP.
+--
+-- This only ever fills in fields that are currently nil - it never
+-- overwrites data that's already there, so it can't clobber a legitimate
+-- season change or an explicit "Reset All Data"/"Start Fresh". It's also
+-- restricted to recent wipes (seasonStartTimestamp within the last 7 days):
+-- an old backup could predate a genuine season change, and restoring that
+-- would reintroduce last season's numbers as if they were current -
+-- exactly the bug this whole detection system exists to prevent.
+local function FindRecoverableSeasonData()
+    if type(PVPHUB_DB) ~= "table" or type(PVPHUB_DB_BACKUP) ~= "table" then
+        return nil
+    end
+
+    local wipeTimestamp = PVPHUB_SETTINGS.seasonStartTimestamp
+    if not wipeTimestamp or (GetServerTime() - wipeTimestamp) > (7 * 24 * 60 * 60) then
+        return nil
+    end
+
+    local plan = {} -- charKey -> { field = value, ... }
+    for _, slotIndex in ipairs({ 1, 2, 3 }) do
+        local backupSlot = PVPHUB_DB_BACKUP[slotIndex]
+        if type(backupSlot) == "table" then
+            for charKey, backupData in pairs(backupSlot) do
+                if type(backupData) == "table" and type(PVPHUB_DB[charKey]) == "table" then
+                    local liveData = PVPHUB_DB[charKey]
+                    for _, field in ipairs(SEASON_SCOPED_FIELDS) do
+                        if liveData[field] == nil and backupData[field] ~= nil then
+                            plan[charKey] = plan[charKey] or {}
+                            if plan[charKey][field] == nil then
+                                plan[charKey][field] = backupData[field]
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if not next(plan) then return nil end
+    return plan
+end
+
+local function ApplyRecoveredSeasonData(plan)
+    local charCount = 0
+    for charKey, fields in pairs(plan) do
+        if type(PVPHUB_DB[charKey]) == "table" then
+            for field, value in pairs(fields) do
+                PVPHUB_DB[charKey][field] = (type(value) == "table") and DeepCopyTable(value) or value
+            end
+            charCount = charCount + 1
+        end
+    end
+    return charCount
 end
 
 -- Global Variables with Protection
@@ -3141,31 +3199,26 @@ local function UpdateCurrencyData()
     -- This handles the case where conquest was uncapped (pre-season) and a new
     -- capped season starts - without this the old seasonMaximum would make every
     -- character look "fully capped" on day 1 of the new season.
+    --
+    -- currentSeason (C_PvP.GetUIDisplaySeason()) is the ONLY signal trusted
+    -- here. An earlier version also treated a Conquest cap change as a
+    -- season-boundary signal, as a fallback for the season-ID flag lagging
+    -- the real rollover by a day or so - but the cap also legitimately
+    -- ramps up mid-season during a season's first several weeks, and that
+    -- ramp lands on an ordinary weekly ID reset, not a season change. That
+    -- fallback caused a real incident (see CHANGELOG v6.6.3): a weekly
+    -- reset got mistaken for a new season and wiped every character's
+    -- ratings/history. A weekly ID reset is never a season change, so cap
+    -- changes are no longer used to trigger this wipe at all - the
+    -- per-currency sanity clamp further below (search "Sanity clamp")
+    -- already independently prevents the "impossible tooltip number" case
+    -- the cap fallback was originally added for, without needing a wipe.
     local currentSeason = (C_PvP and C_PvP.GetUIDisplaySeason and C_PvP.GetUIDisplaySeason()) or 0
-
-    -- C_PvP.GetUIDisplaySeason() (and the rated-stat totals GetPersonalRatedInfo
-    -- returns) can lag behind the actual in-game rollover by a while - Blizzard
-    -- sometimes flips the "rated season" flag after the new season's Conquest
-    -- cap/curve already went live. So also treat the Conquest cap itself
-    -- changing as a season-boundary signal: it's currency-scoped and always
-    -- moves immediately when a new season starts, even on days the season-ID
-    -- check above misses.
-    local conquestCapNow = 0
-    do
-        local ok, capInfo = pcall(C_CurrencyInfo.GetCurrencyInfo, CURRENCY_IDS.conquest)
-        if ok and capInfo and capInfo.maxQuantity and capInfo.maxQuantity > 0 then
-            conquestCapNow = capInfo.maxQuantity
-        end
-    end
-
     local lastSeason       = PVPHUB_SETTINGS.lastKnownSeasonID or 0
-    local lastConquestCap  = PVPHUB_SETTINGS.lastKnownConquestCap or 0
-    local seasonChangedByID  = currentSeason > 0 and currentSeason ~= lastSeason
-    local seasonChangedByCap = conquestCapNow > 0 and lastConquestCap > 0 and conquestCapNow ~= lastConquestCap
+    local seasonChangedByID = currentSeason > 0 and currentSeason ~= lastSeason
 
-    if seasonChangedByID or seasonChangedByCap then
-        DebugPrint(string.format("Season change detected (season %d -> %d, conquest cap %d -> %d)",
-            lastSeason, currentSeason, lastConquestCap, conquestCapNow))
+    if seasonChangedByID then
+        DebugPrint(string.format("Season change detected (season %d -> %d)", lastSeason, currentSeason))
         -- Clear all per-character seasonal tracking for every stored toon —
         -- see ClearCharacterSeasonData for the full field list and why it's
         -- centralized. bracketStats/wlData feed the Stats tab's "this
@@ -3180,18 +3233,12 @@ local function UpdateCurrencyData()
             end
         end
 
-        if currentSeason > 0 then
-            PVPHUB_SETTINGS.lastKnownSeasonID = currentSeason
-        end
+        PVPHUB_SETTINGS.lastKnownSeasonID = currentSeason
         -- Anchor point for IsCharacterStaleThisSeason: any character whose
         -- lastSeen predates this moment hasn't reported in since the season
         -- changed and gets dimmed in the roster until it logs in again.
         PVPHUB_SETTINGS.seasonStartTimestamp = GetServerTime()
         PVPHubPrint("|cffff0000[PVPHUB]|r New PvP season detected! Season tracking data has been automatically reset for all characters.")
-    end
-
-    if conquestCapNow > 0 then
-        PVPHUB_SETTINGS.lastKnownConquestCap = conquestCapNow
     end
 
     -- Bootstrap: if a season boundary was already detected and reset under an
@@ -6500,6 +6547,32 @@ PVPHUB.frame:HookScript("OnEvent", function(self, event, ...)
                         C_Timer.After(2, function()
                             PVPHUB:ShowUpdatePopup(currentVersion)
                         end)
+                    end
+                end)
+
+                -- One-time emergency recovery for anyone hit by the
+                -- v6.6.0-6.6.2 cap-based season-wipe bug (see
+                -- FindRecoverableSeasonData / CHANGELOG v6.6.3). Applied
+                -- automatically rather than behind a confirmation popup -
+                -- it's already restricted to nil-only fills within a 7-day
+                -- window, so there's nothing for a popup to gate. Runs at
+                -- most once ever, on its own flag independent of the
+                -- welcome/update version check above.
+                SafeInitStep("emergency season-data recovery", function()
+                    if not PVPHUB_SETTINGS.seasonDataRecoveryAppliedV663 then
+                        PVPHUB_SETTINGS.seasonDataRecoveryAppliedV663 = true
+                        local plan = FindRecoverableSeasonData()
+                        if plan then
+                            local restored = ApplyRecoveredSeasonData(plan)
+                            if restored > 0 then
+                                C_Timer.After(2, function()
+                                    PVPHubPrint(string.format(
+                                        "|cff00ff00[PVPHUB]|r A recent bug cleared some season data (ratings, win/loss records, match history) — restored it from backup for %d character(s).",
+                                        restored))
+                                    RefreshAllWindows()
+                                end)
+                            end
+                        end
                     end
                 end)
 
@@ -13013,10 +13086,6 @@ function PVPHUB:ExecuteSeasonFreshStart()
         PVPHUB_SETTINGS.lastKnownSeasonID = nowSeason
         -- Explicit decision made — stop re-prompting for this season.
         PVPHUB_SETTINGS.seasonFreshStartResolvedForSeason = nowSeason
-    end
-    local capOk, capInfo = pcall(C_CurrencyInfo.GetCurrencyInfo, CURRENCY_IDS.conquest)
-    if capOk and capInfo and capInfo.maxQuantity and capInfo.maxQuantity > 0 then
-        PVPHUB_SETTINGS.lastKnownConquestCap = capInfo.maxQuantity
     end
     PVPHUB_SETTINGS.seasonStartTimestamp = GetServerTime()
 
