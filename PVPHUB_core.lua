@@ -6533,6 +6533,16 @@ PVPHUB.frame:HookScript("OnEvent", function(self, event, ...)
                     end
                 end)
 
+                -- The "PVPHUB Updated!" popup's feature list (modules/popups.lua
+                -- ShowUpdatePopup's `changes` table) is hand-curated, not
+                -- generated from CHANGELOG.txt, and currently describes what
+                -- shipped in 6.6.0. Only show it when landing on that exact
+                -- version - a silent bug-fix release (like 6.6.3) has no new
+                -- content, and re-showing 6.6.0's list would misrepresent old
+                -- features as new. Bump this string when `changes` is next
+                -- rewritten for an actual feature announcement.
+                local UPDATE_POPUP_CONTENT_VERSION = "6.6.0"
+
                 SafeInitStep("welcome/update popup", function()
                     local currentVersion = C_AddOns.GetAddOnMetadata("PVPHUB", "Version") or "Unknown"
                     if not PVPHUB_SETTINGS.welcomeShown then
@@ -6542,11 +6552,12 @@ PVPHUB.frame:HookScript("OnEvent", function(self, event, ...)
                             PVPHUB:ShowWelcomePopup()
                         end)
                     elseif PVPHUB_SETTINGS.lastSeenVersion ~= currentVersion then
-                        -- Existing user, version changed: show update popup
                         PVPHUB_SETTINGS.lastSeenVersion = currentVersion
-                        C_Timer.After(2, function()
-                            PVPHUB:ShowUpdatePopup(currentVersion)
-                        end)
+                        if currentVersion == UPDATE_POPUP_CONTENT_VERSION then
+                            C_Timer.After(2, function()
+                                PVPHUB:ShowUpdatePopup(currentVersion)
+                            end)
+                        end
                     end
                 end)
 
