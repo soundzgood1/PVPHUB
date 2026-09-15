@@ -1,3 +1,6 @@
+## v6.6.7 - Tighter Stats Tab Layout
+- Changed: Tightened spacing, tile sizes and fonts throughout the Stats tab (cards, hero tiles, season title progress, boxed tiles) so more fits on screen with less scrolling
+
 ## v6.6.6 Hotfix - Fade Taint Fix
 - Fixed: A Blizzard taint error ("arithmetic on a secret number value") that could spam the error log, triggered by PVPHUB's toolbar/scrollbar fade animations sharing Blizzard's global fade-processing loop with unrelated frames like chat tabs. Fades are now handled entirely within PVPHUB instead of through Blizzard's shared fade system
 

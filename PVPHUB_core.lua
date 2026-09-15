@@ -9967,7 +9967,7 @@ SlashCmdList["PVPHUB"] = function(msg)
         -- file scope (near GetBracketSeasonSummary) — see the comment there.
 
         local function CardHeight(rows)
-            return 8 + rows * 18 + 14
+            return 6 + rows * 16 + 10
         end
 
         -- Wraps a character name in its class color, e.g. for roster rows and
@@ -10057,7 +10057,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                 local expanded = (PVPHUB_SETTINGS.statsSections[sectionKey] ~= false)
 
                 local header = CreateFrame("Button", nil, statsScrollChild, "BackdropTemplate")
-                header:SetHeight(26)
+                header:SetHeight(22)
                 header:SetPoint("TOPLEFT",  statsScrollChild, "TOPLEFT",  0, yPos)
                 header:SetPoint("TOPRIGHT", statsScrollChild, "TOPRIGHT", -20, yPos)
                 header:SetBackdrop({
@@ -10084,7 +10084,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                 header:SetScript("OnLeave", function() ApplyGradient(false) end)
 
                 local iconTex = header:CreateTexture(nil, "OVERLAY")
-                iconTex:SetSize(18, 18)
+                iconTex:SetSize(16, 16)
                 iconTex:SetPoint("LEFT", header, "LEFT", 8, 0)
                 iconTex:SetTexture(iconPath)
                 iconTex:SetTexCoord(0.08, 0.92, 0.08, 0.92)
@@ -10092,7 +10092,7 @@ SlashCmdList["PVPHUB"] = function(msg)
 
                 local titleText = header:CreateFontString(nil, "OVERLAY", "GameFontNormal")
                 titleText:SetPoint("LEFT", iconTex, "RIGHT", 7, 0)
-                RegisterTrackedFont(titleText, 13, "OUTLINE", "stats")
+                RegisterTrackedFont(titleText, 12, "OUTLINE", "stats")
                 titleText:SetText(title)
                 titleText:SetTextColor(1, 1, 1, 1)
 
@@ -10134,14 +10134,14 @@ SlashCmdList["PVPHUB"] = function(msg)
                 table.insert(cardWidgets, header)
                 table.insert(cardWidgets, body)
 
-                local consumed = expanded and (26 + bodyHeight + 10) or (26 + 8)
+                local consumed = expanded and (22 + bodyHeight + 7) or (22 + 6)
                 return body, consumed
             end
 
             local function AddRow(body, rowYPos, label, value, valueColor)
                 local l = body:CreateFontString(nil, "OVERLAY", "GameFontNormal")
                 l:SetPoint("TOPLEFT", body, "TOPLEFT", 14, rowYPos)
-                RegisterTrackedFont(l, 12, "", "stats")
+                RegisterTrackedFont(l, 11, "", "stats")
                 l:SetTextColor(0.75, 0.75, 0.75, 1)
                 l:SetText(label)
 
@@ -10153,7 +10153,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                 v:SetPoint("TOPLEFT", l, "TOPRIGHT", 8, 0)
                 v:SetJustifyH("RIGHT")
                 v:SetWordWrap(true)
-                RegisterTrackedFont(v, 12, "OUTLINE", "stats")
+                RegisterTrackedFont(v, 11, "OUTLINE", "stats")
                 v:SetTextColor(unpack(valueColor or {1, 1, 1, 1}))
                 v:SetText(value)
 
@@ -10171,7 +10171,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                 local gap = 8
                 local n = #tiles
                 local tileWidth = (containerWidth - gap * (n - 1)) / n
-                local tileHeight = 80 -- extra room vs. the old 68 so a long sub-line (char-realm names) can wrap to 2 lines instead of overflowing sideways
+                local tileHeight = 70 -- still leaves a long sub-line (char-realm names) room to wrap to 2 lines instead of overflowing sideways
 
                 for i, tile in ipairs(tiles) do
                     local xOffset = (i - 1) * (tileWidth + gap)
@@ -10196,13 +10196,13 @@ SlashCmdList["PVPHUB"] = function(msg)
                     topStripe:SetHeight(3)
 
                     local valueText = tileFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-                    valueText:SetPoint("TOP", tileFrame, "TOP", 0, -15)
-                    RegisterTrackedFont(valueText, 20, "OUTLINE", "stats")
+                    valueText:SetPoint("TOP", tileFrame, "TOP", 0, -10)
+                    RegisterTrackedFont(valueText, 18, "OUTLINE", "stats")
                     valueText:SetTextColor(unpack(tile.color))
                     valueText:SetText(tile.value)
 
                     local labelText = tileFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-                    labelText:SetPoint("TOP", valueText, "BOTTOM", 0, -4)
+                    labelText:SetPoint("TOP", valueText, "BOTTOM", 0, -3)
                     RegisterTrackedFont(labelText, 10, "", "stats")
                     labelText:SetTextColor(0.75, 0.75, 0.75, 1)
                     labelText:SetText(tile.label)
@@ -10214,7 +10214,7 @@ SlashCmdList["PVPHUB"] = function(msg)
 
                     if tile.sub then
                         local subText = tileFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-                        subText:SetPoint("TOP", labelText, "BOTTOM", 0, -2)
+                        subText:SetPoint("TOP", labelText, "BOTTOM", 0, -1)
                         -- Width + wrap so a long char-realm name wraps onto a
                         -- second line inside the tile instead of overflowing
                         -- past its edges into neighboring tiles.
@@ -10227,7 +10227,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                     end
                 end
 
-                return tileHeight + 12
+                return tileHeight + 8
             end
 
             -- Row of three equal-width "progress" tiles for the season titles
@@ -10242,11 +10242,11 @@ SlashCmdList["PVPHUB"] = function(msg)
             local function AddTitleProgressTiles(yPos, titleData)
                 local containerWidth = statsScrollChild:GetWidth()
                 if not containerWidth or containerWidth < 100 then containerWidth = 650 end
-                local pad        = 10
-                local headerH    = 20
+                local pad        = 8
+                local headerH    = 17
                 local gap        = 8
                 local n          = #TITLE_META
-                local tileHeight = 104
+                local tileHeight = 90
                 local innerWidth = containerWidth - pad * 2
                 local tileWidth  = (innerWidth - gap * (n - 1)) / n
                 local panelHeight = pad + headerH + tileHeight + pad
@@ -10271,7 +10271,7 @@ SlashCmdList["PVPHUB"] = function(msg)
 
                 local header = panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
                 header:SetPoint("TOP", panel, "TOP", 0, -pad + 2)
-                RegisterTrackedFont(header, 13, "OUTLINE", "stats")
+                RegisterTrackedFont(header, 12, "OUTLINE", "stats")
                 header:SetTextColor(1, 0.82, 0, 1)
                 header:SetText("Season Titles")
 
@@ -10380,8 +10380,8 @@ SlashCmdList["PVPHUB"] = function(msg)
                     -- outside the main window without needing it open.
                     PVPHUB_SETTINGS.trackedTitles = PVPHUB_SETTINGS.trackedTitles or {}
                     local trackCheckbox = CreateFrame("CheckButton", nil, tileFrame, "UICheckButtonTemplate")
-                    trackCheckbox:SetSize(16, 16)
-                    trackCheckbox:SetPoint("TOPRIGHT", tileFrame, "TOPRIGHT", -3, -6)
+                    trackCheckbox:SetSize(14, 14)
+                    trackCheckbox:SetPoint("TOPRIGHT", tileFrame, "TOPRIGHT", -3, -7)
                     trackCheckbox:SetFrameLevel(tileFrame:GetFrameLevel() + 2)
                     trackCheckbox:SetChecked(PVPHUB_SETTINGS.trackedTitles[meta.key])
                     trackCheckbox:SetScript("OnClick", function(self)
@@ -10400,23 +10400,23 @@ SlashCmdList["PVPHUB"] = function(msg)
                     -- Real achievement icon once titleProgress has synced; the
                     -- bracket's generic icon is shown as a placeholder until then.
                     local iconTex = tileFrame:CreateTexture(nil, "ARTWORK")
-                    iconTex:SetSize(18, 18)
-                    iconTex:SetPoint("TOP", tileFrame, "TOP", 0, -8)
+                    iconTex:SetSize(16, 16)
+                    iconTex:SetPoint("TOP", tileFrame, "TOP", 0, -9)
                     iconTex:SetTexCoord(0.08, 0.92, 0.08, 0.92)
                     iconTex:SetTexture(tp.icon or meta.icon)
 
                     local nameText = tileFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-                    nameText:SetPoint("TOP", tileFrame, "TOP", 0, -29)
-                    RegisterTrackedFont(nameText, 12, "OUTLINE", "stats")
+                    nameText:SetPoint("TOP", tileFrame, "TOP", 0, -26)
+                    RegisterTrackedFont(nameText, 11, "OUTLINE", "stats")
                     nameText:SetTextColor(1, 1, 1, 1)
                     nameText:SetText(meta.name)
 
                     local valueText = tileFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-                    valueText:SetPoint("TOP", tileFrame, "TOP", 0, -46)
-                    RegisterTrackedFont(valueText, 16, "OUTLINE", "stats")
+                    valueText:SetPoint("TOP", tileFrame, "TOP", 0, -40)
+                    RegisterTrackedFont(valueText, 15, "OUTLINE", "stats")
 
                     local subText = tileFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-                    subText:SetPoint("TOP", tileFrame, "TOP", 0, -85)
+                    subText:SetPoint("TOP", tileFrame, "TOP", 0, -74)
                     subText:SetWidth(tileWidth - 12)
                     -- Wrap (not clip) long char-realm names: SetWordWrap(false)
                     -- doesn't actually clip a FontString's rendering to its set
@@ -10427,12 +10427,12 @@ SlashCmdList["PVPHUB"] = function(msg)
 
                     local barWidth = tileWidth - 16 -- 8px padding each side, matches the old barBG footprint
 
-                    local trackContainer, SetTrackFill = CreateCapsuleBar(tileFrame, barWidth, 10)
-                    trackContainer:SetPoint("TOPLEFT", tileFrame, "TOPLEFT", 8, -69)
+                    local trackContainer, SetTrackFill = CreateCapsuleBar(tileFrame, barWidth, 9)
+                    trackContainer:SetPoint("TOPLEFT", tileFrame, "TOPLEFT", 8, -60)
                     SetTrackFill(barWidth, 0, 0, 0, 0.5) -- static, always full width, dark
 
-                    local fillContainer, SetBarFill = CreateCapsuleBar(tileFrame, barWidth, 10)
-                    fillContainer:SetPoint("TOPLEFT", tileFrame, "TOPLEFT", 8, -69)
+                    local fillContainer, SetBarFill = CreateCapsuleBar(tileFrame, barWidth, 9)
+                    fillContainer:SetPoint("TOPLEFT", tileFrame, "TOPLEFT", 8, -60)
                     fillContainer:SetFrameLevel(trackContainer:GetFrameLevel() + 1)
 
                     if tp.earned then
@@ -10488,7 +10488,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                     table.insert(cardWidgets, fillContainer)
                 end
 
-                return panelHeight + 14
+                return panelHeight + 10
             end
 
             -- Row of boxed tiles — same visual language as AddHeroTiles (backdrop
@@ -10519,11 +10519,11 @@ SlashCmdList["PVPHUB"] = function(msg)
                         hasSubLine = true
                     end
                 end
-                local tileHeight = 56
+                local tileHeight = 48
                 if maxIconRows > 0 then
-                    tileHeight = 68 + (maxIconRows - 1) * 28
+                    tileHeight = 58 + (maxIconRows - 1) * 25
                 elseif hasSubLine then
-                    tileHeight = 68
+                    tileHeight = 58
                 end
 
                 for i, tile in ipairs(tiles) do
@@ -10549,7 +10549,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                     topStripe:SetHeight(3)
 
                     local labelText = tileFrame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-                    labelText:SetPoint("TOPLEFT", tileFrame, "TOPLEFT", 10, -11)
+                    labelText:SetPoint("TOPLEFT", tileFrame, "TOPLEFT", 10, -9)
                     RegisterTrackedFont(labelText, 10, "", "stats")
                     labelText:SetTextColor(0.65, 0.65, 0.65, 1)
                     labelText:SetText(tile.label)
@@ -10559,15 +10559,15 @@ SlashCmdList["PVPHUB"] = function(msg)
                     table.insert(cardWidgets, labelText)
 
                     if tile.icons and #tile.icons > 0 then
-                        local iconSize, xCursor, yCursor = 22, 0, 0
+                        local iconSize, xCursor, yCursor = 20, 0, 0
                         for iconIdx, entry in ipairs(tile.icons) do
                             if iconIdx > 1 and (iconIdx - 1) % iconsPerRow == 0 then
                                 xCursor = 0
-                                yCursor = yCursor - (iconSize + 6)
+                                yCursor = yCursor - (iconSize + 5)
                             end
                             local iconTex = tileFrame:CreateTexture(nil, "ARTWORK")
                             iconTex:SetSize(iconSize, iconSize)
-                            iconTex:SetPoint("TOPLEFT", labelText, "BOTTOMLEFT", xCursor, yCursor - 6)
+                            iconTex:SetPoint("TOPLEFT", labelText, "BOTTOMLEFT", xCursor, yCursor - 4)
                             if entry.icon then
                                 iconTex:SetTexture(entry.icon)
                                 iconTex:SetTexCoord(0.08, 0.92, 0.08, 0.92)
@@ -10613,8 +10613,8 @@ SlashCmdList["PVPHUB"] = function(msg)
                         end
                     elseif tile.icon then
                         local iconTex = tileFrame:CreateTexture(nil, "ARTWORK")
-                        iconTex:SetSize(24, 24)
-                        iconTex:SetPoint("TOPLEFT", labelText, "BOTTOMLEFT", 0, -6)
+                        iconTex:SetSize(22, 22)
+                        iconTex:SetPoint("TOPLEFT", labelText, "BOTTOMLEFT", 0, -4)
                         iconTex:SetTexture(tile.icon)
                         iconTex:SetTexCoord(0.08, 0.92, 0.08, 0.92)
                         table.insert(cardWidgets, iconTex)
@@ -10657,7 +10657,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                     end
                 end
 
-                return tileHeight + 10
+                return tileHeight + 8
             end
 
             -- CharacterHasStatsData / GetStatsCharacterList / BuildSeasonOverviewData
@@ -10699,10 +10699,10 @@ SlashCmdList["PVPHUB"] = function(msg)
                 local introText = statsScrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
                 introText:SetPoint("TOP", statsScrollChild, "TOP", 0, yPos)
                 introText:SetJustifyH("CENTER")
-                RegisterTrackedFont(introText, 16, "OUTLINE", "stats")
+                RegisterTrackedFont(introText, 14, "OUTLINE", "stats")
                 introText:SetText("|cffff8800[BETA]|r This is your " .. seasonLabel .. ", |c" .. nameColorStr .. displayName .. "|r!")
                 table.insert(cardWidgets, introText)
-                yPos = yPos - 20
+                yPos = yPos - 17
 
                 local disclaimerText = statsScrollChild:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
                 disclaimerText:SetPoint("TOP", statsScrollChild, "TOP", 0, yPos)
@@ -10715,7 +10715,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                 disclaimerText:SetText("Note: PVPHUB only tracks matches played since it was installed — if you installed mid-season, earlier games this season won't be included.")
                 disclaimerText:SetTextColor(0.6, 0.6, 0.6, 1)
                 table.insert(cardWidgets, disclaimerText)
-                yPos = yPos - 34
+                yPos = yPos - 27
 
                 -- Season title progress — one row of three equal-width tiles
                 -- (Legend/Strategist/Gladiator), placed first and set apart in
@@ -10765,9 +10765,9 @@ SlashCmdList["PVPHUB"] = function(msg)
                     if bt and bt.played > 0 then
                         local winPct = bt.played > 0 and (bt.won / bt.played * 100) or 0
                         local body, consumed = AddCard(yPos, meta.label .. " (All Characters)", meta.color, meta.icon, CardHeight(3), "roster_bracket_" .. meta.key)
-                        AddRow(body, -8,  "Games Played",    tostring(bt.played))
-                        AddRow(body, -26, "Combined Record", string.format("%d - %d  (%.0f%%)", bt.won, bt.lost, winPct))
-                        AddRow(body, -44, "Most Played By",  bt.mostPlayedChar and (ColorCharName(bt.mostPlayedChar) .. "  (" .. bt.mostPlayedGames .. " games)") or "—")
+                        AddRow(body, -6,  "Games Played",    tostring(bt.played))
+                        AddRow(body, -22, "Combined Record", string.format("%d - %d  (%.0f%%)", bt.won, bt.lost, winPct))
+                        AddRow(body, -38, "Most Played By",  bt.mostPlayedChar and (ColorCharName(bt.mostPlayedChar) .. "  (" .. bt.mostPlayedGames .. " games)") or "—")
                         yPos = yPos - consumed
                     end
                 end
