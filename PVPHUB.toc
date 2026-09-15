@@ -1,6 +1,6 @@
 ## Interface: 120007, 120100
 ## Title: |cffffd100PVPHUB|r
-## Version: 6.6.5
+## Version: 6.6.6
 ## Author: Soundz
 ## Notes: Thanks for using PVPHUB — your feedback keeps making it better ♥
 ## SavedVariables: PVPHUB_DB, PVPHUB_DB_BACKUP, PVPHUB_DB_ARCHIVE, PVPHUB_IGNORED, PVPHUB_SETTINGS

@@ -1,3 +1,6 @@
+## v6.6.6 Hotfix - Fade Taint Fix
+- Fixed: A Blizzard taint error ("arithmetic on a secret number value") that could spam the error log, triggered by PVPHUB's toolbar/scrollbar fade animations sharing Blizzard's global fade-processing loop with unrelated frames like chat tabs. Fades are now handled entirely within PVPHUB instead of through Blizzard's shared fade system
+
 ## v6.6.5 - Season Changes No Longer Delete Data
 - FIXED: A season change no longer deletes anything. It used to clear every character's ratings, win/loss records and match history the moment one was detected — so a single misdetection wiped the lot, which is exactly what happened when a weekly Conquest cap increase was read as a new season. Last season's numbers are now kept and shown as "(last season)" until each character logs in
 - NEW: Backup archive under Settings > Advanced > "Manage Backups". Up to 3 dated snapshots of all character data — taken at login, at logout, and always immediately before anything that clears data. One-click restore, including characters that are missing entirely; it only fills in what's missing and never overwrites data you still have

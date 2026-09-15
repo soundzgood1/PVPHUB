@@ -2704,6 +2704,32 @@ local function SetupUnicodeFriendlyFont(fontString, size, flags)
     fontString:SetFont(fontPath, size, flags)
 end
 
+-- Drop-in replacement for Blizzard's UIFrameFadeIn/UIFrameFadeOut (same
+-- frame/duration/fromAlpha/toAlpha signature). Blizzard's version registers
+-- the frame into a shared fade-processing table driven by one global
+-- OnUpdate loop in FrameUtil.lua that also fades unrelated Blizzard frames
+-- (e.g. chat frame tabs). Calling it from addon code taints that shared
+-- loop, and when it later touches a protected "secret" value elsewhere in
+-- the same pass, WoW throws "arithmetic on a secret number value, while
+-- execution tainted by 'PVPHUB'" even though we never touched that frame.
+-- Doing the tween ourselves keeps PVPHUB out of Blizzard's shared fade table.
+function PVPHUB_SimpleFade(frame, duration, fromAlpha, toAlpha)
+    if not frame then return end
+    if not frame._pvphubFadeDriver then
+        frame._pvphubFadeDriver = CreateFrame("Frame")
+    end
+    local driver = frame._pvphubFadeDriver
+    local elapsedTotal = 0
+    driver:SetScript("OnUpdate", function(self, elapsed)
+        elapsedTotal = elapsedTotal + elapsed
+        local progress = duration > 0 and math.min(elapsedTotal / duration, 1) or 1
+        frame:SetAlpha(fromAlpha + (toAlpha - fromAlpha) * progress)
+        if progress >= 1 then
+            self:SetScript("OnUpdate", nil)
+        end
+    end)
+end
+
 -- Shared scrollbar position/length for the Characters, Season, and Settings
 -- tabs, anchored to the main window frame (not each tab's own scroll frame)
 -- so all three land in the exact same spot regardless of that tab's own
@@ -2799,7 +2825,7 @@ local function ApplyModernScrollbarStyling(scrollFrame, themeColors, nudge)
         local fadeOutTimer
         local function FadeIn()
             if fadeOutTimer then fadeOutTimer:Cancel(); fadeOutTimer = nil end
-            UIFrameFadeIn(scrollBar, 0.15, scrollBar:GetAlpha(), ACTIVE_ALPHA)
+            PVPHUB_SimpleFade(scrollBar, 0.15, scrollBar:GetAlpha(), ACTIVE_ALPHA)
         end
         local function FadeOutSoon()
             if fadeOutTimer then fadeOutTimer:Cancel() end
@@ -2815,7 +2841,7 @@ local function ApplyModernScrollbarStyling(scrollFrame, themeColors, nudge)
                     FadeOutSoon()
                     return
                 end
-                UIFrameFadeOut(scrollBar, 0.4, scrollBar:GetAlpha(), IDLE_ALPHA)
+                PVPHUB_SimpleFade(scrollBar, 0.4, scrollBar:GetAlpha(), IDLE_ALPHA)
             end)
         end
 

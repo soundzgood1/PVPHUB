@@ -563,11 +563,11 @@ function PVPHUB:CreateCompactWindow()
         toolbar:SetAlpha(1)
 
         local function fadeToolbarIn()
-            UIFrameFadeIn(toolbar, 0.3, toolbar:GetAlpha(), 1)
+            PVPHUB_SimpleFade(toolbar, 0.3, toolbar:GetAlpha(), 1)
         end
 
         local function fadeToolbarOut()
-            UIFrameFadeOut(toolbar, 1, toolbar:GetAlpha(), 0)
+            PVPHUB_SimpleFade(toolbar, 1, toolbar:GetAlpha(), 0)
         end
 
         local function startFadeTimer()
