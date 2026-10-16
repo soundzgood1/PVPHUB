@@ -674,6 +674,7 @@ function PVPHUB.QueueTimer:CreateFrame()
     pulseAlpha:SetDuration(0.8)
     pulseAlpha:SetSmoothing("IN_OUT")
     frame.readyGlow = readyGlow
+    frame.readyWash = readyWash
     frame.readyPulse = readyPulse
 
     frame:Hide()
@@ -1160,10 +1161,16 @@ function PVPHUB.QueueTimer:Hide()
 end
 
 -- Starts or stops the pulsing outline shown while a queue has popped.
+-- Scaled by the Queue Timer opacity setting like the rest of the card, so at
+-- 0% the pulse is invisible too. Called every tick while a queue is ready,
+-- so an opacity change applies right away.
 function PVPHUB.QueueTimer:SetReadyPulse(on)
     local f = self.frame
     if not f or not f.readyPulse then return end
-    if on then
+    local opacity = (PVPHUB_SETTINGS and PVPHUB_SETTINGS.queueTimer and PVPHUB_SETTINGS.queueTimer.opacity) or 0.95
+    if on and opacity > 0 then
+        f.readyGlow:SetBackdropBorderColor(0.45, 1, 0.5, 0.55 * opacity)
+        f.readyWash:SetColorTexture(0.3, 1, 0.35, 0.14 * opacity)
         f.readyGlow:Show()
         if not f.readyPulse:IsPlaying() then f.readyPulse:Play() end
     else
