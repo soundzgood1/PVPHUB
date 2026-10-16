@@ -499,7 +499,14 @@ do
         local sig = ComputeDisplaySignature()
         if PVPHUB.window and PVPHUB.window:IsShown() and PVPHUB.window.UpdateContent
            and sig ~= PVPHUB._mainRenderSig then
-            PVPHUB.window:UpdateContent()
+            local ghost = PVPHUB._columnDragGhost
+            if PVPHUB._draggingColumnKey and ghost and ghost:IsVisible() then
+                -- A rebuild would pull the headers out from under an
+                -- in-progress column drag; try again once it's dropped.
+                PVPHUB_RefreshUI()
+            else
+                PVPHUB.window:UpdateContent()
+            end
         end
         if PVPHUB.compactWindow and PVPHUB.compactWindow:IsShown() and PVPHUB.UpdateCompactWindow
            and sig ~= PVPHUB._compactRenderSig then
@@ -1748,13 +1755,15 @@ local function GetGroupDragGhost()
     return PVPHUB._groupDragGhost
 end
 
--- Reorders a movable Characters-tab data column (see GetOrderedColumnHeaders
--- above). "character" is the fixed identifier column and never moves — the
+-- Moves a Characters-tab data column (see GetOrderedColumnHeaders above)
+-- directly in front of beforeKey, or, when that's nil, directly behind
+-- afterKey. "character" is the fixed identifier column and never moves — the
 -- drag handlers wired onto each column's hoverBtn also refuse to start a
 -- drag from it in the first place, this is just a second guard.
-local function ReorderColumn(fromKey, toKey)
-    if not fromKey or not toKey or fromKey == toKey then return end
-    if fromKey == "character" or toKey == "character" then return end
+local function ReorderColumn(fromKey, beforeKey, afterKey)
+    local anchorKey = beforeKey or afterKey
+    if not fromKey or not anchorKey or fromKey == anchorKey then return end
+    if fromKey == "character" or anchorKey == "character" then return end
 
     -- Seed columnOrder from the current effective order the first time a
     -- drag happens, so reordering one column doesn't reset the rest back to
@@ -1770,86 +1779,202 @@ local function ReorderColumn(fromKey, toKey)
     end
 
     local order = PVPHUB_SETTINGS.columnOrder
-    local fromIndex, toIndex
+    local fromIndex
     for i, key in ipairs(order) do
-        if key == fromKey then fromIndex = i end
-        if key == toKey then toIndex = i end
+        if key == fromKey then fromIndex = i; break end
     end
-    if not fromIndex or not toIndex then return end
+    if not fromIndex then return end
 
-    local key = table.remove(order, fromIndex)
-    table.insert(order, toIndex, key)
+    local moved = table.remove(order, fromIndex)
+    local insertAt
+    for i, key in ipairs(order) do
+        if key == anchorKey then
+            insertAt = beforeKey and i or (i + 1)
+            break
+        end
+    end
+    -- Anchor not found (shouldn't happen) or the column ends up where it
+    -- was: put it back and skip the rebuild.
+    table.insert(order, insertAt or fromIndex, moved)
+    if not insertAt or insertAt == fromIndex then return end
 
     if PVPHUB.window and PVPHUB.window.UpdateContent then
         PVPHUB.window:UpdateContent()
     end
 end
 
--- Horizontal counterpart to GetGroupDragGhost — but instead of a small tile
--- that only follows the cursor, this spans the FULL column height (header
--- down to the last row, matching the exact span the existing per-column
--- hover-highlight already uses — see "colHL" in UpdateContent, y=-82 to
--- y=+60 relative to the main window) so it reads as "you're picking up the
--- whole column," not just a floating label chip. Only the LEFT edge tracks
--- the cursor horizontally; the vertical span stays locked to the window's
--- row area regardless of the cursor's Y position, since column reordering
--- is a purely horizontal operation.
+-- Drag-and-drop for the Characters tab's column headers.
 --
--- parentWindow is the main PVPHUB window (f) — passed in rather than
--- captured as an upvalue because this function lives at file scope, outside
--- PVPHUB_ToggleMainWindow's closure where f is actually defined. Only the
--- first call's parentWindow matters (the ghost is a singleton and there's
--- only ever one main window per session).
+-- The ghost is a translucent copy of the column (a label chip plus a band
+-- down to the last row) that follows the cursor horizontally. It keeps the
+-- spot where the header was grabbed under the cursor, eases toward the cursor
+-- each frame instead of snapping, and stays within the movable columns.
+--
+-- The drop slot is worked out every frame from the ghost's position against
+-- the column layout UpdateContent records (f.columnLayout), not from which
+-- header the mouse happens to be over, so a drop works anywhere over the
+-- table. A marker eases into the gap the column will land in. Dropping on the
+-- column's own spot, or with the cursor pulled well outside the window,
+-- changes nothing (the ghost dims to show that).
+--
+-- The ghost is a child of the main window so its offsets share the window's
+-- own scale. It's a singleton created on the first drag; parentWindow is the
+-- main window (f), passed in because this lives at file scope.
 local function GetColumnDragGhost(parentWindow)
-    if not PVPHUB._columnDragGhost then
-        local ghost = CreateFrame("Frame", nil, UIParent)
-        ghost:SetFrameStrata("TOOLTIP")
-        ghost:Hide()
+    local ghost = PVPHUB._columnDragGhost
+    if ghost then return ghost end
 
-        -- Soft tint spanning the whole strip, so the entire column reads as
-        -- "selected/being moved" rather than just its header.
-        local bg = ghost:CreateTexture(nil, "BACKGROUND")
-        bg:SetAllPoints()
-        bg:SetColorTexture(0.25, 0.55, 1, 0.16)
+    local TOP_Y, BOTTOM_Y = -82, 60   -- same vertical span as the column hover highlight
+    local FOLLOW_SPEED = 22           -- easing per second; higher follows tighter
 
-        local borderLeft = ghost:CreateTexture(nil, "BORDER")
-        borderLeft:SetPoint("TOPLEFT", ghost, "TOPLEFT", 0, 0)
-        borderLeft:SetPoint("BOTTOMLEFT", ghost, "BOTTOMLEFT", 0, 0)
-        borderLeft:SetWidth(2)
-        borderLeft:SetColorTexture(0.3, 0.6, 1, 0.9)
-        local borderRight = ghost:CreateTexture(nil, "BORDER")
-        borderRight:SetPoint("TOPRIGHT", ghost, "TOPRIGHT", 0, 0)
-        borderRight:SetPoint("BOTTOMRIGHT", ghost, "BOTTOMRIGHT", 0, 0)
-        borderRight:SetWidth(2)
-        borderRight:SetColorTexture(0.3, 0.6, 1, 0.9)
+    ghost = CreateFrame("Frame", nil, parentWindow)
+    ghost:SetFrameStrata("TOOLTIP")
+    ghost:Hide()
 
-        -- Header-style label chip at the top of the strip, so the column is
-        -- still identifiable while shown as a full vertical band.
-        local labelBG = ghost:CreateTexture(nil, "ARTWORK")
-        labelBG:SetPoint("TOPLEFT", ghost, "TOPLEFT", 0, 0)
-        labelBG:SetPoint("TOPRIGHT", ghost, "TOPRIGHT", 0, 0)
-        labelBG:SetHeight(26)
-        labelBG:SetColorTexture(0.18, 0.22, 0.35, 0.92)
+    -- Soft tint spanning the whole strip, so the entire column reads as
+    -- "being moved" rather than just its header.
+    local bg = ghost:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    bg:SetColorTexture(0.25, 0.55, 1, 0.16)
 
-        local label = ghost:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        label:SetPoint("TOP", labelBG, "TOP", 0, -7)
-        label:SetJustifyH("CENTER")
-        ghost.label = label
+    local borderLeft = ghost:CreateTexture(nil, "BORDER")
+    borderLeft:SetPoint("TOPLEFT", ghost, "TOPLEFT", 0, 0)
+    borderLeft:SetPoint("BOTTOMLEFT", ghost, "BOTTOMLEFT", 0, 0)
+    borderLeft:SetWidth(2)
+    borderLeft:SetColorTexture(0.3, 0.6, 1, 0.9)
+    local borderRight = ghost:CreateTexture(nil, "BORDER")
+    borderRight:SetPoint("TOPRIGHT", ghost, "TOPRIGHT", 0, 0)
+    borderRight:SetPoint("BOTTOMRIGHT", ghost, "BOTTOMRIGHT", 0, 0)
+    borderRight:SetWidth(2)
+    borderRight:SetColorTexture(0.3, 0.6, 1, 0.9)
 
-        ghost:SetScript("OnUpdate", function(self)
-            local cursorX = GetCursorPosition()
-            local scale = parentWindow:GetEffectiveScale()
-            -- Cursor X converted into parentWindow's own coordinate units
-            -- (matches GetLeft()'s unit system), so no UIParent-scale
-            -- mixing is needed even if the user has a custom window scale set.
-            local offsetX = (cursorX / scale) - (parentWindow:GetLeft() or 0) - (self:GetWidth() / 2)
-            self:ClearAllPoints()
-            self:SetPoint("TOPLEFT", parentWindow, "TOPLEFT", offsetX, -82)
-            self:SetPoint("BOTTOMLEFT", parentWindow, "BOTTOMLEFT", offsetX, 60)
-        end)
-        PVPHUB._columnDragGhost = ghost
+    -- Header-style label chip at the top of the strip, so the column is
+    -- still identifiable while shown as a full vertical band.
+    local labelBG = ghost:CreateTexture(nil, "ARTWORK")
+    labelBG:SetPoint("TOPLEFT", ghost, "TOPLEFT", 0, 0)
+    labelBG:SetPoint("TOPRIGHT", ghost, "TOPRIGHT", 0, 0)
+    labelBG:SetHeight(26)
+    labelBG:SetColorTexture(0.18, 0.22, 0.35, 0.92)
+
+    local label = ghost:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    label:SetPoint("TOP", labelBG, "TOP", 0, -7)
+    label:SetJustifyH("CENTER")
+    ghost.label = label
+
+    -- Insertion marker in the gap the column will drop into. A child of the
+    -- ghost, so hiding the ghost (window refresh, tab switch) hides it too.
+    local marker = CreateFrame("Frame", nil, ghost)
+    marker:SetWidth(6)
+    local markerBar = marker:CreateTexture(nil, "OVERLAY")
+    markerBar:SetPoint("TOP", marker, "TOP", 0, 0)
+    markerBar:SetPoint("BOTTOM", marker, "BOTTOM", 0, 0)
+    markerBar:SetWidth(2)
+    markerBar:SetColorTexture(0.35, 0.78, 1, 1)
+    local markerCap = marker:CreateTexture(nil, "OVERLAY")
+    markerCap:SetPoint("TOP", marker, "TOP", 0, 0)
+    markerCap:SetSize(10, 3)
+    markerCap:SetColorTexture(0.35, 0.78, 1, 1)
+    marker:Hide()
+    ghost.marker = marker
+
+    -- Cursor X in the main window's own coordinate units (same units as
+    -- GetLeft() and as the column layout), whatever its scale.
+    local function CursorX()
+        return GetCursorPosition() / parentWindow:GetEffectiveScale() - (parentWindow:GetLeft() or 0)
     end
-    return PVPHUB._columnDragGhost
+
+    -- Starts a drag for one entry of f.columnLayout.
+    function ghost:Begin(column, text, font)
+        self.column = column
+        self.grabOffset = CursorX() - column.left
+        self.curX, self.markerX = nil, nil
+        self.targetBefore, self.targetAfter = nil, nil
+        self.fade = 0
+        self:SetWidth(column.width)
+        self.label:SetText(text)
+        SafeSetFont(self.label, font, 12, "OUTLINE")
+        self.marker:Hide()
+        self:SetAlpha(0)
+        self:Show()
+    end
+
+    -- Ends the drag. Returns the dragged column's key and the drop target
+    -- (beforeKey, afterKey); both targets are nil when the drop is a no-op.
+    function ghost:End()
+        local key = self.column and self.column.key
+        local beforeKey, afterKey = self.targetBefore, self.targetAfter
+        self.column, self.targetBefore, self.targetAfter = nil, nil, nil
+        self:Hide()
+        return key, beforeKey, afterKey
+    end
+
+    ghost:SetScript("OnUpdate", function(self, elapsed)
+        local column, layout = self.column, parentWindow.columnLayout
+        if not column or not layout then return end
+
+        -- Keep the ghost over the movable columns.
+        local minLeft, maxRight
+        for _, col in ipairs(layout) do
+            if col.movable then
+                minLeft = minLeft or col.left
+                maxRight = col.left + col.width
+            end
+        end
+        if not minLeft then return end
+        local targetX = CursorX() - self.grabOffset
+        targetX = math.max(minLeft, math.min(maxRight - column.width, targetX))
+
+        -- Ease toward the cursor rather than snapping to it.
+        local blend = math.min(1, elapsed * FOLLOW_SPEED)
+        self.curX = self.curX and (self.curX + (targetX - self.curX) * blend) or targetX
+        self:SetPoint("TOPLEFT", parentWindow, "TOPLEFT", self.curX, TOP_Y)
+        self:SetPoint("BOTTOMLEFT", parentWindow, "BOTTOMLEFT", self.curX, BOTTOM_Y)
+
+        -- Drop slot: the dragged column goes behind every other movable
+        -- column whose middle lies left of the ghost's middle.
+        local center = targetX + column.width / 2
+        local others, insertAfter, sourcePos = 0, 0, 0
+        local beforeKey, beforeLeft, afterKey, afterRight
+        for _, col in ipairs(layout) do
+            if col.movable then
+                if col.key == column.key then
+                    sourcePos = others + 1
+                else
+                    others = others + 1
+                    if col.left + col.width / 2 < center then
+                        insertAfter = others
+                        afterKey, afterRight = col.key, col.left + col.width
+                    elseif not beforeKey then
+                        beforeKey, beforeLeft = col.key, col.left
+                    end
+                end
+            end
+        end
+
+        -- Pulling the cursor well outside the window cancels the drop.
+        local inside = parentWindow:IsMouseOver(40, -40, -40, 40)
+        local isNoOp = (insertAfter + 1 == sourcePos)
+        if inside and not isNoOp then
+            self.targetBefore = beforeKey
+            self.targetAfter = (not beforeKey) and afterKey or nil
+            local slotX = beforeKey and beforeLeft or afterRight
+            self.markerX = self.markerX and (self.markerX + (slotX - self.markerX) * blend) or slotX
+            self.marker:SetPoint("TOP", parentWindow, "TOPLEFT", self.markerX, TOP_Y)
+            self.marker:SetPoint("BOTTOM", parentWindow, "BOTTOMLEFT", self.markerX, BOTTOM_Y)
+            self.marker:Show()
+        else
+            self.targetBefore, self.targetAfter = nil, nil
+            self.markerX = nil
+            self.marker:Hide()
+        end
+
+        -- Quick fade-in; dimmed while the drop would do nothing.
+        self.fade = math.min(1, (self.fade or 0) + elapsed * 8)
+        self:SetAlpha(self.fade * ((inside and not isNoOp) and 0.95 or 0.55))
+    end)
+
+    PVPHUB._columnDragGhost = ghost
+    return ghost
 end
 
 -- Function to show the group management window
@@ -7914,8 +8039,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                 -- the tab mid-drag shouldn't leave a floating ghost tile
                 -- behind on other tabs.
                 PVPHUB._draggingColumnKey = nil
-                PVPHUB._dropTargetColumnKey = nil
-                if PVPHUB._columnDragGhost then PVPHUB._columnDragGhost:Hide() end
+                if PVPHUB._columnDragGhost then PVPHUB._columnDragGhost:End() end
                 -- Sort/Show-Hide control the character list, which isn't
                 -- shown on the Season tab — hide them so they don't sit there
                 -- doing nothing.
@@ -7957,8 +8081,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                     if child._pvpHeaderWidget then child:Hide() end
                 end
                 PVPHUB._draggingColumnKey = nil
-                PVPHUB._dropTargetColumnKey = nil
-                if PVPHUB._columnDragGhost then PVPHUB._columnDragGhost:Hide() end
+                if PVPHUB._columnDragGhost then PVPHUB._columnDragGhost:End() end
                 -- Same as the Season tab — nothing here for Sort/Show-Hide to
                 -- act on, so keep them out of the way.
                 if _G["PVPHUBSortDropdown"]   then _G["PVPHUBSortDropdown"]:Hide()   end
@@ -10769,8 +10892,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                 if child._pvpHeaderWidget then child:Hide() end
             end
             PVPHUB._draggingColumnKey = nil
-            PVPHUB._dropTargetColumnKey = nil
-            if PVPHUB._columnDragGhost then PVPHUB._columnDragGhost:Hide() end
+            if PVPHUB._columnDragGhost then PVPHUB._columnDragGhost:End() end
             
             -- Create dynamic headers and calculate offsets
             local visibleHeaders = {}
@@ -10806,6 +10928,9 @@ SlashCmdList["PVPHUB"] = function(msg)
             -- Always create headers (visibility is controlled by tab switching)
             -- Create headers with modern styling
             local activeSortKey = PVPHUB_SETTINGS.sortKey or "highestRating"
+            -- Left edge and width of every header column, in window units;
+            -- the column drag ghost works out its drop slot from this.
+            f.columnLayout = {}
             for i, header in ipairs(visibleHeaders) do
                 -- Skip creating header for delete column
                 if not header.hideHeader then
@@ -10839,6 +10964,13 @@ SlashCmdList["PVPHUB"] = function(msg)
 
                     -- Column width for this header (matches xOffsets calculation)
                     local colWidth = math.ceil((header.minWidth or UI_CONSTANTS.COLUMN_WIDTHS.standard or 85) * fontScale)
+                    local column = {
+                        key = header.key,
+                        left = hXOffset - 20,
+                        width = colWidth,
+                        movable = header.key ~= "character",
+                    }
+                    table.insert(f.columnLayout, column)
 
                     -- Full-column hover highlight (header row down to scroll area bottom)
                     local hb = UI_CONSTANTS.COLORS.WINDOW_BORDER
@@ -10858,6 +10990,9 @@ SlashCmdList["PVPHUB"] = function(msg)
                     hoverBtn:SetSize(colWidth, 32)
                     hoverBtn:SetFrameLevel(f:GetFrameLevel() + 10)
                     hoverBtn:SetScript("OnEnter", function()
+                        -- No hover highlight on other columns while one is
+                        -- being dragged across them.
+                        if PVPHUB._draggingColumnKey then return end
                         colHL:Show()
                         h:SetTextColor(1, 1, 1, 1)
                         headerLine:SetVertexColor(1, 1, 1, 0.6)
@@ -10872,61 +11007,29 @@ SlashCmdList["PVPHUB"] = function(msg)
                         headerLine:SetVertexColor(unpack(UI_CONSTANTS.COLORS.HEADER_LINE))
                     end)
 
-                    -- Drag-and-drop column reordering — same pattern as the
-                    -- character-group drag-and-drop above (GetGroupDragGhost/
-                    -- ReorderGroup), adapted horizontally. "character" is the
-                    -- fixed identifier column and never gets this wiring.
+                    -- Drag-and-drop column reordering (see GetColumnDragGhost).
+                    -- "character" is the fixed identifier column and never
+                    -- gets this wiring.
                     if header.key ~= "character" then
                         hoverBtn:RegisterForDrag("LeftButton")
-                        hoverBtn:SetScript("OnDragStart", function(self)
+                        hoverBtn:SetScript("OnDragStart", function()
                             PVPHUB._draggingColumnKey = header.key
-                            PVPHUB._dropTargetColumnKey = nil
-                            local ghost = GetColumnDragGhost(f)
-                            -- Height comes from the OnUpdate anchoring (full
-                            -- column span); only width needs setting here.
-                            ghost:SetWidth(colWidth)
-                            ghost.label:SetText(header.text)
-                            SafeSetFont(ghost.label, currentFont, 12, "OUTLINE")
-                            ghost:Show()
+                            colHL:Hide()
+                            -- Leave a faded header where the column came from
+                            h:SetAlpha(0.35)
+                            headerLine:SetAlpha(0.35)
+                            GetColumnDragGhost(f):Begin(column, header.text, currentFont)
                         end)
-                        hoverBtn:SetScript("OnDragStop", function(self)
-                            local fromKey = PVPHUB._draggingColumnKey
-                            local toKey   = PVPHUB._dropTargetColumnKey
-                            PVPHUB._draggingColumnKey  = nil
-                            PVPHUB._dropTargetColumnKey = nil
-                            if PVPHUB._columnDragGhost then PVPHUB._columnDragGhost:Hide() end
-                            if self._dropLine then self._dropLine:Hide() end
-                            if fromKey and toKey and fromKey ~= toKey then
-                                ReorderColumn(fromKey, toKey)
+                        hoverBtn:SetScript("OnDragStop", function()
+                            PVPHUB._draggingColumnKey = nil
+                            h:SetAlpha(1)
+                            headerLine:SetAlpha(1)
+                            local ghost = PVPHUB._columnDragGhost
+                            if not ghost then return end
+                            local fromKey, beforeKey, afterKey = ghost:End()
+                            if fromKey and (beforeKey or afterKey) then
+                                ReorderColumn(fromKey, beforeKey, afterKey)
                             end
-                        end)
-
-                        local function showColumnDropLine(frame)
-                            if not frame._dropLine then
-                                local line = frame:CreateTexture(nil, "OVERLAY")
-                                line:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, 0)
-                                line:SetPoint("BOTTOMLEFT", frame, "BOTTOMLEFT", 0, 0)
-                                line:SetWidth(2)
-                                line:SetColorTexture(0.2, 0.6, 1, 1)
-                                frame._dropLine = line
-                            end
-                            frame._dropLine:Show()
-                        end
-
-                        -- Hooked (not set) so this stacks on top of the
-                        -- hover-highlight OnEnter/OnLeave above instead of
-                        -- replacing it.
-                        hoverBtn:HookScript("OnEnter", function(self)
-                            if PVPHUB._draggingColumnKey and PVPHUB._draggingColumnKey ~= header.key then
-                                PVPHUB._dropTargetColumnKey = header.key
-                                showColumnDropLine(self)
-                            end
-                        end)
-                        hoverBtn:HookScript("OnLeave", function(self)
-                            if PVPHUB._dropTargetColumnKey == header.key then
-                                PVPHUB._dropTargetColumnKey = nil
-                            end
-                            if self._dropLine then self._dropLine:Hide() end
                         end)
                     end
 
