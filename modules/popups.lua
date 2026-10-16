@@ -369,40 +369,40 @@ function PVPHUB:ShowUpdatePopup(version)
     -- language instead of a plain bulleted list.
     local changes = {
         {
-            title = "Smoother Everything",
-            desc  = "Columns and groups glide when you drag them, lists scroll smoothly and tabs fade in. Click a column header to sort, click again to flip it.",
-            icon  = "Interface\\Icons\\Ability_Rogue_Sprint",
-            color = { 0.35, 0.7, 1.0 },
-        },
-        {
-            title = "Rating Changes at a Glance",
-            desc  = "After a match your new rating shows the difference, like +18 or -12, for a few minutes and blinks once. Works in Streamer Mode too.",
-            icon  = "Interface\\Icons\\Achievement_Arena_2v2_1",
+            title = "Season Reset, Fully Fixed",
+            desc  = "\"Start Fresh\" (and the automatic new-season reset) now properly clears every character's old ratings, including alts you haven't logged into yet. If you were already affected, it's cleaned up automatically — no action needed.",
+            icon  = "Interface\\Icons\\Spell_Holy_Renew",
             color = { 0.3, 0.85, 0.45 },
         },
         {
-            title = "Queue Pop Pulse",
-            desc  = "A popped queue makes the timer glow green and the accept countdown turns red for the last 10 seconds. Right-click Show Preview to see it.",
-            icon  = "Interface\\Icons\\INV_Misc_PocketWatch_01",
-            color = { 0.2, 0.75, 0.75 },
+            title = "Streamer Mode Polish",
+            desc  = "The bottom toolbar now matches your window's theme and color and sits flush against the panel, instead of looking like a separate mismatched bar underneath.",
+            icon  = "Interface\\Icons\\INV_Misc_Gear_02",
+            color = { 0.35, 0.7, 1.0 },
         },
         {
-            title = "Modern Menus",
-            desc  = "Every dropdown and right-click menu now uses Blizzard's current menu style, and they no longer recolor other addons' dropdowns by accident.",
-            icon  = "Interface\\Icons\\INV_Misc_Note_01",
-            color = { 0.6, 0.4, 0.9 },
-        },
-        {
-            title = "Lighter and More Stable",
-            desc  = "Fixed a memory buildup in Streamer Mode, cut needless window rebuilds, fixed the note editor and made your saved data about 20% smaller.",
+            title = "Stability & Performance",
+            desc  = "A batch of under-the-hood fixes: less chance of a hitch right as a match ends, no more memory buildup during long streaming sessions, and a compatibility fix that could have interfered with other addons.",
             icon  = "Interface\\Icons\\Trade_Engineering",
             color = { 0.85, 0.65, 0.15 },
         },
         {
-            title = "Minimap Button for Everyone",
-            desc  = "The minimap button now ships with PVPHUB itself instead of depending on another installed addon that happens to bundle its libraries.",
-            icon  = "Interface\\Icons\\INV_Misc_Map_01",
+            title = "Clean Up Stale Characters",
+            desc  = "Hovering Total Honor, Conquest, or Gold now shows an interactive list — click the |cffff5555x|r next to any character to permanently remove it. Handy after a realm transfer, since PVPHUB can't always auto-detect that old entry.",
+            icon  = "Interface\\Icons\\INV_Misc_Bomb_01",
             color = { 0.9, 0.3, 0.3 },
+        },
+        {
+            title = "Currency Display Thresholds",
+            desc  = "New in Settings " .. CreateAtlasMarkup("common-icon-forwardarrow", 9, 12) .. " Display: set a minimum Honor, Conquest, or Gold amount, and characters below it are left out of the totals — so a pile of low-value alts doesn't dilute the number.",
+            icon  = "Interface\\Icons\\INV_Misc_Wrench_01",
+            color = { 0.6, 0.4, 0.9 },
+        },
+        {
+            title = "Warband Bank Tracking",
+            desc  = "Total Gold now includes your Warband Bank balance, shown as its own line at the top of the breakdown.",
+            icon  = "Interface\\Icons\\INV_Misc_Coin_01",
+            color = { 0.2, 0.75, 0.75 },
         },
     }
 
