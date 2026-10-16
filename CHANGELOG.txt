@@ -1,3 +1,7 @@
+## v6.6.8 - Patch 12.1.5 Compatibility
+- Fixed: PVPHUB is updated for World of Warcraft patch 12.1.5. Since the October 14 patch the game flagged it as out of date and didn't load it
+- NEW: The main window now shows the installed PVPHUB version next to "by soundz" under the title
+
 ## v6.6.7 - Tighter Stats Tab Layout
 - Changed: Tightened spacing, tile sizes and fonts throughout the Stats tab (cards, hero tiles, season title progress, boxed tiles) so more fits on screen with less scrolling
 

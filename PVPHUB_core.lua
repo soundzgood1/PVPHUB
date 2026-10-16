@@ -9905,10 +9905,13 @@ SlashCmdList["PVPHUB"] = function(msg)
             local point, relativeTo, relativePoint, xOfs, yOfs = f:GetPoint()
             PVPHUB_SETTINGS.windowPos = {point=point, relativePoint=relativePoint, x=xOfs, y=yOfs}
         end)
-        -- Author credit aligned under the title (locked to Prototyp font with fallback)
+        -- Author credit aligned under the title (locked to Prototyp font with fallback),
+        -- followed by the installed version read from the .toc so it never goes stale
         f.author = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
         f.author:SetPoint("TOPRIGHT", f.title, "BOTTOMRIGHT", 0, -2)
-        f.author:SetText("|cffBBBBBBby soundz|r")
+        local addonVersion = C_AddOns.GetAddOnMetadata("PVPHUB", "Version")
+        local versionTag = addonVersion and ("  |cff808080v" .. addonVersion .. "|r") or ""
+        f.author:SetText("|cffBBBBBBby soundz|r" .. versionTag)
         -- Try to use Prototyp font first, fallback to Friz Quadrata TT - this font is locked and won't change
         local authorFont = "Fonts\\FRIZQT__.TTF" -- Default fallback
         -- Try LibSharedMedia for Prototyp font
