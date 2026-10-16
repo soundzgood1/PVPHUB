@@ -145,6 +145,67 @@ function PVPHUB:RefreshTrackedFonts()
     end
 end
 
+-- Eased mouse-wheel scrolling for any ScrollFrame: each wheel notch moves a
+-- target, and the frame glides there over a few frames instead of jumping a
+-- fixed step. Spinning the wheel quickly keeps adding to the same target, so
+-- long lists can still be crossed fast. Replaces whatever OnMouseWheel the
+-- frame had (template default or custom). A field rather than a local: the
+-- main chunk of this file is at Lua's 200-local limit.
+function PVPHUB.EnableSmoothScroll(scrollFrame, step)
+    step = step or 40
+    local target
+    local driver = scrollFrame._pvphubScrollDriver
+    if not driver then
+        -- Child of the scroll frame, so it stops when the frame is hidden.
+        driver = CreateFrame("Frame", nil, scrollFrame)
+        scrollFrame._pvphubScrollDriver = driver
+    end
+    driver:Hide()
+    driver:SetScript("OnUpdate", function(self, elapsed)
+        local current = scrollFrame:GetVerticalScroll()
+        local goal = math.max(0, math.min(target or current, scrollFrame:GetVerticalScrollRange()))
+        local diff = goal - current
+        if math.abs(diff) < 0.5 then
+            scrollFrame:SetVerticalScroll(goal)
+            self:Hide()
+            return
+        end
+        scrollFrame:SetVerticalScroll(current + diff * math.min(1, elapsed * 14))
+    end)
+    scrollFrame:EnableMouseWheel(true)
+    scrollFrame:SetScript("OnMouseWheel", function(self, delta)
+        local maxScroll = self:GetVerticalScrollRange()
+        if maxScroll <= 0 then return end
+        -- Continue from where a running glide is heading so notches add up.
+        local base = (driver:IsShown() and target) or self:GetVerticalScroll()
+        target = math.max(0, math.min(base - delta * step, maxScroll))
+        driver:Show()
+    end)
+end
+
+-- Opens Blizzard's current menu system (MenuUtil) from one of our styled
+-- dropdown shells (UIDropDownMenuTemplate + ApplyModernDropdownStyling)
+-- instead of the legacy UIDropDownMenu list. Those legacy lists are shared
+-- global frames (DropDownList1, 2, ...) that every addon writes into, which
+-- is how taint from one addon spreads to other addons' and Blizzard's menus.
+-- The shell keeps its look and text; only what opens on click changes.
+-- generator(ownerRegion, rootDescription) builds the menu each time it opens.
+function PVPHUB.AttachModernMenu(dropdown, generator)
+    local btn = dropdown and (dropdown.Button or _G[(dropdown:GetName() or "") .. "Button"])
+    if not btn or not MenuUtil then return end
+    -- The template opens its legacy list from OnMouseDown
+    btn:SetScript("OnMouseDown", nil)
+    btn:SetScript("OnClick", function()
+        MenuUtil.CreateContextMenu(dropdown, generator)
+    end)
+end
+
+-- Menu entry text with an optional icon in front (file ID or path).
+function PVPHUB.MenuText(text, icon)
+    if not icon then return text end
+    return "|T" .. icon .. ":14:14|t " .. text
+end
+
 -- Scrollable font picker used in both main-window settings panels.
 -- Uses UIDropDownMenuTemplate + ApplyModernDropdownStyling for the button so it
 -- looks identical to the Theme/Sort dropdowns, but replaces the click handler
@@ -163,8 +224,6 @@ function PVPHUB_CreateFontPicker(parent, anchorTo, anchorPoint, xOff, yOff, maxH
     wrapper:SetPoint("TOPLEFT", anchorTo, anchorPoint, xOff, yOff)
     UIDropDownMenu_SetWidth(wrapper, width - 32)
     UIDropDownMenu_SetText(wrapper, getSelected())
-    -- Empty initializer so WoW never opens its own popup for this frame.
-    UIDropDownMenu_Initialize(wrapper, function() end)
     -- ApplyModernDropdownStyling is a local defined later in this file; callers
     -- must apply it themselves after PVPHUB_CreateFontPicker returns.
 
@@ -200,11 +259,7 @@ function PVPHUB_CreateFontPicker(parent, anchorTo, anchorPoint, xOff, yOff, maxH
         local sc = CreateFrame("Frame", nil, sf)
         sc:SetSize(width - 2, totalH)
         sf:SetScrollChild(sc)
-        sf:SetScript("OnMouseWheel", function(self, delta)
-            local cur = self:GetVerticalScroll()
-            local max = self:GetVerticalScrollRange()
-            self:SetVerticalScroll(math.max(0, math.min(cur - delta * rowH * 3, max)))
-        end)
+        PVPHUB.EnableSmoothScroll(sf, rowH * 3)
         rowParent = sc
 
         -- Gradient + arrow indicators on the popup (OVERLAY so they render above rows)
@@ -336,6 +391,9 @@ function PVPHUB_CreateFontPicker(parent, anchorTo, anchorPoint, xOff, yOff, maxH
     popup:SetScript("OnHide", function() catcher:Hide(); previewFrame:Hide() end)
 
     if toggleBtn then
+        -- The template opens its legacy dropdown list from OnMouseDown; this
+        -- picker shows its own popup instead.
+        toggleBtn:SetScript("OnMouseDown", nil)
         toggleBtn:SetScript("OnClick", function()
             if popup:IsShown() then popup:Hide() else UIDropDownMenu_SetText(wrapper, getSelected()); popup:Show() end
         end)
@@ -499,10 +557,11 @@ do
         local sig = ComputeDisplaySignature()
         if PVPHUB.window and PVPHUB.window:IsShown() and PVPHUB.window.UpdateContent
            and sig ~= PVPHUB._mainRenderSig then
-            local ghost = PVPHUB._columnDragGhost
-            if PVPHUB._draggingColumnKey and ghost and ghost:IsVisible() then
+            local columnGhost, groupGhost = PVPHUB._columnDragGhost, PVPHUB._groupDragGhost
+            if (PVPHUB._draggingColumnKey and columnGhost and columnGhost:IsVisible())
+               or (PVPHUB._draggingGroupIndex and groupGhost and groupGhost:IsVisible()) then
                 -- A rebuild would pull the headers out from under an
-                -- in-progress column drag; try again once it's dropped.
+                -- in-progress column or group drag; try again once it's dropped.
                 PVPHUB_RefreshUI()
             else
                 PVPHUB.window:UpdateContent()
@@ -1686,73 +1745,207 @@ local function MoveCharacterToGroup(charKey, groupIndex)
     end
 end
 
-local function ReorderGroup(fromIndex, toIndex)
+-- Moves custom group #fromIndex directly in front of beforeGroup (a group
+-- table), or behind every other custom group when beforeGroup is nil. Groups
+-- are displayed in array order with "No Group" always last, so "behind all
+-- custom groups" simply means the end of the array.
+local function ReorderGroup(fromIndex, beforeGroup)
     local groups = PVPHUB_SETTINGS.characterGroups and PVPHUB_SETTINGS.characterGroups.groups
     if not groups then return end
-    if fromIndex == toIndex then return end
-    local fromGroup = groups[fromIndex]
-    local toGroup = groups[toIndex]
-    if not fromGroup or not toGroup then return end
-    if fromGroup.isDefault then return end
-    local group = table.remove(groups, fromIndex)
-    if toGroup.isDefault then
-        -- Dropping on No Group = append to end (last custom group position)
-        table.insert(groups, group)
-    else
-        table.insert(groups, toIndex, group)
+    local moving = groups[fromIndex]
+    if not moving or moving.isDefault or moving == beforeGroup then return end
+
+    table.remove(groups, fromIndex)
+    local insertAt = #groups + 1
+    if beforeGroup then
+        for i, group in ipairs(groups) do
+            if group == beforeGroup then insertAt = i; break end
+        end
     end
+    table.insert(groups, insertAt, moving)
+    if insertAt == fromIndex then return end -- ended up where it was
+
     if PVPHUB.window and PVPHUB.window.UpdateContent then
         PVPHUB.window:UpdateContent()
     end
 end
 
-local function GetGroupDragGhost()
-    if not PVPHUB._groupDragGhost then
-        local ghost = CreateFrame("Frame", nil, UIParent)
-        ghost:SetFrameStrata("TOOLTIP")
-        ghost:Hide()
+-- Drag-and-drop for character group headers, the vertical counterpart of the
+-- column drag (GetColumnDragGhost): the ghost keeps the grab point under the
+-- cursor and eases after it, the drop slot is worked out every frame from the
+-- cursor against the group header layout UpdateContent records
+-- (f.groupHeaderLayout), and a marker eases into the gap the group will land
+-- in. Dragging near the top or bottom edge of the list scrolls it. Dropping
+-- on the group's own spot, or with the cursor well outside the window, does
+-- nothing. A singleton child of the main window, created on the first drag.
+local function GetGroupDragGhost(parentWindow)
+    local ghost = PVPHUB._groupDragGhost
+    if ghost then return ghost end
 
-        -- Background matches the header bar, slightly brighter to show it's "held"
-        local bg = ghost:CreateTexture(nil, "BACKGROUND")
-        bg:SetAllPoints()
-        bg:SetColorTexture(0.18, 0.22, 0.35, 0.92)
+    local FOLLOW_SPEED = 22     -- easing per second; higher follows tighter
+    local EDGE_ZONE = 28        -- auto-scroll when this close to the list's edge
+    local EDGE_SPEED = 420      -- max auto-scroll speed, window units per second
 
-        -- Blue highlight border (top + bottom lines)
-        local borderTop = ghost:CreateTexture(nil, "BORDER")
-        borderTop:SetPoint("TOPLEFT", ghost, "TOPLEFT", 0, 0)
-        borderTop:SetPoint("TOPRIGHT", ghost, "TOPRIGHT", 0, 0)
-        borderTop:SetHeight(1)
-        borderTop:SetColorTexture(0.3, 0.6, 1, 0.9)
-        local borderBot = ghost:CreateTexture(nil, "BORDER")
-        borderBot:SetPoint("BOTTOMLEFT", ghost, "BOTTOMLEFT", 0, 0)
-        borderBot:SetPoint("BOTTOMRIGHT", ghost, "BOTTOMRIGHT", 0, 0)
-        borderBot:SetHeight(1)
-        borderBot:SetColorTexture(0.3, 0.6, 1, 0.9)
+    ghost = CreateFrame("Frame", nil, parentWindow)
+    ghost:SetFrameStrata("TOOLTIP")
+    ghost:Hide()
 
-        -- Collapse/expand icon (same position as the real header: LEFT+8)
-        local icon = ghost:CreateTexture(nil, "ARTWORK")
-        icon:SetSize(16, 16)
-        icon:SetPoint("LEFT", ghost, "LEFT", 8, 0)
-        ghost.icon = icon
+    -- Background matches the header bar, slightly brighter to show it's "held"
+    local bg = ghost:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    bg:SetColorTexture(0.18, 0.22, 0.35, 0.92)
 
-        -- Group name + count (same layout as the real header: icon RIGHT + 6)
-        local label = ghost:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-        label:SetPoint("LEFT", ghost, "LEFT", 30, 0)
-        label:SetPoint("RIGHT", ghost, "RIGHT", -6, 0)
-        label:SetJustifyH("LEFT")
-        ghost.label = label
+    -- Blue highlight border (top + bottom lines)
+    local borderTop = ghost:CreateTexture(nil, "BORDER")
+    borderTop:SetPoint("TOPLEFT", ghost, "TOPLEFT", 0, 0)
+    borderTop:SetPoint("TOPRIGHT", ghost, "TOPRIGHT", 0, 0)
+    borderTop:SetHeight(1)
+    borderTop:SetColorTexture(0.3, 0.6, 1, 0.9)
+    local borderBot = ghost:CreateTexture(nil, "BORDER")
+    borderBot:SetPoint("BOTTOMLEFT", ghost, "BOTTOMLEFT", 0, 0)
+    borderBot:SetPoint("BOTTOMRIGHT", ghost, "BOTTOMRIGHT", 0, 0)
+    borderBot:SetHeight(1)
+    borderBot:SetColorTexture(0.3, 0.6, 1, 0.9)
 
-        ghost:SetScript("OnUpdate", function(self)
-            local x, y = GetCursorPosition()
-            local s = UIParent:GetEffectiveScale()
-            local h = self:GetHeight()
-            self:ClearAllPoints()
-            -- Cursor sits at the left icon area, vertically centered on the row
-            self:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", x / s - 12, y / s + h / 2)
-        end)
-        PVPHUB._groupDragGhost = ghost
+    -- Collapse/expand icon (same position as the real header: LEFT+8)
+    local icon = ghost:CreateTexture(nil, "ARTWORK")
+    icon:SetSize(16, 16)
+    icon:SetPoint("LEFT", ghost, "LEFT", 8, 0)
+    ghost.icon = icon
+
+    -- Group name + count (same layout as the real header: icon RIGHT + 6)
+    local label = ghost:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    label:SetPoint("LEFT", ghost, "LEFT", 30, 0)
+    label:SetPoint("RIGHT", ghost, "RIGHT", -6, 0)
+    label:SetJustifyH("LEFT")
+    ghost.label = label
+
+    -- Insertion marker in the gap the group will drop into. A child of the
+    -- ghost, so hiding the ghost hides it too.
+    local marker = CreateFrame("Frame", nil, ghost)
+    marker:SetHeight(4)
+    local markerBar = marker:CreateTexture(nil, "OVERLAY")
+    markerBar:SetPoint("LEFT", marker, "LEFT", 0, 0)
+    markerBar:SetPoint("RIGHT", marker, "RIGHT", 0, 0)
+    markerBar:SetHeight(2)
+    markerBar:SetColorTexture(0.35, 0.78, 1, 1)
+    local markerCap = marker:CreateTexture(nil, "OVERLAY")
+    markerCap:SetPoint("LEFT", marker, "LEFT", 0, 0)
+    markerCap:SetSize(3, 10)
+    markerCap:SetColorTexture(0.35, 0.78, 1, 1)
+    marker:Hide()
+    ghost.marker = marker
+
+    -- Cursor Y in the main window's units, measured down from its top edge
+    -- (so it's negative inside the window, like the SetPoint offsets).
+    local function CursorY()
+        local _, y = GetCursorPosition()
+        return y / parentWindow:GetEffectiveScale() - (parentWindow:GetTop() or 0)
     end
-    return PVPHUB._groupDragGhost
+    -- A frame's top/bottom/left in the same units, relative to the window.
+    local function TopOf(frame) return (frame:GetTop() or 0) - (parentWindow:GetTop() or 0) end
+    local function BottomOf(frame) return (frame:GetBottom() or 0) - (parentWindow:GetTop() or 0) end
+
+    -- Starts a drag for one entry of f.groupHeaderLayout.
+    function ghost:Begin(entry, iconTexture, text, font)
+        local header = entry.frame
+        self.entry = entry
+        self.grabOffset = CursorY() - TopOf(header)
+        self.left = (header:GetLeft() or 0) - (parentWindow:GetLeft() or 0)
+        self.curY, self.markerY = nil, nil
+        self.hasTarget, self.targetBefore = false, nil
+        self.fade = 0
+        self:SetSize(header:GetWidth(), header:GetHeight())
+        self.marker:SetWidth(header:GetWidth())
+        self.icon:SetTexture(iconTexture)
+        self.label:SetText(text)
+        SafeSetFont(self.label, font, 13, "OUTLINE")
+        self.marker:Hide()
+        self:SetAlpha(0)
+        self:Show()
+    end
+
+    -- Ends the drag. Returns the dragged group's index, whether there is a
+    -- drop target, and the group to insert before (nil = after all custom
+    -- groups).
+    function ghost:End()
+        local index = self.entry and self.entry.index
+        local hasTarget, before = self.hasTarget, self.targetBefore
+        self.entry, self.hasTarget, self.targetBefore = nil, false, nil
+        self:Hide()
+        return index, hasTarget, before
+    end
+
+    ghost:SetScript("OnUpdate", function(self, elapsed)
+        local entry, layout = self.entry, parentWindow.groupHeaderLayout
+        local scrollFrame = parentWindow.scrollFrame
+        if not entry or not layout or not scrollFrame then return end
+        local cursorY = CursorY()
+
+        -- Auto-scroll when held near the top or bottom of the list.
+        local listTop, listBottom = TopOf(scrollFrame), BottomOf(scrollFrame)
+        local scroll, maxScroll = scrollFrame:GetVerticalScroll(), scrollFrame:GetVerticalScrollRange()
+        if cursorY > listTop - EDGE_ZONE and scroll > 0 then
+            local depth = math.min(1, (cursorY - (listTop - EDGE_ZONE)) / EDGE_ZONE)
+            scrollFrame:SetVerticalScroll(math.max(0, scroll - EDGE_SPEED * depth * elapsed))
+        elseif cursorY < listBottom + EDGE_ZONE and scroll < maxScroll then
+            local depth = math.min(1, ((listBottom + EDGE_ZONE) - cursorY) / EDGE_ZONE)
+            scrollFrame:SetVerticalScroll(math.min(maxScroll, scroll + EDGE_SPEED * depth * elapsed))
+        end
+
+        -- Follow the cursor within the visible list, eased.
+        local height = self:GetHeight()
+        local targetY = cursorY - self.grabOffset
+        targetY = math.min(listTop, math.max(listBottom + height, targetY))
+        local blend = math.min(1, elapsed * FOLLOW_SPEED)
+        self.curY = self.curY and (self.curY + (targetY - self.curY) * blend) or targetY
+        self:SetPoint("TOPLEFT", parentWindow, "TOPLEFT", self.left, self.curY)
+
+        -- Drop slot: in front of the first other custom group whose header
+        -- sits below the ghost's middle, else behind all custom groups.
+        local center = targetY - height / 2
+        local before, beforeTop, afterSource, sourceSeen
+        local defaultTop
+        for _, item in ipairs(layout) do
+            local itemTop = TopOf(item.frame)
+            if item.isDefault then
+                defaultTop = itemTop
+            elseif item.index == entry.index then
+                sourceSeen = true
+            else
+                if sourceSeen and afterSource == nil then afterSource = item end
+                local itemCenter = itemTop - item.frame:GetHeight() / 2
+                if not before and itemCenter < center then
+                    before, beforeTop = item, itemTop
+                end
+            end
+        end
+        local slotTop = beforeTop or defaultTop
+
+        -- Same spot it already has: the group right after it, or the end
+        -- when it is already the last custom group.
+        local isNoOp = (before == afterSource)
+        local inside = parentWindow:IsMouseOver(40, -40, -40, 40)
+        if inside and not isNoOp and slotTop then
+            self.hasTarget = true
+            self.targetBefore = before and before.group or nil
+            local markerY = slotTop + 1
+            self.markerY = self.markerY and (self.markerY + (markerY - self.markerY) * blend) or markerY
+            self.marker:SetPoint("LEFT", parentWindow, "TOPLEFT", self.left, self.markerY)
+            self.marker:Show()
+        else
+            self.hasTarget, self.targetBefore = false, nil
+            self.markerY = nil
+            self.marker:Hide()
+        end
+
+        -- Quick fade-in; dimmed while the drop would do nothing.
+        self.fade = math.min(1, (self.fade or 0) + elapsed * 8)
+        self:SetAlpha(self.fade * ((inside and not isNoOp) and 0.95 or 0.55))
+    end)
+
+    PVPHUB._groupDragGhost = ghost
+    return ghost
 end
 
 -- Moves a Characters-tab data column (see GetOrderedColumnHeaders above)
@@ -2037,6 +2230,7 @@ function PVPHUB:ShowGroupManagementWindow()
     
     -- Scroll frame for groups
     local scrollFrame = CreateFrame("ScrollFrame", nil, window, "UIPanelScrollFrameTemplate")
+    PVPHUB.EnableSmoothScroll(scrollFrame, 40)
     scrollFrame:SetPoint("TOPLEFT", 20, -85)
     scrollFrame:SetPoint("BOTTOMRIGHT", -40, 80)
     
@@ -2195,6 +2389,7 @@ local function ShowBackupsWindow()
     closeBtn:SetScript("OnClick", function() window:Hide() end)
 
     local scrollFrame = CreateFrame("ScrollFrame", nil, window, "UIPanelScrollFrameTemplate")
+    PVPHUB.EnableSmoothScroll(scrollFrame, 40)
     scrollFrame:SetPoint("TOPLEFT", window, "TOPLEFT", 18, -82)
     scrollFrame:SetPoint("BOTTOMRIGHT", window, "BOTTOMRIGHT", -38, 50)
     local scrollChild = CreateFrame("Frame", nil, scrollFrame)
@@ -2407,6 +2602,7 @@ local function ShowHiddenCharactersWindow()
 
     -- Scroll frame
     local scrollFrame = CreateFrame("ScrollFrame", nil, window, "UIPanelScrollFrameTemplate")
+    PVPHUB.EnableSmoothScroll(scrollFrame, 40)
     scrollFrame:SetPoint("TOPLEFT", window, "TOPLEFT", 20, -75)
     scrollFrame:SetPoint("BOTTOMRIGHT", window, "BOTTOMRIGHT", -40, 50)
     
@@ -2716,9 +2912,10 @@ local function ApplyModernDropdownStyling(dropdown)
     -- Left texture is 25px; bg starts at 22px from frame left so it never bleeds.
     local L, R, T, B = 22, -2, -5, 5
 
-    -- Resize the existing DropDownToggleButton to fill the entire visible area.
-    -- It already has the correct OnMouseDown → ToggleDropDownMenu, so the whole
-    -- button surface becomes clickable without any extra overlay frame.
+    -- Resize the existing DropDownToggleButton to fill the entire visible area,
+    -- so the whole button surface is clickable without an extra overlay frame.
+    -- What a click opens is set separately (PVPHUB.AttachModernMenu, or the
+    -- font picker's own popup).
     local btn = dropdown.Button or _G[(dropdown:GetName() or "").."Button"]
     if btn and not btn._pvpResized then
         btn._pvpResized = true
@@ -2781,77 +2978,9 @@ local function ApplyModernDropdownStyling(dropdown)
         RegisterTrackedFont(text, 11, "OUTLINE")
     end
 
-    -- Anchor the popup to align with the visible bg left edge (L=22px from frame)
-    -- By default WoW anchors to the Left texture (25px parchment); overriding makes
-    -- the menu open flush with the left edge of our flat button background.
-    dropdown.relativeTo   = dropdown
-    dropdown.point        = "TOPLEFT"
-    dropdown.relativePoint = "BOTTOMLEFT"
-    dropdown.xOffset      = 22
-    dropdown.yOffset      = 0
-
     -- Apply current theme colors (runs every call so they stay in sync)
     RefreshDropdownColors(dropdown)
 end
-
--- Hook to style dropdown popup menus when they open
-local function StyleDropdownMenu(level)
-    level = level or 1
-    local menuFrame = _G["DropDownList"..level]
-    if not menuFrame then return end
-
-    local colors = (UI_CONSTANTS and UI_CONSTANTS.COLORS) or {}
-    local bord = colors.WINDOW_BORDER or {0.30, 0.30, 0.38, 1}
-    local wb   = colors.WINDOW_BG     or {0.05, 0.05, 0.08, 1}
-
-    -- Hide WoW's native backdrop frames; replace with our own flat one
-    if menuFrame.MenuBackdrop then menuFrame.MenuBackdrop:Hide() end
-    if menuFrame.Border       then menuFrame.Border:Hide()       end
-
-    if not menuFrame._pvpBackdrop then
-        local bd = CreateFrame("Frame", nil, menuFrame, "BackdropTemplate")
-        bd:SetPoint("TOPLEFT",     menuFrame, "TOPLEFT",     0, 0)
-        bd:SetPoint("BOTTOMRIGHT", menuFrame, "BOTTOMRIGHT", 0, 0)
-        bd:SetFrameLevel(menuFrame:GetFrameLevel() + 1)
-        bd:SetBackdrop({
-            bgFile   = "Interface\\Buttons\\WHITE8x8",
-            edgeFile = "Interface\\Buttons\\WHITE8x8",
-            tile = false, edgeSize = 1,
-            insets = { left = 0, right = 0, top = 0, bottom = 0 }
-        })
-        menuFrame._pvpBackdrop = bd
-    end
-    menuFrame._pvpBackdrop:SetBackdropColor(wb[1] * 1.4, wb[2] * 1.4, wb[3] * 1.6, 0.97)
-    menuFrame._pvpBackdrop:SetBackdropBorderColor(bord[1], bord[2], bord[3], (bord[4] or 1) * 0.85)
-    menuFrame._pvpBackdrop:Show()
-end
-
--- Walks up a dropdown owner's parent chain looking for a PVPHUB-named frame.
--- ToggleDropDownMenu is Blizzard's shared dropdown system (used by every
--- addon and most of the Blizzard UI) and DropDownList<level> is a reused
--- singleton frame, not one per owner — without this check, opening ANY
--- dropdown anywhere (Blizzard's or another addon's) got silently reskinned
--- to PVPHUB's theme colors.
-local function IsPVPHUBOwnedFrame(frame)
-    local node = frame
-    for _ = 1, 20 do -- bounded walk; guards against any pathological parent loop
-        if not node then return false end
-        local name = node.GetName and node:GetName()
-        if name and string.find(name, "^PVPHUB") then return true end
-        node = node.GetParent and node:GetParent()
-    end
-    return false
-end
-
--- Hook into dropdown opening
-hooksecurefunc("ToggleDropDownMenu", function(level)
-    -- ElvUI skins dropdowns itself; skip our custom styling to avoid conflicts
-    if ElvUI then return end
-    if not IsPVPHUBOwnedFrame(UIDROPDOWNMENU_OPEN_MENU) then return end
-    C_Timer.After(0, function()
-        StyleDropdownMenu(level or 1)
-    end)
-end)
 
 -- Drop-in replacement for Blizzard's UIFrameFadeIn/UIFrameFadeOut (same
 -- frame/duration/fromAlpha/toAlpha signature). Blizzard's version registers
@@ -6141,12 +6270,17 @@ local function UpdatePvPRatings()
             -- switch still has old-spec data; _pvpCacheReady isn't set until the
             -- second fire, which has the correct new-spec data).
             if currentSpecID and currentSpecID > 0 and PVPHUB._pvpCacheReady then
+                -- Usually a no-op (pvp_tracking.lua wrote the new value first),
+                -- but catches a change if this path got there first.
+                PVPHUB.NoteRatingChange(charKey, bracket.key, currentSpecID,
+                    PVPHUB_DB[charKey][bracket.key][currentSpecID], rating)
                 PVPHUB_DB[charKey][bracket.key][currentSpecID] = rating
             end
         else
             -- Regular brackets (2v2, 3v3) store single rating — same guard:
             -- only write after PVP_RATED_STATS_UPDATE confirms server-fresh data.
             if PVPHUB._pvpCacheReady then
+                PVPHUB.NoteRatingChange(charKey, bracket.key, nil, PVPHUB_DB[charKey][bracket.key], rating)
                 PVPHUB_DB[charKey][bracket.key] = rating
             end
         end
@@ -7851,6 +7985,7 @@ SlashCmdList["PVPHUB"] = function(msg)
 
         -- Create scroll frame with modern TWW styling
         local scrollFrame = CreateFrame("ScrollFrame", "PVPHUBScrollFrame", f, "ScrollFrameTemplate")
+        PVPHUB.EnableSmoothScroll(scrollFrame, 40)
         scrollFrame:SetPoint("TOPLEFT", f, "TOPLEFT", 20, -120) -- Align better with headers at -92 + header height (~28px)
         scrollFrame:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -45, 60) -- Reduced bottom margin from 85 to 60 to close gap
         
@@ -7969,6 +8104,30 @@ SlashCmdList["PVPHUB"] = function(msg)
         tabSystem:SetTabSelectedCallback(function() end) -- Required callback
         f.tabSystem = tabSystem
 
+        -- Short fade-in for the tab that was just switched to, instead of a
+        -- hard cut. One shared driver frame fades everything passed in, so
+        -- the freshly built header widgets don't each need a frame of their own.
+        local TAB_FADE_DURATION = 0.18
+        local tabFadeDriver = CreateFrame("Frame", nil, f)
+        local tabFadeTargets = {}
+        local function FadeInTab(objects)
+            wipe(tabFadeTargets)
+            for _, obj in ipairs(objects) do
+                if obj and obj.SetAlpha then
+                    obj:SetAlpha(0)
+                    table.insert(tabFadeTargets, obj)
+                end
+            end
+            local elapsedTotal = 0
+            tabFadeDriver:SetScript("OnUpdate", function(self, elapsed)
+                elapsedTotal = elapsedTotal + elapsed
+                local t = math.min(1, elapsedTotal / TAB_FADE_DURATION)
+                local alpha = t * t * (3 - 2 * t) -- ease in and out
+                for _, obj in ipairs(tabFadeTargets) do obj:SetAlpha(alpha) end
+                if t >= 1 then self:SetScript("OnUpdate", nil) end
+            end)
+        end
+
         -- Function to switch tabs (defined before tab creation)
         local function SwitchTab(tabId)
             f.currentTab = tabId
@@ -8013,6 +8172,13 @@ SlashCmdList["PVPHUB"] = function(msg)
                 -- hidden on the other tabs (see below) and restored here.
                 if _G["PVPHUBSortDropdown"]   then _G["PVPHUBSortDropdown"]:Show()   end
                 if _G["PVPHUBColumnDropdown"] then _G["PVPHUBColumnDropdown"]:Show() end
+
+                -- Fade the list and its (just rebuilt) headers in together
+                local fadeObjects = { f.scrollFrame }
+                for _, header in ipairs(f.headers or {}) do
+                    table.insert(fadeObjects, header)
+                end
+                FadeInTab(fadeObjects)
             elseif tabId == "stats" then
                 -- Hide characters content
                 if f.scrollFrame then f.scrollFrame:Hide() end
@@ -8040,6 +8206,8 @@ SlashCmdList["PVPHUB"] = function(msg)
                 -- behind on other tabs.
                 PVPHUB._draggingColumnKey = nil
                 if PVPHUB._columnDragGhost then PVPHUB._columnDragGhost:End() end
+                PVPHUB._draggingGroupIndex = nil
+                if PVPHUB._groupDragGhost then PVPHUB._groupDragGhost:End() end
                 -- Sort/Show-Hide control the character list, which isn't
                 -- shown on the Season tab — hide them so they don't sit there
                 -- doing nothing.
@@ -8059,6 +8227,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                     if f.RenderStatsFor then
                         f.RenderStatsFor()
                     end
+                    FadeInTab({ f.statsFrame })
                 end
             elseif tabId == "settings" then
                 -- Hide characters content
@@ -8082,6 +8251,8 @@ SlashCmdList["PVPHUB"] = function(msg)
                 end
                 PVPHUB._draggingColumnKey = nil
                 if PVPHUB._columnDragGhost then PVPHUB._columnDragGhost:End() end
+                PVPHUB._draggingGroupIndex = nil
+                if PVPHUB._groupDragGhost then PVPHUB._groupDragGhost:End() end
                 -- Same as the Season tab — nothing here for Sort/Show-Hide to
                 -- act on, so keep them out of the way.
                 if _G["PVPHUBSortDropdown"]   then _G["PVPHUBSortDropdown"]:Hide()   end
@@ -8094,6 +8265,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                 end
                 if f.settingsFrame then
                     f.settingsFrame:Show()
+                    FadeInTab({ f.settingsFrame })
                 end
 
                 -- Maintain consistent window height when switching tabs
@@ -8246,13 +8418,7 @@ SlashCmdList["PVPHUB"] = function(msg)
             scrollFrame:SetPoint("TOPLEFT", settingsContainer, "TOPLEFT", 0, 0)
             scrollFrame:SetPoint("BOTTOMRIGHT", settingsContainer, "BOTTOMRIGHT", -10, 0)
             ApplyModernScrollbarStyling(scrollFrame, UI_CONSTANTS.COLORS, PVPHUB_SCROLLBAR_NUDGE(f))
-            scrollFrame:EnableMouseWheel(true)
-            scrollFrame:SetScript("OnMouseWheel", function(self, delta)
-                local current = self:GetVerticalScroll()
-                local maxScroll = self:GetVerticalScrollRange()
-                local newScroll = math.max(0, math.min(current - (delta * 20), maxScroll))
-                self:SetVerticalScroll(newScroll)
-            end)
+            PVPHUB.EnableSmoothScroll(scrollFrame, 40)
 
             -- Create scroll child
             local settingsFrame = CreateFrame("Frame", nil, scrollFrame)
@@ -8635,26 +8801,23 @@ SlashCmdList["PVPHUB"] = function(msg)
             UIDropDownMenu_SetWidth(qtStyleDropdown, 130)
             ApplyModernDropdownStyling(qtStyleDropdown)
             UIDropDownMenu_SetText(qtStyleDropdown, qtStyleNames[PVPHUB_SETTINGS.queueTimer.style] or "PVPHUB")
-            UIDropDownMenu_Initialize(qtStyleDropdown, function(self, level)
-                local options = {
-                    { value = "pvphub",  text = "PVPHUB" },
-                    { value = "simple",  text = "Detail" },
-                    { value = "compact", text = "Compact" },
-                }
-                for _, opt in ipairs(options) do
-                    local info   = UIDropDownMenu_CreateInfo()
-                    info.text    = opt.text
-                    info.value   = opt.value
-                    info.checked = (PVPHUB_SETTINGS.queueTimer.style == opt.value)
-                    info.func    = function()
-                        PVPHUB_SETTINGS.queueTimer.style = opt.value
-                        UIDropDownMenu_SetText(qtStyleDropdown, opt.text)
-                        if PVPHUB.QueueTimer then
-                            PVPHUB.QueueTimer:ApplyTheme()
-                            PVPHUB.QueueTimer:Update()
-                        end
-                    end
-                    UIDropDownMenu_AddButton(info)
+            local qtStyleOptions = {
+                { value = "pvphub",  text = "PVPHUB" },
+                { value = "simple",  text = "Detail" },
+                { value = "compact", text = "Compact" },
+            }
+            PVPHUB.AttachModernMenu(qtStyleDropdown, function(_, root)
+                for _, opt in ipairs(qtStyleOptions) do
+                    root:CreateRadio(opt.text,
+                        function() return PVPHUB_SETTINGS.queueTimer.style == opt.value end,
+                        function()
+                            PVPHUB_SETTINGS.queueTimer.style = opt.value
+                            UIDropDownMenu_SetText(qtStyleDropdown, opt.text)
+                            if PVPHUB.QueueTimer then
+                                PVPHUB.QueueTimer:ApplyTheme()
+                                PVPHUB.QueueTimer:Update()
+                            end
+                        end)
                 end
             end)
             qtStyleDropdown:SetScript("OnEnter", function(self)
@@ -8828,18 +8991,15 @@ SlashCmdList["PVPHUB"] = function(msg)
             qtSoundDropdown:SetPoint("LEFT", qtSoundLabel, "RIGHT", -10, 0)
             UIDropDownMenu_SetWidth(qtSoundDropdown, 120)
             UIDropDownMenu_SetText(qtSoundDropdown, PVPHUB_SETTINGS.queueTimer.readySound)
-            UIDropDownMenu_Initialize(qtSoundDropdown, function(self, level)
+            PVPHUB.AttachModernMenu(qtSoundDropdown, function(_, root)
                 for _, opt in ipairs(PVPHUB.QueueTimer.SOUND_OPTIONS) do
-                    local info    = UIDropDownMenu_CreateInfo()
-                    info.text     = opt.label
-                    info.value    = opt.label
-                    info.checked  = (PVPHUB_SETTINGS.queueTimer.readySound == opt.label)
-                    info.func     = function()
-                        PVPHUB_SETTINGS.queueTimer.readySound = opt.label
-                        UIDropDownMenu_SetText(qtSoundDropdown, opt.label)
-                        if opt.id then PlaySound(opt.id, "Master") end
-                    end
-                    UIDropDownMenu_AddButton(info)
+                    root:CreateRadio(opt.label,
+                        function() return PVPHUB_SETTINGS.queueTimer.readySound == opt.label end,
+                        function()
+                            PVPHUB_SETTINGS.queueTimer.readySound = opt.label
+                            UIDropDownMenu_SetText(qtSoundDropdown, opt.label)
+                            if opt.id then PlaySound(opt.id, "Master") end
+                        end)
                 end
             end)
 
@@ -8904,11 +9064,16 @@ SlashCmdList["PVPHUB"] = function(msg)
             qtPreviewBtn:SetPoint("LEFT", qtPlaySoundBtn, "RIGHT", 8, 0)
             qtPreviewBtn:SetText("Show Preview")
             qtPreviewBtn:GetFontString():SetTextColor(1, 1, 1)
-            qtPreviewBtn:SetScript("OnClick", function(self)
-                if PVPHUB.QueueTimer then
-                    local active = PVPHUB.QueueTimer:TogglePreview()
-                    self:SetText(active and "Hide Preview" or "Show Preview")
+            qtPreviewBtn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+            qtPreviewBtn:SetScript("OnClick", function(self, button)
+                if not PVPHUB.QueueTimer then return end
+                if button == "RightButton" then
+                    -- Popped-queue preview: pulse and countdown, then back to normal
+                    PVPHUB.QueueTimer:PreviewPop()
+                    return
                 end
+                local active = PVPHUB.QueueTimer:TogglePreview()
+                self:SetText(active and "Hide Preview" or "Show Preview")
             end)
             qtPreviewBtn:SetScript("OnEnter", function(self)
                 GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
@@ -8916,6 +9081,8 @@ SlashCmdList["PVPHUB"] = function(msg)
                 GameTooltip:AddLine("Show or hide a sample queue timer widget", 0.7, 0.7, 0.7, true)
                 GameTooltip:AddLine("Useful for previewing size, opacity, and font changes", 0.7, 0.7, 0.7, true)
                 GameTooltip:AddLine("The preview disappears when you close settings", 0.7, 0.7, 0.7, true)
+                GameTooltip:AddLine(" ")
+                GameTooltip:AddLine("|cffffd100Right-click:|r preview a popped queue (pulse + countdown)", 0.7, 0.7, 0.7, true)
                 GameTooltip:Show()
             end)
             qtPreviewBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -9076,22 +9243,19 @@ SlashCmdList["PVPHUB"] = function(msg)
 
                 PVPHubPrint("|cffff0000[PVPHUB]|r Theme changed to " .. self.value .. "!")
             end
-            UIDropDownMenu_Initialize(themeDropdown, function(self, level, menuList)
-                local themes = {
-                    {text="Blue",     value="BLUE"},
-                    {text="Red",      value="RED"},
-                    {text="Dark",     value="DARK"},
-                    {text="Midnight", value="MIDNIGHT"},
-                    {text="Aurora",   value="AURORA"},
-                    {text="Class",    value="CLASS"},
-                }
-                for _, theme in ipairs(themes) do
-                    local info    = UIDropDownMenu_CreateInfo()
-                    info.text     = theme.text
-                    info.value    = theme.value
-                    info.func     = OnThemeSelect
-                    info.checked  = PVPHUB_SETTINGS.colorTheme == theme.value
-                    UIDropDownMenu_AddButton(info)
+            local themeOptions = {
+                {text="Blue",     value="BLUE"},
+                {text="Red",      value="RED"},
+                {text="Dark",     value="DARK"},
+                {text="Midnight", value="MIDNIGHT"},
+                {text="Aurora",   value="AURORA"},
+                {text="Class",    value="CLASS"},
+            }
+            PVPHUB.AttachModernMenu(themeDropdown, function(_, root)
+                for _, theme in ipairs(themeOptions) do
+                    root:CreateRadio(theme.text,
+                        function() return PVPHUB_SETTINGS.colorTheme == theme.value end,
+                        function() OnThemeSelect({ value = theme.value }) end)
                 end
             end)
 
@@ -9247,14 +9411,12 @@ SlashCmdList["PVPHUB"] = function(msg)
                 PVPHubPrint("|cffff0000[PVPHUB]|r Date format: " .. dateFormatOptions[self.value])
                 StaticPopup_Show("PVPHUB_RELOAD_UI")
             end
-            UIDropDownMenu_Initialize(dateFormatDropdown, function(self, level)
-                local info    = UIDropDownMenu_CreateInfo()
-                info.text     = "DD.MM.YY (EU)"; info.value = "EU"; info.func = OnDateFormatSelect
-                info.checked  = PVPHUB_SETTINGS.dateFormat == "EU"
-                UIDropDownMenu_AddButton(info)
-                info.text     = "MM.DD.YY (US)"; info.value = "US"; info.func = OnDateFormatSelect
-                info.checked  = PVPHUB_SETTINGS.dateFormat == "US"
-                UIDropDownMenu_AddButton(info)
+            PVPHUB.AttachModernMenu(dateFormatDropdown, function(_, root)
+                for _, opt in ipairs({ { text = "DD.MM.YY (EU)", value = "EU" }, { text = "MM.DD.YY (US)", value = "US" } }) do
+                    root:CreateRadio(opt.text,
+                        function() return PVPHUB_SETTINGS.dateFormat == opt.value end,
+                        function() OnDateFormatSelect({ value = opt.value }) end)
+                end
             end)
 
             -- Hide Welcome Message checkbox
@@ -9582,13 +9744,7 @@ SlashCmdList["PVPHUB"] = function(msg)
             scrollFrame:SetPoint("TOPLEFT", statsContainer, "TOPLEFT", 0, -4)
             scrollFrame:SetPoint("BOTTOMRIGHT", statsContainer, "BOTTOMRIGHT", -10, 0)
             ApplyModernScrollbarStyling(scrollFrame, UI_CONSTANTS.COLORS, PVPHUB_SCROLLBAR_NUDGE(f))
-            scrollFrame:EnableMouseWheel(true)
-            scrollFrame:SetScript("OnMouseWheel", function(self, delta)
-                local current = self:GetVerticalScroll()
-                local maxScroll = self:GetVerticalScrollRange()
-                local newScroll = math.max(0, math.min(current - (delta * 20), maxScroll))
-                self:SetVerticalScroll(newScroll)
-            end)
+            PVPHUB.EnableSmoothScroll(scrollFrame, 40)
 
             local statsScrollChild = CreateFrame("Frame", nil, scrollFrame)
             statsScrollChild:SetSize(750, 800)
@@ -10449,9 +10605,11 @@ SlashCmdList["PVPHUB"] = function(msg)
         -- Set dropdown text to the current sort option, always prefixed with 'Sort: '
         local sortDisplayNames = {
             highestRating = "Highest Rating",
+            character = "Name",
             honor = "Honor",
             conquest = "Conquest",
             bloodstones = "Heliotrope",
+            bloodytokens = "Tokens",
             rating2v2 = "2v2 Rating",
             rating3v3 = "3v3 Rating",
             ratingShuffle = "Shuffle Rating",
@@ -10460,43 +10618,40 @@ SlashCmdList["PVPHUB"] = function(msg)
         }
         UIDropDownMenu_SetText(dropdown, "Sort: " .. (sortDisplayNames[PVPHUB_SETTINGS.sortKey or "highestRating"] or "Sort by"))
 
-        local function OnClick(self)
-            PVPHUB_SETTINGS.sortKey = self.value
-            PVPHUB.sortKey = self.value
-            UIDropDownMenu_SetText(dropdown, "Sort: " .. (sortDisplayNames[self.value] or (self.value or "")))
+        -- Sorts the character list by key. ascending == nil picks the natural
+        -- direction: names A-Z, everything else highest first. Used by the
+        -- Sort dropdown and by clicking a column header.
+        function f:ApplySort(key, ascending)
+            if ascending == nil then ascending = (key == "character") end
+            PVPHUB_SETTINGS.sortKey = key
+            PVPHUB_SETTINGS.sortAscending = ascending
+            PVPHUB.sortKey = key
+            UIDropDownMenu_SetText(dropdown, "Sort: " .. (sortDisplayNames[key] or key or ""))
             -- Only update content if we're NOT in settings tab
             if f.currentTab == "characters" and PVPHUB.window and PVPHUB.window.UpdateContent then
                 PVPHUB.window:UpdateContent()
             end
         end
 
-        UIDropDownMenu_Initialize(dropdown, function(self, level, menuList)
-            for _, option in ipairs({
-                { text = "Highest Rating",      value = "highestRating",      icon = nil },
-                { text = "Honor",               value = "honor",              icon = "1455894" },
-                { text = "Conquest",            value = "conquest",           icon = "1523630" },
-                { text = "Heliotrope",         value = "bloodstones",        icon = "134128" },
-                { text = "2v2 Rating",          value = "rating2v2",          icon = "Interface\\Icons\\achievement_arena_2v2_1" },
-                { text = "3v3 Rating",          value = "rating3v3",          icon = "Interface\\Icons\\achievement_arena_3v3_1" },
-                { text = "Shuffle Rating",      value = "ratingShuffle",      icon = "Interface\\Icons\\ability_dualwield" },
-                { text = "Blitz Rating",        value = "ratingBlitz",        icon = "Interface\\Icons\\achievement_bg_killxenemies_generalsroom" },
-                { text = "RBG Rating",          value = "ratingRBG",          icon = "Interface\\Icons\\achievement_pvp_a_15" },
-            }) do
-                local info = UIDropDownMenu_CreateInfo()
-                info.text = option.text
-                info.value = option.value
-                info.func = OnClick
-                info.checked = (PVPHUB_SETTINGS.sortKey == option.value)
-                if option.icon then
-                    info.icon = option.icon
-                    info.tCoordLeft = 0
-                    info.tCoordRight = 1
-                    info.tCoordTop = 0
-                    info.tCoordBottom = 1
-                    info.iconXOffset = -5
-                    info.iconYOffset = 0
-                end
-                UIDropDownMenu_AddButton(info)
+        local SORT_OPTIONS = {
+            { text = "Highest Rating",      value = "highestRating",      icon = nil },
+            { text = "Name",                value = "character",          icon = nil },
+            { text = "Honor",               value = "honor",              icon = "1455894" },
+            { text = "Conquest",            value = "conquest",           icon = "1523630" },
+            { text = "Heliotrope",          value = "bloodstones",        icon = "134128" },
+            { text = "Tokens",              value = "bloodytokens",       icon = "4638431" },
+            { text = "2v2 Rating",          value = "rating2v2",          icon = "Interface\\Icons\\achievement_arena_2v2_1" },
+            { text = "3v3 Rating",          value = "rating3v3",          icon = "Interface\\Icons\\achievement_arena_3v3_1" },
+            { text = "Shuffle Rating",      value = "ratingShuffle",      icon = "Interface\\Icons\\ability_dualwield" },
+            { text = "Blitz Rating",        value = "ratingBlitz",        icon = "Interface\\Icons\\achievement_bg_killxenemies_generalsroom" },
+            { text = "RBG Rating",          value = "ratingRBG",          icon = "Interface\\Icons\\achievement_pvp_a_15" },
+        }
+        PVPHUB.AttachModernMenu(dropdown, function(_, root)
+            root:CreateTitle("Sort by")
+            for _, option in ipairs(SORT_OPTIONS) do
+                root:CreateRadio(PVPHUB.MenuText(option.text, option.icon),
+                    function() return (PVPHUB_SETTINGS.sortKey or "highestRating") == option.value end,
+                    function() f:ApplySort(option.value) end)
             end
         end)
 
@@ -10733,45 +10888,31 @@ SlashCmdList["PVPHUB"] = function(msg)
         UIDropDownMenu_SetText(columnDropdown, "Show/Hide")
         ApplyModernDropdownStyling(columnDropdown)
 
-        local function OnColumnToggle(self)
-            PVPHUB_SETTINGS.visibleColumns[self.value] = not PVPHUB_SETTINGS.visibleColumns[self.value]
-            -- Only update content if we're NOT in settings tab
-            if f.currentTab == "characters" and PVPHUB.window and PVPHUB.window.UpdateContent then
-                PVPHUB.window:UpdateContent()
-            end
-        end
-
-        UIDropDownMenu_Initialize(columnDropdown, function(self, level, menuList)
-            local columns = {
-                { text = "Honor",         value = "honor",         icon = "1455894" },
-                { text = "Conquest",      value = "conquest",      icon = "1523630" },
-                { text = "Heliotrope",    value = "bloodstones",   icon = "134128" },
-                { text = "Tokens",        value = "bloodytokens",  icon = "4638431" },
-                { text = "2v2 Rating",    value = "rating2v2",     icon = "Interface\\Icons\\achievement_arena_2v2_1" },
-                { text = "3v3 Rating",    value = "rating3v3",     icon = "Interface\\Icons\\achievement_arena_3v3_1" },
-                { text = "Shuffle Rating", value = "ratingShuffle", icon = "Interface\\Icons\\ability_dualwield" },
-                { text = "Blitz Rating",  value = "ratingBlitz",   icon = "Interface\\Icons\\achievement_bg_killxenemies_generalsroom" },
-                { text = "RBG Rating",    value = "ratingRBG",     icon = "Interface\\Icons\\achievement_pvp_a_15" },
-            }
-            
-            for _, column in ipairs(columns) do
-                local info = UIDropDownMenu_CreateInfo()
-                info.text = column.text
-                info.value = column.value
-                info.func = OnColumnToggle
-                info.checked = PVPHUB_SETTINGS.visibleColumns[column.value]
-                info.isNotRadio = true
-                info.keepShownOnClick = true
-                if column.icon then
-                    info.icon = column.icon
-                    info.tCoordLeft = 0
-                    info.tCoordRight = 1
-                    info.tCoordTop = 0
-                    info.tCoordBottom = 1
-                    info.iconXOffset = -5  -- Move icon left
-                    info.iconYOffset = 0
-                end
-                UIDropDownMenu_AddButton(info)
+        local COLUMN_OPTIONS = {
+            { text = "Honor",          value = "honor",         icon = "1455894" },
+            { text = "Conquest",       value = "conquest",      icon = "1523630" },
+            { text = "Heliotrope",     value = "bloodstones",   icon = "134128" },
+            { text = "Tokens",         value = "bloodytokens",  icon = "4638431" },
+            { text = "2v2 Rating",     value = "rating2v2",     icon = "Interface\\Icons\\achievement_arena_2v2_1" },
+            { text = "3v3 Rating",     value = "rating3v3",     icon = "Interface\\Icons\\achievement_arena_3v3_1" },
+            { text = "Shuffle Rating", value = "ratingShuffle", icon = "Interface\\Icons\\ability_dualwield" },
+            { text = "Blitz Rating",   value = "ratingBlitz",   icon = "Interface\\Icons\\achievement_bg_killxenemies_generalsroom" },
+            { text = "RBG Rating",     value = "ratingRBG",     icon = "Interface\\Icons\\achievement_pvp_a_15" },
+        }
+        PVPHUB.AttachModernMenu(columnDropdown, function(_, root)
+            root:CreateTitle("Show columns")
+            for _, column in ipairs(COLUMN_OPTIONS) do
+                root:CreateCheckbox(PVPHUB.MenuText(column.text, column.icon),
+                    function() return PVPHUB_SETTINGS.visibleColumns[column.value] end,
+                    function()
+                        PVPHUB_SETTINGS.visibleColumns[column.value] = not PVPHUB_SETTINGS.visibleColumns[column.value]
+                        -- Only update content if we're NOT in settings tab
+                        if f.currentTab == "characters" and PVPHUB.window and PVPHUB.window.UpdateContent then
+                            PVPHUB.window:UpdateContent()
+                        end
+                        -- Keep the menu open so several columns can be toggled in a row
+                        return MenuResponse and MenuResponse.Refresh
+                    end)
             end
         end)
 
@@ -10893,6 +11034,8 @@ SlashCmdList["PVPHUB"] = function(msg)
             end
             PVPHUB._draggingColumnKey = nil
             if PVPHUB._columnDragGhost then PVPHUB._columnDragGhost:End() end
+            PVPHUB._draggingGroupIndex = nil
+            if PVPHUB._groupDragGhost then PVPHUB._groupDragGhost:End() end
             
             -- Create dynamic headers and calculate offsets
             local visibleHeaders = {}
@@ -10944,13 +11087,25 @@ SlashCmdList["PVPHUB"] = function(msg)
                     else
                         h:SetTextColor(unpack(UI_CONSTANTS.COLORS.HEADER_COLOR))
                     end
-                    local displayText = header.text
-                    if header.key == activeSortKey then
-                        displayText = displayText .. " " .. CreateAtlasMarkup("auctionhouse-ui-sortarrow", 10, 10)
-                    end
-                    h:SetText(displayText)
+                    h:SetText(header.text)
                     h._pvpHeaderWidget = true
                     table.insert(f.headers, h)
+
+                    -- Sort arrow on the active column: a texture rather than
+                    -- inline markup so it can be turned around for ascending.
+                    if header.key == activeSortKey then
+                        local arrow = f:CreateTexture(nil, "OVERLAY")
+                        arrow:SetAtlas("auctionhouse-ui-sortarrow")
+                        arrow:SetSize(10, 10)
+                        arrow:SetPoint("LEFT", h, "RIGHT", 4, 0)
+                        arrow:SetVertexColor(0.2, 0.85, 1, 1)
+                        if PVPHUB_SETTINGS.sortAscending then
+                            arrow:SetRotation(math.pi)
+                        end
+                        arrow._pvpHeaderWidget = true
+                        table.insert(f.headers, arrow)
+                        h.sortArrow = arrow
+                    end
 
                     -- Add header separator line that matches text width
                     local headerLine = f:CreateTexture(nil, "ARTWORK")
@@ -10989,15 +11144,27 @@ SlashCmdList["PVPHUB"] = function(msg)
                     hoverBtn:SetPoint("TOPLEFT", f, "TOPLEFT", hXOffset - 20, -82)
                     hoverBtn:SetSize(colWidth, 32)
                     hoverBtn:SetFrameLevel(f:GetFrameLevel() + 10)
-                    hoverBtn:SetScript("OnEnter", function()
+                    hoverBtn:SetScript("OnEnter", function(self)
                         -- No hover highlight on other columns while one is
                         -- being dragged across them.
                         if PVPHUB._draggingColumnKey then return end
                         colHL:Show()
                         h:SetTextColor(1, 1, 1, 1)
                         headerLine:SetVertexColor(1, 1, 1, 0.6)
+                        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+                        GameTooltip:SetText(header.text, 1, 1, 1)
+                        if isSort then
+                            GameTooltip:AddLine("Click to reverse the order", 0.7, 0.7, 0.7)
+                        else
+                            GameTooltip:AddLine("Click to sort by this column", 0.7, 0.7, 0.7)
+                        end
+                        if header.key ~= "character" then
+                            GameTooltip:AddLine("Drag to move the column", 0.7, 0.7, 0.7)
+                        end
+                        GameTooltip:Show()
                     end)
                     hoverBtn:SetScript("OnLeave", function()
+                        GameTooltip:Hide()
                         colHL:Hide()
                         if isSort then
                             h:SetTextColor(0.2, 0.85, 1, 1)
@@ -11007,6 +11174,22 @@ SlashCmdList["PVPHUB"] = function(msg)
                         headerLine:SetVertexColor(unpack(UI_CONSTANTS.COLORS.HEADER_LINE))
                     end)
 
+                    -- Click to sort by this column; clicking the active
+                    -- column again reverses the direction.
+                    hoverBtn:RegisterForClicks("LeftButtonUp")
+                    hoverBtn:SetScript("OnClick", function()
+                        -- A drag that ends over the header shouldn't also count as a click
+                        if PVPHUB._columnDragEndedAt and GetTime() - PVPHUB._columnDragEndedAt < 0.3 then
+                            return
+                        end
+                        GameTooltip:Hide()
+                        if isSort then
+                            f:ApplySort(header.key, not PVPHUB_SETTINGS.sortAscending)
+                        else
+                            f:ApplySort(header.key)
+                        end
+                    end)
+
                     -- Drag-and-drop column reordering (see GetColumnDragGhost).
                     -- "character" is the fixed identifier column and never
                     -- gets this wiring.
@@ -11014,16 +11197,20 @@ SlashCmdList["PVPHUB"] = function(msg)
                         hoverBtn:RegisterForDrag("LeftButton")
                         hoverBtn:SetScript("OnDragStart", function()
                             PVPHUB._draggingColumnKey = header.key
+                            GameTooltip:Hide()
                             colHL:Hide()
                             -- Leave a faded header where the column came from
                             h:SetAlpha(0.35)
                             headerLine:SetAlpha(0.35)
+                            if h.sortArrow then h.sortArrow:SetAlpha(0.35) end
                             GetColumnDragGhost(f):Begin(column, header.text, currentFont)
                         end)
                         hoverBtn:SetScript("OnDragStop", function()
                             PVPHUB._draggingColumnKey = nil
+                            PVPHUB._columnDragEndedAt = GetTime()
                             h:SetAlpha(1)
                             headerLine:SetAlpha(1)
+                            if h.sortArrow then h.sortArrow:SetAlpha(1) end
                             local ghost = PVPHUB._columnDragGhost
                             if not ghost then return end
                             local fromKey, beforeKey, afterKey = ghost:End()
@@ -11042,6 +11229,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                         headerLine:Hide()
                         colHL:Hide()
                         hoverBtn:Hide()
+                        if h.sortArrow then h.sortArrow:Hide() end
                     end
                 end
             end
@@ -11160,74 +11348,72 @@ SlashCmdList["PVPHUB"] = function(msg)
             local currentPlayer = UnitName("player")
             local currentRealm = GetRealmName()
             local currentChar = currentPlayer and currentRealm and (currentPlayer .. "-" .. currentRealm) or nil
-            table.sort(sorted, function(a, b)
-                -- Always put current character first
-                if currentChar then
-                    if a.char == currentChar then
-                        return true  -- a (current) comes before b
-                    elseif b.char == currentChar then
-                        return false -- b (current) comes before a
-                    end
+            -- Sort value of each character, worked out once up front rather
+            -- than inside the comparator (which runs O(n log n) times).
+            local function getDisplayedRating(ratingTable, currentSpecID)
+                if type(ratingTable) == "number" then return ratingTable end
+                if type(ratingTable) ~= "table" then return 0 end
+                if currentSpecID and currentSpecID ~= 0 then
+                    return ratingTable[currentSpecID] or 0
                 end
-                
-                -- Get pinned character setting (secondary priority after current char)
-                local pinnedChar = PVPHUB_SETTINGS.mainWindow and PVPHUB_SETTINGS.mainWindow.pinnedCharacter
-                
-                -- If there's a pinned character, put it second (after current char)
-                if pinnedChar then
-                    if a.char == pinnedChar then
-                        return true  -- a (pinned) comes before b
-                    elseif b.char == pinnedChar then
-                        return false -- b (pinned) comes before a
-                    end
-                    -- If neither is pinned, continue with normal sorting
-                end
-                
-                local function getDisplayedRating(ratingTable, currentSpecID)
-                    if type(ratingTable) == "number" then return ratingTable end
-                    if type(ratingTable) ~= "table" then return 0 end
-                    if currentSpecID and currentSpecID ~= 0 then
-                        return ratingTable[currentSpecID] or 0
-                    end
-                    local max = 0
-                    for _, v in pairs(ratingTable) do if v > max then max = v end end
-                    return max
-                end
+                local max = 0
+                for _, v in pairs(ratingTable) do if v > max then max = v end end
+                return max
+            end
 
-                local function getHighestRating(entry)
-                    local d = entry.data
-                    local maxRating = 0
-                    local specID = d.specID or d.lastActiveSpecID
-                    
-                    -- Check standard brackets
-                    for _, k in ipairs({"rating2v2", "rating3v3", "ratingRBG"}) do
-                        local rating = d[k] or 0
-                        if rating > maxRating then
-                            maxRating = rating
-                        end
-                    end
-                    
-                    -- Shuffle and Blitz: use displayed (spec-aware) rating, same as columns show
-                    local shuffle = getDisplayedRating(d.ratingShuffle, specID)
-                    if shuffle > maxRating then maxRating = shuffle end
-
-                    local blitz = getDisplayedRating(d.ratingBlitz, specID)
-                    if blitz > maxRating then maxRating = blitz end
-                    
-                    return maxRating
+            local function getHighestRating(d)
+                local maxRating = 0
+                local specID = d.specID or d.lastActiveSpecID
+                for _, k in ipairs({"rating2v2", "rating3v3", "ratingRBG"}) do
+                    local rating = d[k] or 0
+                    if rating > maxRating then maxRating = rating end
                 end
+                -- Shuffle and Blitz: use displayed (spec-aware) rating, same as columns show
+                local shuffle = getDisplayedRating(d.ratingShuffle, specID)
+                if shuffle > maxRating then maxRating = shuffle end
+                local blitz = getDisplayedRating(d.ratingBlitz, specID)
+                if blitz > maxRating then maxRating = blitz end
+                return maxRating
+            end
+
+            for _, entry in ipairs(sorted) do
+                local d = entry.data
+                entry.sortName = entry.char:lower()
                 if sortKey == "highestRating" then
-                    return getHighestRating(a) > getHighestRating(b)
+                    entry.sortValue = getHighestRating(d)
+                elseif sortKey == "ratingShuffle" or sortKey == "ratingBlitz" then
+                    entry.sortValue = getDisplayedRating(d[sortKey], d.specID or d.lastActiveSpecID)
                 else
-                    local aVal = a.data[sortKey]
-                    local bVal = b.data[sortKey]
-                    -- Handle multi-spec rating sorting (Shuffle and Blitz) — use displayed rating
-                    if sortKey == "ratingShuffle" or sortKey == "ratingBlitz" then
-                        aVal = getDisplayedRating(a.data[sortKey], a.data.specID or a.data.lastActiveSpecID)
-                        bVal = getDisplayedRating(b.data[sortKey], b.data.specID or b.data.lastActiveSpecID)
-                    end
-                    return (aVal or 0) > (bVal or 0)
+                    entry.sortValue = tonumber(d[sortKey]) or 0
                 end
+            end
+
+            -- Direction: numbers sort high-to-low and names A-Z unless the
+            -- header was clicked again to reverse it (see f:ApplySort).
+            local ascending = PVPHUB_SETTINGS.sortAscending and true or false
+            local pinnedChar = PVPHUB_SETTINGS.mainWindow and PVPHUB_SETTINGS.mainWindow.pinnedCharacter
+            table.sort(sorted, function(a, b)
+                -- Always put current character first, then the pinned one
+                if currentChar then
+                    if a.char == currentChar then return true end
+                    if b.char == currentChar then return false end
+                end
+                if pinnedChar then
+                    if a.char == pinnedChar then return true end
+                    if b.char == pinnedChar then return false end
+                end
+
+                if sortKey == "character" then
+                    if ascending then return a.sortName < b.sortName end
+                    return a.sortName > b.sortName
+                end
+                if a.sortValue ~= b.sortValue then
+                    if ascending then return a.sortValue < b.sortValue end
+                    return a.sortValue > b.sortValue
+                end
+                -- Equal values: keep a stable, alphabetical order instead of
+                -- whatever order pairs() happened to produce this time.
+                return a.sortName < b.sortName
             end)
             
             local contentHeight = 0
@@ -11344,15 +11530,25 @@ SlashCmdList["PVPHUB"] = function(msg)
 
             -- Create character rows (now includes group headers if grouping enabled)
             local currentYOffset = 0  -- Track actual Y position
+            -- Group headers in display order, for the group drag ghost
+            -- (see GetGroupDragGhost).
+            f.groupHeaderLayout = {}
             for _, entry in ipairs(displayList) do
                 if entry.isGroupHeader then
                     -- Render group header
                     local y = -currentYOffset
-                    
+
                     local groupHeader = CreateFrame("Frame", nil, f.contentFrame)
                     groupHeader:SetPoint("TOPLEFT", f.contentFrame, "TOPLEFT", 0, y)
                     groupHeader:SetSize(dynamicContentWidth, groupHeaderHeight)
                     table.insert(f.rows, groupHeader)
+                    local layoutEntry = {
+                        frame = groupHeader,
+                        group = entry.groupData,
+                        index = entry.groupIndex,
+                        isDefault = entry.groupIsDefault,
+                    }
+                    table.insert(f.groupHeaderLayout, layoutEntry)
                     
                     -- Add a subtle separator line at the top of group (except first)
                     if currentYOffset > 0 then
@@ -11389,114 +11585,44 @@ SlashCmdList["PVPHUB"] = function(msg)
                         groupHeader:EnableMouse(true)
                         groupHeader:SetScript("OnMouseUp", function(self, button)
                             if button == "RightButton" then
-                                local menu = {
-                                    {
-                                        text = "Rename Group",
-                                        func = function()
-                                            PVPHUB._renameGroupCtx = { groupIndex = entry.groupIndex, groupName = entry.groupName }
-                                            StaticPopup_Show("PVPHUB_RENAME_GROUP")
-                                        end
-                                    },
-                                    {
-                                        text = "Delete Group",
-                                        func = function()
-                                            PVPHUB._deleteGroupCtx = { groupIndex = entry.groupIndex }
-                                            StaticPopupDialogs["PVPHUB_DELETE_GROUP"].text = "Delete group '" .. entry.groupName .. "'?\n\nCharacters will move to No Group."
-                                            StaticPopup_Show("PVPHUB_DELETE_GROUP")
-                                        end
-                                    }
-                                }
-
-                                -- Create dropdown menu
-                                if not PVPHUB.groupContextMenu then
-                                    PVPHUB.groupContextMenu = CreateFrame("Frame", "PVPHUBGroupContextMenu", UIParent, "UIDropDownMenuTemplate")
-                                end
-
-                                UIDropDownMenu_Initialize(PVPHUB.groupContextMenu, function(self, level)
-                                    for _, item in ipairs(menu) do
-                                        local info = UIDropDownMenu_CreateInfo()
-                                        info.text = item.text
-                                        info.func = item.func
-                                        info.notCheckable = true
-                                        UIDropDownMenu_AddButton(info)
-                                    end
-                                end, "MENU")
-
-                                ToggleDropDownMenu(1, nil, PVPHUB.groupContextMenu, "cursor", 0, 0)
+                                MenuUtil.CreateContextMenu(self, function(_, root)
+                                    root:CreateTitle(entry.groupName)
+                                    root:CreateButton("Rename Group", function()
+                                        PVPHUB._renameGroupCtx = { groupIndex = entry.groupIndex, groupName = entry.groupName }
+                                        StaticPopup_Show("PVPHUB_RENAME_GROUP")
+                                    end)
+                                    root:CreateButton("|cffff4040Delete Group|r", function()
+                                        PVPHUB._deleteGroupCtx = { groupIndex = entry.groupIndex }
+                                        StaticPopupDialogs["PVPHUB_DELETE_GROUP"].text = "Delete group '" .. entry.groupName .. "'?\n\nCharacters will move to No Group."
+                                        StaticPopup_Show("PVPHUB_DELETE_GROUP")
+                                    end)
+                                end)
                             end
                         end)
 
-                        -- Drag-and-drop reordering
+                        -- Drag-and-drop reordering (see GetGroupDragGhost).
+                        -- "No Group" always stays last and isn't draggable.
                         groupHeader:RegisterForDrag("LeftButton")
                         groupHeader:SetScript("OnDragStart", function(self)
                             PVPHUB._draggingGroupIndex = entry.groupIndex
-                            PVPHUB._dropTargetGroupIndex = nil
-                            local ghost = GetGroupDragGhost()
-                            -- Match the real header's size, icon, text, and font exactly
-                            ghost:SetSize(dynamicContentWidth, groupHeaderHeight)
+                            -- Leave a faded header where the group came from
+                            self:SetAlpha(0.4)
                             local btnTex = entry.groupCollapsed
                                 and "Interface\\Buttons\\UI-PlusButton-Up"
                                 or  "Interface\\Buttons\\UI-MinusButton-Up"
-                            ghost.icon:SetTexture(btnTex)
-                            ghost.label:SetText(string.format("|cffffffff%s|r |cff888888(%d)|r", entry.groupName, entry.characterCount))
-                            SafeSetFont(ghost.label, currentFont, 13, "OUTLINE")
-                            ghost:Show()
+                            GetGroupDragGhost(f):Begin(layoutEntry, btnTex,
+                                string.format("|cffffffff%s|r |cff888888(%d)|r", entry.groupName, entry.characterCount),
+                                currentFont)
                         end)
                         groupHeader:SetScript("OnDragStop", function(self)
-                            local fromIndex = PVPHUB._draggingGroupIndex
-                            local toIndex = PVPHUB._dropTargetGroupIndex
                             PVPHUB._draggingGroupIndex = nil
-                            PVPHUB._dropTargetGroupIndex = nil
-                            if PVPHUB._groupDragGhost then PVPHUB._groupDragGhost:Hide() end
-                            if fromIndex and toIndex and fromIndex ~= toIndex then
-                                ReorderGroup(fromIndex, toIndex)
+                            self:SetAlpha(1)
+                            local ghost = PVPHUB._groupDragGhost
+                            if not ghost then return end
+                            local fromIndex, hasTarget, beforeGroup = ghost:End()
+                            if fromIndex and hasTarget then
+                                ReorderGroup(fromIndex, beforeGroup)
                             end
-                        end)
-                        local function showDropLine(frame)
-                            if not frame._dropLine then
-                                local line = frame:CreateTexture(nil, "OVERLAY")
-                                line:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, 0)
-                                line:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, 0)
-                                line:SetHeight(2)
-                                line:SetColorTexture(0.2, 0.6, 1, 1)
-                                frame._dropLine = line
-                            end
-                            frame._dropLine:Show()
-                        end
-                        groupHeader:SetScript("OnEnter", function(self)
-                            if PVPHUB._draggingGroupIndex and PVPHUB._draggingGroupIndex ~= entry.groupIndex then
-                                PVPHUB._dropTargetGroupIndex = entry.groupIndex
-                                showDropLine(self)
-                            end
-                        end)
-                        groupHeader:SetScript("OnLeave", function(self)
-                            if PVPHUB._dropTargetGroupIndex == entry.groupIndex then
-                                PVPHUB._dropTargetGroupIndex = nil
-                            end
-                            if self._dropLine then self._dropLine:Hide() end
-                        end)
-                    else
-                        -- No Group is a drop target: dropping here moves the dragged group to last position
-                        groupHeader:EnableMouse(true)
-                        groupHeader:SetScript("OnEnter", function(self)
-                            if PVPHUB._draggingGroupIndex then
-                                PVPHUB._dropTargetGroupIndex = entry.groupIndex
-                                if not self._dropLine then
-                                    local line = self:CreateTexture(nil, "OVERLAY")
-                                    line:SetPoint("TOPLEFT", self, "TOPLEFT", 0, 0)
-                                    line:SetPoint("TOPRIGHT", self, "TOPRIGHT", 0, 0)
-                                    line:SetHeight(2)
-                                    line:SetColorTexture(0.2, 0.6, 1, 1)
-                                    self._dropLine = line
-                                end
-                                self._dropLine:Show()
-                            end
-                        end)
-                        groupHeader:SetScript("OnLeave", function(self)
-                            if PVPHUB._dropTargetGroupIndex == entry.groupIndex then
-                                PVPHUB._dropTargetGroupIndex = nil
-                            end
-                            if self._dropLine then self._dropLine:Hide() end
                         end)
                     end
                     
@@ -11705,8 +11831,13 @@ SlashCmdList["PVPHUB"] = function(msg)
                 -- Handles flat numbers (2v2/3v3) and per-spec tables (Shuffle/Blitz)
                 -- through the shared GetShuffleDisplayInfo path.
                 local function getMultiSpecDisplay(data, charKey, bracketKey)
-                    local currentRating, _, specCount = GetShuffleDisplayInfo(data, charKey, bracketKey)
+                    local currentRating, displaySpecID, specCount = GetShuffleDisplayInfo(data, charKey, bracketKey)
                     local display = coloredRating(currentRating)
+                    -- Recent change after a match, e.g. "1843 +18"
+                    local delta = PVPHUB.GetRecentRatingChange(charKey, bracketKey, displaySpecID)
+                    if delta then
+                        display = display .. PVPHUB.FormatRatingDelta(delta)
+                    end
                     if specCount > 1 then
                         display = display .. " |TInterface\\Common\\FavoritesIcon:12|t"
                     end
@@ -11943,7 +12074,17 @@ SlashCmdList["PVPHUB"] = function(msg)
                     txt:SetWordWrap(false)
                     txt:SetJustifyH("LEFT")
                     txt:SetText(val)
-                    
+
+                    -- Blink a rating that just changed (see NoteRatingChange)
+                    if key == "rating2v2" or key == "rating3v3" or key == "ratingRBG"
+                       or key == "ratingShuffle" or key == "ratingBlitz" then
+                        local _, shownSpecID = GetShuffleDisplayInfo(data, entry.char, key)
+                        local _, changeAge = PVPHUB.GetRecentRatingChange(entry.char, key, shownSpecID)
+                        if PVPHUB.IsRatingChangeFresh(changeAge) then
+                            PVPHUB.FlashRegion(txt)
+                        end
+                    end
+
                     -- Create tooltip areas (invisible) for specific columns that need tooltips
                     local tooltipBtn = CreateFrame("Button", nil, f.contentFrame)
                     tooltipBtn:SetPoint("TOPLEFT", f.contentFrame, "TOPLEFT", f.xOffsets[i] - 20, y)
@@ -12197,143 +12338,58 @@ SlashCmdList["PVPHUB"] = function(msg)
                                 local currentPinnedChar = PVPHUB_SETTINGS.mainWindow.pinnedCharacter
                                 local isCurrentlyPinned = (currentPinnedChar == self.charName)
                                 
-                                -- Create dropdown menu
-                                local function InitializeDropDown(self, level)
-                                    level = level or 1
-                                    local info = UIDropDownMenu_CreateInfo()
-                                    
-                                    -- Handle group submenu
-                                    if level == 2 and UIDROPDOWNMENU_MENU_VALUE == "GROUPS" then
-                                        local currentGroupIndex = GetCharacterGroup(tooltipBtn.charName)
-                                        for i, group in ipairs(PVPHUB_SETTINGS.characterGroups.groups) do
-                                            info = UIDropDownMenu_CreateInfo()
-                                            info.text = group.name
-                                            info.checked = (i == currentGroupIndex)
-                                            info.func = function()
-                                                MoveCharacterToGroup(tooltipBtn.charName, i)
-                                                f:UpdateContent()
-                                                CloseDropDownMenus()
-                                                PVPHubPrint("|cff00ff00[PVPHUB]|r Moved character to group '" .. group.name .. "'")
-                                            end
-                                            UIDropDownMenu_AddButton(info, level)
-                                        end
-                                        return
-                                    end
-                                    
-                                    -- Main menu (level 1)
+                                -- Right-click menu (Blizzard's MenuUtil, see AttachModernMenu)
+                                local charKey = self.charName
+                                MenuUtil.CreateContextMenu(self, function(_, root)
+                                    root:CreateTitle(charKey:match("^([^%-]+)") or charKey)
+
                                     if isCurrentlyPinned then
-                                        -- Character is pinned, show unpin option
-                                        info.text = "Unpin from Top"
-                                        info.icon = "Interface\\Buttons\\UI-GroupLoot-Pass-Up"
-                                        info.func = function()
+                                        root:CreateButton(PVPHUB.MenuText("Unpin from Top", "Interface\\Buttons\\UI-GroupLoot-Pass-Up"), function()
                                             PVPHUB_SETTINGS.mainWindow.pinnedCharacter = nil
                                             f:UpdateContent()
-                                            CloseDropDownMenus()
-                                        end
-                                        info.notCheckable = true
-                                        UIDropDownMenu_AddButton(info, level)
+                                        end)
                                     else
-                                        -- Character is not pinned, show pin option
-                                        info.text = "Pin to Top"
-                                        info.icon = "Interface\\Minimap\\UI-Minimap-ZoomInButton-Up"
-                                        info.func = function()
-                                            PVPHUB_SETTINGS.mainWindow.pinnedCharacter = tooltipBtn.charName
+                                        root:CreateButton(PVPHUB.MenuText("Pin to Top", "Interface\\Minimap\\UI-Minimap-ZoomInButton-Up"), function()
+                                            PVPHUB_SETTINGS.mainWindow.pinnedCharacter = charKey
                                             f:UpdateContent()
-                                            CloseDropDownMenus()
-                                        end
-                                        info.notCheckable = true
-                                        UIDropDownMenu_AddButton(info, level)
+                                        end)
                                     end
-                                    
-                                    -- Add separator
-                                    info = UIDropDownMenu_CreateInfo()
-                                    info.text = ""
-                                    info.isTitle = true
-                                    info.notCheckable = true
-                                    UIDropDownMenu_AddButton(info, level)
-                                    
-                                    -- Add Move to Group option (if grouping enabled)
+
+                                    -- Move to Group submenu (if grouping enabled)
                                     if PVPHUB_SETTINGS.characterGroups and PVPHUB_SETTINGS.characterGroups.enabled and PVPHUB_SETTINGS.characterGroups.groups then
-                                        info = UIDropDownMenu_CreateInfo()
-                                        info.text = "Move to Group"
-                                        info.icon = "Interface\\Icons\\INV_Misc_GroupLooking"
-                                        info.hasArrow = true
-                                        info.notCheckable = true
-                                        info.value = "GROUPS"
-                                        UIDropDownMenu_AddButton(info, level)
+                                        local groupsMenu = root:CreateButton(PVPHUB.MenuText("Move to Group", "Interface\\Icons\\INV_Misc_GroupLooking"))
+                                        for i, group in ipairs(PVPHUB_SETTINGS.characterGroups.groups) do
+                                            groupsMenu:CreateRadio(group.name,
+                                                function() return GetCharacterGroup(charKey) == i end,
+                                                function()
+                                                    MoveCharacterToGroup(charKey, i)
+                                                    f:UpdateContent()
+                                                    PVPHubPrint("|cff00ff00[PVPHUB]|r Moved character to group '" .. group.name .. "'")
+                                                end)
+                                        end
                                     end
-                                    
-                                    -- Add separator
-                                    info = UIDropDownMenu_CreateInfo()
-                                    info.text = ""
-                                    info.isTitle = true
-                                    info.notCheckable = true
-                                    UIDropDownMenu_AddButton(info, level)
-                                    
-                                    -- Add Edit Note option
-                                    info = UIDropDownMenu_CreateInfo()
-                                    local hasNote = PVPHUB_DB[tooltipBtn.charName] and PVPHUB_DB[tooltipBtn.charName].note
-                                    info.text = hasNote and "Edit Note" or "Add Note"
-                                    info.icon = "Interface\\Icons\\INV_Inscription_Parchment"
-                                    info.func = function()
+
+                                    root:CreateDivider()
+                                    local hasNote = PVPHUB_DB[charKey] and PVPHUB_DB[charKey].note
+                                    root:CreateButton(PVPHUB.MenuText(hasNote and "Edit Note" or "Add Note", "Interface\\Icons\\INV_Inscription_Parchment"), function()
                                         -- Character goes in as the data argument so
                                         -- the dialog's OnShow already has it.
-                                        StaticPopup_Show("PVPHUB_EDIT_NOTE", nil, nil, tooltipBtn.charName)
-                                        CloseDropDownMenus()
-                                    end
-                                    info.notCheckable = true
-                                    UIDropDownMenu_AddButton(info, level)
-                                    
-                                    -- Add separator
-                                    info = UIDropDownMenu_CreateInfo()
-                                    info.text = ""
-                                    info.isTitle = true
-                                    info.notCheckable = true
-                                    UIDropDownMenu_AddButton(info, level)
-                                    
-                                    -- Add Hide Character option
-                                    info = UIDropDownMenu_CreateInfo()
-                                    info.text = "Hide Character"
-                                    info.icon = "Interface\\Buttons\\UI-GuildButton-MOTD-Disabled"
-                                    info.func = function()
-                                        HideCharacter(tooltipBtn.charName)
-                                        CloseDropDownMenus()
-                                    end
-                                    info.notCheckable = true
-                                    UIDropDownMenu_AddButton(info, level)
-                                    
-                                    -- Add Delete Character option
-                                    info = UIDropDownMenu_CreateInfo()
-                                    info.text = "|cffff4040Delete Character|r"
-                                    info.icon = "Interface\\Buttons\\UI-GroupLoot-Pass-Down"
-                                    info.func = function()
-                                        PVPHUB._deleteCharCtx = tooltipBtn.charName
-                                        StaticPopupDialogs["PVPHUB_DELETE_CHARACTER"].text = "Are you sure you want to permanently delete all data for |cff4da6ff" .. tooltipBtn.charName .. "|r?\n\nThis action cannot be undone!"
+                                        StaticPopup_Show("PVPHUB_EDIT_NOTE", nil, nil, charKey)
+                                    end)
+
+                                    root:CreateDivider()
+                                    root:CreateButton(PVPHUB.MenuText("Hide Character", "Interface\\Buttons\\UI-GuildButton-MOTD-Disabled"), function()
+                                        HideCharacter(charKey)
+                                    end)
+                                    root:CreateButton(PVPHUB.MenuText("|cffff4040Delete Character|r", "Interface\\Buttons\\UI-GroupLoot-Pass-Down"), function()
+                                        PVPHUB._deleteCharCtx = charKey
+                                        StaticPopupDialogs["PVPHUB_DELETE_CHARACTER"].text = "Are you sure you want to permanently delete all data for |cff4da6ff" .. charKey .. "|r?\n\nThis action cannot be undone!"
                                         StaticPopup_Show("PVPHUB_DELETE_CHARACTER")
-                                        CloseDropDownMenus()
-                                    end
-                                    info.notCheckable = true
-                                    UIDropDownMenu_AddButton(info, level)
-                                    
-                                    -- Add Manage Hidden Characters option
-                                    info = UIDropDownMenu_CreateInfo()
-                                    info.text = "Manage Hidden Characters"
-                                    info.icon = "Interface\\Buttons\\UI-GuildButton-PublicNote-Up"
-                                    info.func = function()
+                                    end)
+                                    root:CreateButton(PVPHUB.MenuText("Manage Hidden Characters", "Interface\\Buttons\\UI-GuildButton-PublicNote-Up"), function()
                                         ShowHiddenCharactersWindow()
-                                        CloseDropDownMenus()
-                                    end
-                                    info.notCheckable = true
-                                    UIDropDownMenu_AddButton(info, level)
-                                end
-                                
-                                -- Create the dropdown menu frame if it doesn't exist
-                                if not PVPHUB.pinDropdownMenu then
-                                    PVPHUB.pinDropdownMenu = CreateFrame("Frame", "PVPHUBPinDropdown", UIParent, "UIDropDownMenuTemplate")
-                                end
-                                
-                                UIDropDownMenu_Initialize(PVPHUB.pinDropdownMenu, InitializeDropDown, "MENU")
-                                ToggleDropDownMenu(1, nil, PVPHUB.pinDropdownMenu, "cursor", 3, -3)
+                                    end)
+                                end)
                             end
                         end)
                     else

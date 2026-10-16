@@ -837,16 +837,17 @@ local function ConfigureCompactRow(row, charKey, data, yOffset, windowWidth, pin
             -- On a pinned-spec row, the per-spec brackets (Shuffle/Blitz) show
             -- THAT spec's rating specifically. 2v2/3v3/RBG aren't spec-specific
             -- to begin with, so they render exactly like the default row.
-            local currentRating, isMultiSpec
+            local currentRating, isMultiSpec, shownSpecID
             if pinnedSpecID and (bracket.key == "ratingShuffle" or bracket.key == "ratingBlitz") then
                 local ratingTable = data[bracket.key]
                 currentRating = (type(ratingTable) == "table" and ratingTable[pinnedSpecID]) or 0
                 isMultiSpec = false -- explicit single spec, no ambiguity to flag
+                shownSpecID = pinnedSpecID
             else
                 -- GetShuffleDisplayInfo handles flat numbers (2v2/3v3) and per-spec
                 -- tables (Shuffle/Blitz) through the same code path.
-                local _, specCount
-                currentRating, _, specCount = GetShuffleDisplayInfo(data, charKey, bracket.key)
+                local specCount
+                currentRating, shownSpecID, specCount = GetShuffleDisplayInfo(data, charKey, bracket.key)
                 isMultiSpec = (specCount > 1)
             end
             -- 2v2/3v3/RBG aren't spec-specific — on a sub-row they'd just repeat
@@ -857,11 +858,17 @@ local function ConfigureCompactRow(row, charKey, data, yOffset, windowWidth, pin
             local isCharacterWideBracket = bracket.key == "rating2v2" or bracket.key == "rating3v3" or bracket.key == "ratingRBG"
             local showAsDitto = isSubRow and isCharacterWideBracket and currentRating > 0
 
-            local display
+            local display, changeAge, changeAt
             if showAsDitto then
                 display = "|cff666666^|r"
             else
                 display = GetRatingColor(currentRating) .. (currentRating > 0 and currentRating or "-") .. "|r"
+                -- Recent change after a match, e.g. "1843 +18"
+                local delta
+                delta, changeAge, changeAt = PVPHUB.GetRecentRatingChange(charKey, bracket.key, shownSpecID)
+                if delta then
+                    display = display .. PVPHUB.FormatRatingDelta(delta)
+                end
             end
 
             local xPos = C.BASE_WIDTH + (columnIndex * C.COLUMN_WIDTH) - 5
@@ -870,6 +877,11 @@ local function ConfigureCompactRow(row, charKey, data, yOffset, windowWidth, pin
             slot.text:SetText(display)
             SafeSetFont(slot.text, fontPath, 11)
             slot.text:Show()
+            -- Blink once when a fresh change first shows up in this cell
+            if PVPHUB.IsRatingChangeFresh(changeAge) and slot.flashedChangeAt ~= changeAt then
+                slot.flashedChangeAt = changeAt
+                PVPHUB.FlashRegion(slot.text)
+            end
 
             -- Star icon for multi-spec ratings, to the right of the centered rating
             if isMultiSpec then
@@ -1429,12 +1441,7 @@ function PVPHUB:ShowCompactSettings()
         scrollFrame:SetPoint("TOPLEFT", f, "TOPLEFT", 4, -40)
         scrollFrame:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -25, footerHeight)
         ApplyModernScrollbarStyling(scrollFrame, colors)
-        scrollFrame:EnableMouseWheel(true)
-        scrollFrame:SetScript("OnMouseWheel", function(self, delta)
-            local current = self:GetVerticalScroll()
-            local maxScroll = self:GetVerticalScrollRange()
-            self:SetVerticalScroll(math.max(0, math.min(current - (delta * 20), maxScroll)))
-        end)
+        PVPHUB.EnableSmoothScroll(scrollFrame, 40)
 
         local cardParent = CreateFrame("Frame", nil, scrollFrame)
         cardParent:SetSize(410, 400)
@@ -1549,6 +1556,7 @@ function PVPHUB:ShowCompactSettings()
 
         f.charCheckboxes = {}
         local charScrollFrame = CreateFrame("ScrollFrame", nil, charSecContent, "ScrollFrameTemplate")
+        PVPHUB.EnableSmoothScroll(charScrollFrame, 40)
         charScrollFrame:SetPoint("TOPLEFT", charSecContent, "TOPLEFT", 10, -38)
         charScrollFrame:SetSize(376, 130)
         ApplyModernScrollbarStyling(charScrollFrame, colors)

@@ -46,6 +46,97 @@ end
 local GetCurrentSpecID = PVPHUB.Compat.GetCurrentSpecID
 
 -- --------------------------------------------------------------------------
+-- Recent rating changes
+-- --------------------------------------------------------------------------
+-- After a match the windows show the change next to the new rating ("+18")
+-- for a few minutes, and the cell blinks when it first appears. Kept for the
+-- session only. Recorded here because SaveBracketStats is the first code to
+-- write a new rating; anything that writes later sees no difference.
+
+local RATING_CHANGE_SECONDS = 180  -- how long "+18" stays next to the rating
+local RATING_FLASH_SECONDS  = 2.5  -- a change this fresh makes the cell blink
+
+PVPHUB._ratingChanges = PVPHUB._ratingChanges or {}
+
+local function RatingChangeKey(bracketKey, specID)
+    return bracketKey .. ":" .. tostring(specID or 0)
+end
+
+-- Records oldRating -> newRating for a character's bracket (and spec, for
+-- Shuffle/Blitz). Nothing is recorded without a real previous rating, so a
+-- first rating or a freshly picked spec doesn't show up as "+1800".
+function PVPHUB.NoteRatingChange(charKey, bracketKey, specID, oldRating, newRating)
+    oldRating, newRating = tonumber(oldRating), tonumber(newRating)
+    if not charKey or not oldRating or not newRating then return end
+    if oldRating <= 0 or newRating == oldRating then return end
+
+    local byChar = PVPHUB._ratingChanges[charKey] or {}
+    PVPHUB._ratingChanges[charKey] = byChar
+    local key = RatingChangeKey(bracketKey, specID)
+    local now = GetTime()
+    local delta = newRating - oldRating
+    -- Several updates within the window (e.g. back-to-back games) add up.
+    local previous = byChar[key]
+    if previous and now - previous.at <= RATING_CHANGE_SECONDS then
+        delta = delta + previous.delta
+    end
+    byChar[key] = { delta = delta, at = now }
+
+    -- The data doesn't change again when the badge expires, so the
+    -- windows' "unchanged, skip the rebuild" check has to be bypassed.
+    C_Timer.After(RATING_CHANGE_SECONDS + 0.5, function()
+        PVPHUB._mainRenderSig, PVPHUB._compactRenderSig = nil, nil
+        if PVPHUB.RefreshUI then PVPHUB.RefreshUI() end
+    end)
+end
+
+-- Returns delta, secondsAgo, recordedAt for a change still worth showing,
+-- or nil. specID is the spec whose rating the caller displays (nil for
+-- 2v2/3v3/RBG).
+function PVPHUB.GetRecentRatingChange(charKey, bracketKey, specID)
+    local byChar = PVPHUB._ratingChanges[charKey]
+    local change = byChar and byChar[RatingChangeKey(bracketKey, specID)]
+    if not change then return nil end
+    local age = GetTime() - change.at
+    if age > RATING_CHANGE_SECONDS then return nil end
+    return change.delta, age, change.at
+end
+
+-- " +18" in green / " -12" in red, for appending to a rating.
+function PVPHUB.FormatRatingDelta(delta)
+    if delta > 0 then
+        return string.format(" |cff40ff40+%d|r", delta)
+    end
+    return string.format(" |cffff5050%d|r", delta)
+end
+
+-- True when a change is fresh enough that its cell should blink.
+function PVPHUB.IsRatingChangeFresh(age)
+    return age ~= nil and age < RATING_FLASH_SECONDS
+end
+
+-- Blinks a region three times. The animation is created once per region
+-- and reused.
+function PVPHUB.FlashRegion(region)
+    if not region or not region.CreateAnimationGroup then return end
+    local flash = region._pvphubFlash
+    if not flash then
+        flash = region:CreateAnimationGroup()
+        for i = 1, 3 do
+            local out = flash:CreateAnimation("Alpha")
+            out:SetFromAlpha(1); out:SetToAlpha(0.2)
+            out:SetDuration(0.16); out:SetOrder(i * 2 - 1)
+            local back = flash:CreateAnimation("Alpha")
+            back:SetFromAlpha(0.2); back:SetToAlpha(1)
+            back:SetDuration(0.16); back:SetOrder(i * 2)
+        end
+        region._pvphubFlash = flash
+    end
+    flash:Stop()
+    flash:Play()
+end
+
+-- --------------------------------------------------------------------------
 -- Data persistence
 -- --------------------------------------------------------------------------
 
@@ -143,12 +234,14 @@ local function SaveBracketStats(charKey)
                 --   2) cross-character stale cache (previous character's data persists across
                 --      the login screen until the server sends a new PVP_RATED_STATS_UPDATE)
                 if specID and PVPHUB._pvpCacheReady then
+                    PVPHUB.NoteRatingChange(charKey, b.key, specID, PVPHUB_DB[charKey][b.key][specID], rating)
                     PVPHUB_DB[charKey][b.key][specID] = rating
                 end
             else
                 -- Guard 2v2/3v3 writes the same way: only write after server confirms
                 -- fresh data for this session (prevents cross-character cache bleed).
                 if PVPHUB._pvpCacheReady then
+                    PVPHUB.NoteRatingChange(charKey, b.key, nil, PVPHUB_DB[charKey][b.key], rating)
                     PVPHUB_DB[charKey][b.key] = rating
                 end
             end

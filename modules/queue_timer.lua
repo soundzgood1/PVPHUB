@@ -62,6 +62,7 @@ local TICK_DOTS = { ".", "..", "..." }
 -- show is only the fallback for when that read fails. confirmStart is the
 -- GetTime() at which the slot was first seen as ready.
 local FALLBACK_ACCEPT_SECONDS = 28
+local ACCEPT_URGENT_SECONDS = 10   -- countdown turns red from here
 local function GetAcceptSecondsLeft(index, confirmStart)
     if GetBattlefieldPortExpiration then
         local ok, secondsLeft = pcall(function()
@@ -380,53 +381,58 @@ end
 -- Resize frame width to fit content
 -- --------------------------------------------------------------------------
 
--- Measures how tall a row needs to be to fit its three text lines snugly,
--- so unused rows don't leave dead space below the last row's text.
+-- Card spacing. Rows used to be sized snugly to their text with 2-3 px
+-- between lines, which looked cramped as soon as a line got long
+-- ("3v3  (3277 MMR)").
+local PAD_X    = 12   -- left/right inner padding of a row
+local PAD_Y    = 8    -- top/bottom inner padding of a row
+local LINE_GAP = 4    -- space between stacked lines
+
+-- Measures how tall a row needs to be to fit its text lines, so unused rows
+-- don't leave dead space below the last row's text.
 local function ComputeRowHeight(row)
     if row.compactLine:IsShown() then
-        return 6 + (row.compactLine:GetStringHeight() or 14) + 6
+        return PAD_Y + (row.compactLine:GetStringHeight() or 14) + PAD_Y
     end
     local nameH = (row.nameLabel:GetStringHeight()) or 16
-    local mmrH  = row.mmrLine:IsShown() and ((row.mmrLine:GetStringHeight() or 13) + 3) or 0
+    local mmrH  = row.mmrLine:IsShown() and ((row.mmrLine:GetStringHeight() or 13) + LINE_GAP) or 0
     local avgH  = (row.avgLabel:GetStringHeight())  or 13
     local inQH  = (row.inQLabel:GetStringHeight())  or 13
-    return 6 + nameH + mmrH + 3 + avgH + 2 + inQH + 6
+    return PAD_Y + nameH + mmrH + LINE_GAP + avgH + LINE_GAP + inQH + PAD_Y
 end
 
--- GetStringWidth()-based auto-sizing kept under-measuring the "Compact"
--- style's single line (it compounds with OUTLINE-font glyph overflow and
--- multiple embedded |cAARRGGBB...|r color segments — worse the longer/more
--- colored the line, e.g. a READY line with both a colored name and colored
--- "READY"/accept-timer text). Rather than keep chasing that, compact gets a
--- hardcoded width comfortably wide for its realistic worst case
--- ("Shuffle   READY   Accept 27s") — a fixed, always-correct card instead of
--- a snug-but-occasionally-wrong one.
+-- Minimum width of the one-line "Compact" style card, so it doesn't jump
+-- around as the numbers in it change.
 local COMPACT_CARD_WIDTH = 200
 
 local function ResizeToContent(f)
     local maxW = 150
-    local scale = f:GetScale() or 1.0
-    -- Safety margin applied to every measured (non-compact) line: a
-    -- proportional factor plus a flat buffer, to absorb OUTLINE-font glyph
-    -- overflow and multi-color-segment measurement drift.
+    -- GetStringWidth() is already in the card's own (unscaled) units. This
+    -- used to divide by the card's scale as well, which undersized the card
+    -- whenever the Queue Timer size slider was above 100% (the cramped look,
+    -- and why the Compact style had been given a fixed width). The small
+    -- margin absorbs OUTLINE glyph overflow and color-code drift.
     local function Measure(...)
         local total = 0
-        for _, fs in ipairs({...}) do
-            total = total + fs:GetStringWidth()
+        for i = 1, select("#", ...) do
+            total = total + select(i, ...):GetStringWidth()
         end
-        return (total / scale) * 1.12 + 14
+        return total * 1.06 + 2
     end
 
+    -- Row content sits PAD_X in from both sides; the body is inset 3 px on
+    -- each side of the frame.
+    local INSETS = PAD_X * 2 + 6
     for _, row in ipairs(f.slotRows or {}) do
         if row:IsShown() then
             if row.compactLine:IsShown() then
-                maxW = math.max(maxW, COMPACT_CARD_WIDTH)
+                maxW = math.max(maxW, COMPACT_CARD_WIDTH, INSETS + Measure(row.compactLine))
             else
-                maxW = math.max(maxW, 10 + Measure(row.nameLabel))
-                maxW = math.max(maxW, 10 + Measure(row.avgLabel, row.avgValue) + 5)
-                maxW = math.max(maxW, 10 + Measure(row.inQLabel, row.inQValue) + 5)
+                maxW = math.max(maxW, INSETS + Measure(row.nameLabel))
+                maxW = math.max(maxW, INSETS + Measure(row.avgLabel, row.avgValue) + 5)
+                maxW = math.max(maxW, INSETS + Measure(row.inQLabel, row.inQValue) + 5)
                 if row.mmrLine:IsShown() then
-                    maxW = math.max(maxW, 10 + Measure(row.mmrLine))
+                    maxW = math.max(maxW, INSETS + Measure(row.mmrLine))
                 end
             end
         end
@@ -557,7 +563,7 @@ function PVPHUB.QueueTimer:CreateFrame()
         -- around, so nothing here should ever constrain its own width.
         local nameLabel = row:CreateFontString(nil, "OVERLAY")
         nameLabel:SetFont("Fonts\\FRIZQT__.TTF", 13, "OUTLINE")
-        nameLabel:SetPoint("TOPLEFT", row, "TOPLEFT", 10, -6)
+        nameLabel:SetPoint("TOPLEFT", row, "TOPLEFT", PAD_X, -PAD_Y)
         nameLabel:SetJustifyH("LEFT")
         nameLabel:SetWordWrap(false)
         nameLabel:SetNonSpaceWrap(false)
@@ -567,7 +573,7 @@ function PVPHUB.QueueTimer:CreateFrame()
         -- style; sits between the name and the avg-wait line when present.
         local mmrLine = row:CreateFontString(nil, "OVERLAY")
         mmrLine:SetFont("Fonts\\FRIZQT__.TTF", 11, "OUTLINE")
-        mmrLine:SetPoint("TOPLEFT", nameLabel, "BOTTOMLEFT", 0, -3)
+        mmrLine:SetPoint("TOPLEFT", nameLabel, "BOTTOMLEFT", 0, -LINE_GAP)
         mmrLine:SetJustifyH("LEFT")
         mmrLine:Hide()
         row.mmrLine = mmrLine
@@ -576,7 +582,7 @@ function PVPHUB.QueueTimer:CreateFrame()
         -- "Name (MMR)   Avg Xm   Q M:SS" — everything on one row.
         local compactLine = row:CreateFontString(nil, "OVERLAY")
         compactLine:SetFont("Fonts\\FRIZQT__.TTF", 12, "OUTLINE")
-        compactLine:SetPoint("TOPLEFT", row, "TOPLEFT", 10, -6)
+        compactLine:SetPoint("TOPLEFT", row, "TOPLEFT", PAD_X, -PAD_Y)
         compactLine:SetJustifyH("LEFT")
         compactLine:SetWordWrap(false)
         compactLine:SetNonSpaceWrap(false)
@@ -586,7 +592,7 @@ function PVPHUB.QueueTimer:CreateFrame()
         -- "Avg Wait:" sub-line
         local avgLabel = row:CreateFontString(nil, "OVERLAY")
         avgLabel:SetFont("Fonts\\FRIZQT__.TTF", 11, "OUTLINE")
-        avgLabel:SetPoint("TOPLEFT", nameLabel, "BOTTOMLEFT", 0, -3)
+        avgLabel:SetPoint("TOPLEFT", nameLabel, "BOTTOMLEFT", 0, -LINE_GAP)
         avgLabel:SetText("Avg Wait:")
         row.avgLabel = avgLabel
 
@@ -599,7 +605,7 @@ function PVPHUB.QueueTimer:CreateFrame()
         -- "In Queue:" sub-line
         local inQLabel = row:CreateFontString(nil, "OVERLAY")
         inQLabel:SetFont("Fonts\\FRIZQT__.TTF", 11, "OUTLINE")
-        inQLabel:SetPoint("TOPLEFT", avgLabel, "BOTTOMLEFT", 0, -2)
+        inQLabel:SetPoint("TOPLEFT", avgLabel, "BOTTOMLEFT", 0, -LINE_GAP)
         inQLabel:SetText("In Queue:")
         row.inQLabel = inQLabel
 
@@ -644,6 +650,31 @@ function PVPHUB.QueueTimer:CreateFrame()
         row:Hide()
         frame.slotRows[i] = row
     end
+
+    -- Gentle pulse while a queue has popped: the card glows green and a thin
+    -- edge brightens with it, fading in and out together. The glow does the
+    -- signalling; the edge is kept faint and flush with the card so it reads
+    -- as the card lighting up, not as an extra frame around it.
+    local readyGlow = CreateFrame("Frame", nil, frame, "BackdropTemplate")
+    readyGlow:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, 0)
+    readyGlow:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 0)
+    readyGlow:SetBackdrop({ edgeFile = "Interface\\Buttons\\WHITE8x8", edgeSize = 1 })
+    readyGlow:SetBackdropBorderColor(0.45, 1, 0.5, 0.55)
+    local readyWash = readyGlow:CreateTexture(nil, "ARTWORK")
+    readyWash:SetPoint("TOPLEFT", frame, "TOPLEFT", 3, -3)
+    readyWash:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -3, 3)
+    readyWash:SetColorTexture(0.3, 1, 0.35, 0.14)
+    readyWash:SetBlendMode("ADD")
+    readyGlow:Hide()
+    local readyPulse = readyGlow:CreateAnimationGroup()
+    readyPulse:SetLooping("BOUNCE")
+    local pulseAlpha = readyPulse:CreateAnimation("Alpha")
+    pulseAlpha:SetFromAlpha(0.15)
+    pulseAlpha:SetToAlpha(1)
+    pulseAlpha:SetDuration(0.8)
+    pulseAlpha:SetSmoothing("IN_OUT")
+    frame.readyGlow = readyGlow
+    frame.readyPulse = readyPulse
 
     frame:Hide()
     self.frame = frame
@@ -879,6 +910,26 @@ function PVPHUB.QueueTimer:Update()
         end
     end
 
+    -- Simulated popped queue from PreviewPop (slot index 0 is never a real
+    -- queue). It goes through the exact same rendering as a real pop.
+    if self._popPreviewUntil then
+        if GetTime() < self._popPreviewUntil then
+            table.insert(activeSlots, {
+                index           = 0,
+                status          = "confirm",
+                mapName         = "",
+                teamSize        = 2,
+                registeredMatch = true,
+                queueType       = "ARENA",
+                elapsed         = 83000,
+            })
+        else
+            self._popPreviewUntil = nil
+            self.confirmTimes[0] = nil
+            if not self._testMode then self._previewOverride = nil end
+        end
+    end
+
     if #activeSlots == 0 then
         if self._testMode then
             self:_ShowTestPreview()
@@ -946,7 +997,11 @@ function PVPHUB.QueueTimer:Update()
                     PlayMatchReadySound()
                 end
                 local remaining = GetAcceptSecondsLeft(slot.index, self.confirmTimes[slot.index])
-                row.compactLine:SetText(string.format("|cffffd100%s|r   |cff40ff40READY|r   Accept %ds", displayName, remaining))
+                local acceptText = string.format("Accept %ds", remaining)
+                if remaining <= ACCEPT_URGENT_SECONDS then
+                    acceptText = "|cffff4d4d" .. acceptText .. "|r"
+                end
+                row.compactLine:SetText(string.format("|cffffd100%s|r   |cff40ff40READY|r   %s", displayName, acceptText))
             else
                 self.confirmTimes[slot.index] = nil
                 local estMs  = GetBattlefieldEstimatedWaitTime(slot.index) or 0
@@ -972,16 +1027,16 @@ function PVPHUB.QueueTimer:Update()
                 if mmrText then
                     row.mmrLine:SetText(mmrText)
                     row.mmrLine:Show()
-                    row.avgLabel:SetPoint("TOPLEFT", row.mmrLine, "BOTTOMLEFT", 0, -3)
+                    row.avgLabel:SetPoint("TOPLEFT", row.mmrLine, "BOTTOMLEFT", 0, -LINE_GAP)
                 else
                     row.mmrLine:Hide()
-                    row.avgLabel:SetPoint("TOPLEFT", row.nameLabel, "BOTTOMLEFT", 0, -3)
+                    row.avgLabel:SetPoint("TOPLEFT", row.nameLabel, "BOTTOMLEFT", 0, -LINE_GAP)
                 end
             else
                 row.mmrLine:Hide()
-                row.avgLabel:SetPoint("TOPLEFT", row.nameLabel, "BOTTOMLEFT", 0, -3)
+                row.avgLabel:SetPoint("TOPLEFT", row.nameLabel, "BOTTOMLEFT", 0, -LINE_GAP)
                 local mmr = GetStoredMMR(displayName)
-                local mmrSuffix = mmr and string.format(" |cffaaaaaa(%d MMR)|r", mmr) or ""
+                local mmrSuffix = mmr and string.format("  |cffaaaaaa(%d MMR)|r", mmr) or ""
                 row.nameLabel:SetText(displayName .. mmrSuffix)
             end
 
@@ -992,6 +1047,7 @@ function PVPHUB.QueueTimer:Update()
                     PlayMatchReadySound()
                 end
                 local remaining = GetAcceptSecondsLeft(slot.index, self.confirmTimes[slot.index])
+                row.acceptSecondsLeft = remaining
                 if style == "simple" then
                     row.avgLabel:SetText("Accept:")
                     row.avgValue:SetText(remaining .. " sec")
@@ -1005,6 +1061,7 @@ function PVPHUB.QueueTimer:Update()
                 end
             else
                 self.confirmTimes[slot.index] = nil
+                row.acceptSecondsLeft = nil
                 local estMs  = GetBattlefieldEstimatedWaitTime(slot.index) or 0
                 if style == "simple" then
                     row.avgLabel:SetText("Avg:")
@@ -1021,6 +1078,12 @@ function PVPHUB.QueueTimer:Update()
         end
 
         self:_ApplyRowColors(row, isReady)
+        -- Last seconds to accept: turn the countdown red (Compact style
+        -- colors it inline above).
+        if isReady and style ~= "compact" and row.acceptSecondsLeft
+           and row.acceptSecondsLeft <= ACCEPT_URGENT_SECONDS then
+            row.avgValue:SetTextColor(1, 0.3, 0.3, 1)
+        end
         -- Show divider only between rows, not after the last active one
         row.divider:SetShown(i < #activeSlots)
         row:Show()
@@ -1054,6 +1117,7 @@ function PVPHUB.QueueTimer:Update()
 
         self:ApplyOpacity()
         ResizeToContent(self.frame)
+        self:SetReadyPulse(anyReady)
 
         -- When any slot is READY, paint the entire frame chrome green,
         -- scaled by the user's opacity setting. At 0% opacity only green
@@ -1089,8 +1153,22 @@ end
 
 function PVPHUB.QueueTimer:Hide()
     self:StopTick()
+    self:SetReadyPulse(false)
     if self.frame then
         self.frame:Hide()
+    end
+end
+
+-- Starts or stops the pulsing outline shown while a queue has popped.
+function PVPHUB.QueueTimer:SetReadyPulse(on)
+    local f = self.frame
+    if not f or not f.readyPulse then return end
+    if on then
+        f.readyGlow:Show()
+        if not f.readyPulse:IsPlaying() then f.readyPulse:Play() end
+    else
+        f.readyPulse:Stop()
+        f.readyGlow:Hide()
     end
 end
 
@@ -1102,6 +1180,7 @@ end
 -- without needing to be in an actual PvP queue.
 function PVPHUB.QueueTimer:_ShowTestPreview()
     if not self.frame then self:CreateFrame() end
+    self:SetReadyPulse(false) -- e.g. a pop preview just ended
 
     self.frame.header:Hide()
     self.frame.separator:Hide()
@@ -1139,14 +1218,14 @@ function PVPHUB.QueueTimer:_ShowTestPreview()
                 row.nameLabel:SetText("2v2")
                 row.mmrLine:SetText(string.format("MMR: 1850 %s 1875 |cff40ff40(+25)|r", ARROW_MARKUP))
                 row.mmrLine:Show()
-                row.avgLabel:SetPoint("TOPLEFT", row.mmrLine, "BOTTOMLEFT", 0, -3)
+                row.avgLabel:SetPoint("TOPLEFT", row.mmrLine, "BOTTOMLEFT", 0, -LINE_GAP)
                 row.avgLabel:SetText("Avg:")
                 row.avgValue:SetText("3 min 12 sec")
                 row.inQLabel:SetText("Q:")
                 row.inQValue:SetText("1 min 23 sec")
             else
                 row.mmrLine:Hide()
-                row.avgLabel:SetPoint("TOPLEFT", row.nameLabel, "BOTTOMLEFT", 0, -3)
+                row.avgLabel:SetPoint("TOPLEFT", row.nameLabel, "BOTTOMLEFT", 0, -LINE_GAP)
                 row.nameLabel:SetText("2v2  |cffaaaaaa(1850 MMR)|r")
                 row.avgLabel:SetText("Avg Wait:")
                 row.avgValue:SetText("3 min")
@@ -1181,6 +1260,7 @@ end
 -- Update(), so anything written there is invisible).
 function PVPHUB.QueueTimer:_ShowPlaceholder()
     if not self.frame then self:CreateFrame() end
+    self:SetReadyPulse(false)
     local f = self.frame
 
     f.header:Hide()
@@ -1222,6 +1302,24 @@ end
 -- Play the configured match-ready sound at the current volume setting.
 function PVPHUB.QueueTimer:PlayReadySound()
     PlayMatchReadySound()
+end
+
+-- Shows a popped queue for a few seconds (outline pulse, countdown turning
+-- red) so the READY look can be checked without waiting for a real pop.
+local POP_PREVIEW_SECONDS = 15
+function PVPHUB.QueueTimer:PreviewPop()
+    if not self.frame then self:CreateFrame() end
+    self.confirmTimes = self.confirmTimes or {}
+    self._popPreviewUntil = GetTime() + POP_PREVIEW_SECONDS
+    -- No real queue to ask for the time left, so the fallback countdown is
+    -- started where it shows POP_PREVIEW_SECONDS. Setting it up front also
+    -- skips the ready sound, which has its own "Play Sound" button.
+    self.confirmTimes[0] = GetTime() - (FALLBACK_ACCEPT_SECONDS - POP_PREVIEW_SECONDS)
+    if PVPHUB_SETTINGS and PVPHUB_SETTINGS.queueTimerEnabled == false then
+        self._previewOverride = true
+    end
+    self:StartTick()
+    self:Update()
 end
 
 -- Toggle preview mode on/off. Returns the new state (true = preview active).
@@ -1416,9 +1514,15 @@ end)
 -- lives in the header — and Update() hides the header unconditionally, so that
 -- text was never visible. A real placeholder row is used instead.
 SLASH_PVPHUBQUEUE1 = "/pvpqueue"
-SlashCmdList["PVPHUBQUEUE"] = function()
+SlashCmdList["PVPHUBQUEUE"] = function(msg)
     local QT = PVPHUB.QueueTimer
     if not QT.frame then QT:CreateFrame() end
+
+    -- "/pvpqueue pop": show what a popped queue looks like
+    if msg and strtrim(msg):lower() == "pop" then
+        QT:PreviewPop()
+        return
+    end
 
     if PVPHUB_SETTINGS.queueTimerEnabled == false then
         PVPHUB_SETTINGS.queueTimerEnabled = true
