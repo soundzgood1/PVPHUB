@@ -1,3 +1,19 @@
+## v6.7.0 - Smoother UI, Rating Changes & Stability
+- NEW: Click a column header to sort by it, click again to reverse the order. The arrow shows the direction, and characters with equal values keep a stable alphabetical order
+- NEW: After a match the changed rating shows the difference (e.g. +18) for a few minutes and blinks once, in the main window and in Streamer Mode
+- NEW: A popped queue makes the queue timer glow green and the accept countdown turns red for the last 10 seconds. Right-click "Show Preview" or type /pvpqueue pop to see it
+- NEW: The accept countdown uses the game's real time left instead of a fixed 28 seconds
+- Changed: Dragging columns and character groups is smooth: the column or group follows the cursor from where you grabbed it, a marker shows where it will land, and dragging a group near the edge of the list scrolls it
+- Changed: Smooth mouse-wheel scrolling everywhere, and a short fade when switching tabs
+- Changed: All dropdowns and right-click menus use Blizzard's current menu style
+- Changed: The queue timer has more room around its text and no longer comes out too narrow when its size is above 100%
+- Changed: The minimap button's libraries now ship with PVPHUB, so the button works without another addon that happens to include them
+- Changed: Saved data is about 20% smaller (one corruption backup instead of two; the dated backups under Manage Backups are unchanged)
+- Fixed: Streamer Mode built a new set of rows on every update and never released the old ones, so memory grew during long sessions. Windows also no longer rebuild several times per rating or honor update, or while hidden
+- Fixed: Editing a character's note could show (and then save) the previous character's note, and the dialog could error
+- Fixed: Opening a PVPHUB dropdown recolored every other addon's and Blizzard's dropdowns for the rest of the session
+- Fixed: /pvphub resetseason now recalculates right away, and Streamer Mode refreshes after a match
+
 ## v6.6.8 - Patch 12.1.5 Compatibility
 - Fixed: PVPHUB is updated for World of Warcraft patch 12.1.5. Since the October 14 patch the game flagged it as out of date and didn't load it
 - NEW: The main window now shows the installed PVPHUB version next to "by soundz" under the title
