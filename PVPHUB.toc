@@ -15,6 +15,17 @@
 ## X-WoWI-ID: 
 ## X-Wago-ID: 
 
+# Libraries for the minimap button, added to the release zip by the packager
+# (.pkgmeta externals). A plain git checkout has no Libs folder and the client
+# warns about every missing file, so the lines stay commented out here; the
+# packager strips the "# " inside this non-debug block when it builds a release.
+#@non-debug@
+# Libs\LibStub\LibStub.lua
+# Libs\CallbackHandler-1.0\CallbackHandler-1.0.xml
+# Libs\LibDataBroker-1.1\LibDataBroker-1.1.lua
+# Libs\LibDBIcon-1.0\LibDBIcon-1.0.lua
+#@end-non-debug@
+
 # Compatibility wrappers must load before everything else — every other file
 # aliases PVPHUB.Compat at its own load time.
 modules\compat.lua

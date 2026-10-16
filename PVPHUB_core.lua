@@ -99,7 +99,20 @@ local function RegisterTrackedFont(fontString, size, flags, scope)
             PVPHUB._trackedFontScopes[scope] = bucket
         end
     end
-    table.insert(bucket, { fs = fontString, size = size, flags = flags })
+    -- Registering the same FontString again (e.g. the main window's footer
+    -- note, re-registered on every UpdateContent) updates its entry instead of
+    -- appending a duplicate, so the bucket can't grow with every refresh.
+    -- A cleared scope gets a fresh bucket, which makes the old entry stale and
+    -- lets the FontString register into the new one.
+    local entry = fontString._pvphubTrackEntry
+    if entry and fontString._pvphubTrackBucket == bucket then
+        entry.size, entry.flags = size, flags
+    else
+        entry = { fs = fontString, size = size, flags = flags }
+        fontString._pvphubTrackEntry = entry
+        fontString._pvphubTrackBucket = bucket
+        table.insert(bucket, entry)
+    end
     SafeSetFont(fontString, PVPHUB_ResolveFontPath(), size, flags)
     return fontString
 end
@@ -365,64 +378,6 @@ end
 -- Debug mode flag (can be enabled by users for troubleshooting)
 local PVPHUB_DEBUG = false
 
--- Enhance GameTooltip background opacity (safer version without global hooks)
-local function EnhanceTooltipOpacity()
-    if GameTooltip then
-        -- Use pcall to prevent any errors from affecting other systems
-        pcall(function()
-            -- Modern WoW uses NineSlice for tooltip backgrounds
-            if GameTooltip.NineSlice then
-                -- Set the background to full opacity
-                if GameTooltip.NineSlice.Center then
-                    GameTooltip.NineSlice.Center:SetAlpha(1.0)
-                end
-                -- Set all border pieces to full opacity
-                local borderPieces = {"TopLeftCorner", "TopRightCorner", "BottomLeftCorner", "BottomRightCorner", 
-                                    "TopEdge", "BottomEdge", "LeftEdge", "RightEdge"}
-                for _, piece in pairs(borderPieces) do
-                    if GameTooltip.NineSlice[piece] then
-                        GameTooltip.NineSlice[piece]:SetAlpha(1.0)
-                    end
-                end
-                GameTooltip.NineSlice:SetAlpha(1.0)
-            end
-            
-            -- Try legacy backdrop method for older systems
-            if GameTooltip.SetBackdropColor then
-                GameTooltip:SetBackdropColor(0, 0, 0, 1.0)
-            end
-            if GameTooltip.SetBackdropBorderColor then
-                GameTooltip:SetBackdropBorderColor(1, 1, 1, 1.0)
-            end
-            
-            -- Set overall tooltip alpha
-            GameTooltip:SetAlpha(1.0)
-        end)
-    end
-end
-
--- PVPHUB tooltip ownership flag — set true before GameTooltip:Show() in PVPHUB
--- handlers, cleared in OnLeave scripts. Used by EnhanceTooltipOpacity so it only
--- ever touches tooltips that PVPHUB explicitly owns.
-PVPHUB._ownsTooltip = false
-
--- Safe tooltip enhancement function that only applies to PVPHUB-owned tooltips
-local function SafeEnhanceTooltip()
-    if PVPHUB._ownsTooltip and GameTooltip:IsShown() then
-        EnhanceTooltipOpacity()
-    end
-end
-
--- Safe wrapper for showing PVPHUB tooltips with opacity enhancement
-local function ShowPVPHUBTooltip()
-    PVPHUB._ownsTooltip = true
-    GameTooltip:Show()
-    -- Apply our enhancement after a small delay to let the frame draw
-    C_Timer.After(0.01, function()
-        SafeEnhanceTooltip()
-    end)
-end
-
 -- Helper function for debug/warning messages
 local function DebugPrint(message, forceShow)
     if PVPHUB_DEBUG or forceShow then
@@ -461,13 +416,111 @@ local function FormatTimestamp(timestamp)
     end
 end
 
--- Refreshes both main and compact windows if they exist and are currently visible
-local function PVPHUB_RefreshUI()
-    if PVPHUB.window and PVPHUB.window:IsShown() and PVPHUB.window.UpdateContent then
-        PVPHUB.window:UpdateContent()
+-- Cheap, order-independent fingerprint of everything the character windows
+-- display. Data-driven refreshes compare it with the fingerprint each window
+-- was last built from and skip the rebuild when nothing changed. Both windows
+-- rebuild their widgets on every refresh, and most refresh triggers (bag,
+-- currency and money events, the follow-up rating pass half a second later)
+-- arrive with identical data — skipping those is what keeps a long session
+-- from piling up widgets.
+--
+-- Fields that change on every write without changing what is shown
+-- (timestamps) are left out. Arrays such as match history only contribute
+-- their length and newest entry: an appended match changes both.
+--
+-- NOTE: this file is at Lua's limit of 200 active local variables in the main
+-- chunk. Helpers here live inside a do-block so only PVPHUB_RefreshUI (which
+-- existed before) stays a file-level local; adding any new file-level local
+-- elsewhere will stop the whole addon from loading.
+local PVPHUB_RefreshUI
+do
+    local SIGNATURE_SKIP_KEYS = {
+        lastSeen = true, lastUpdate = true, lastUpdated = true,
+        timestamp = true, preMatchSnap = true,
+    }
+
+    local function KeyWeight(k)
+        if type(k) == "number" then return k % 97 + 1 end
+        k = tostring(k)
+        return #k * 7 + (string.byte(k, 1) or 0) + (string.byte(k, -1) or 0)
     end
-    if PVPHUB.compactWindow and PVPHUB.compactWindow:IsShown() and PVPHUB.UpdateCompactWindow then
-        PVPHUB:UpdateCompactWindow()
+
+    local function SignatureOf(v, depth)
+        local t = type(v)
+        if t == "number" then return v end
+        if t == "string" then return #v * 31 + (string.byte(v, 1) or 0) end
+        if t == "boolean" then return v and 7 or 3 end
+        if t ~= "table" or depth > 4 then return 0 end
+        local n = #v
+        if n > 0 then
+            return n * 1009 + SignatureOf(v[n], depth + 1)
+        end
+        local sum = 0
+        for k, sv in pairs(v) do
+            if not SIGNATURE_SKIP_KEYS[k] then
+                sum = sum + SignatureOf(sv, depth + 1) * KeyWeight(k)
+            end
+        end
+        return sum
+    end
+
+    local function ComputeDisplaySignature()
+        local ok, sig = pcall(function()
+            local seasonStart = (PVPHUB_SETTINGS and PVPHUB_SETTINGS.seasonStartTimestamp) or 0
+            local sum, chars = 0, 0
+            if type(PVPHUB_DB) == "table" then
+                for charKey, data in pairs(PVPHUB_DB) do
+                    if type(data) == "table" then
+                        chars = chars + 1
+                        sum = sum + SignatureOf(data, 1) * KeyWeight(charKey)
+                        -- lastSeen itself is skipped above; only crossing the
+                        -- season boundary changes what is shown (the stale tag).
+                        if (data.lastSeen or 0) >= seasonStart then
+                            sum = sum + KeyWeight(charKey)
+                        end
+                    end
+                end
+            end
+            if PVPHUB_SETTINGS then
+                sum = sum + (PVPHUB_SETTINGS.warbandGold or 0) * 3
+                          + seasonStart * 5
+                          + (PVPHUB_SETTINGS.lastKnownSeasonID or 0) * 11
+            end
+            local season = (C_PvP and C_PvP.GetUIDisplaySeason and C_PvP.GetUIDisplaySeason()) or 0
+            return sum + chars * 104729 + season * 13
+        end)
+        -- On failure return a value that never matches, so the window rebuilds.
+        if ok then return sig end
+        return GetTime()
+    end
+    PVPHUB._ComputeDisplaySignature = ComputeDisplaySignature
+
+    local function RefreshVisibleWindowsNow()
+        local sig = ComputeDisplaySignature()
+        if PVPHUB.window and PVPHUB.window:IsShown() and PVPHUB.window.UpdateContent
+           and sig ~= PVPHUB._mainRenderSig then
+            PVPHUB.window:UpdateContent()
+        end
+        if PVPHUB.compactWindow and PVPHUB.compactWindow:IsShown() and PVPHUB.UpdateCompactWindow
+           and sig ~= PVPHUB._compactRenderSig then
+            PVPHUB:UpdateCompactWindow()
+        end
+    end
+
+    -- Refreshes both main and compact windows if they exist and are currently
+    -- visible. Requests are coalesced: a burst of events (an honor gain fires a
+    -- chat event, a currency event and a full data update within a second)
+    -- produces one refresh, and hidden windows are left alone — they rebuild
+    -- when they are next shown.
+    local REFRESH_DELAY = 0.25
+    local refreshQueued = false
+    PVPHUB_RefreshUI = function()
+        if refreshQueued then return end
+        refreshQueued = true
+        C_Timer.After(REFRESH_DELAY, function()
+            refreshQueued = false
+            RefreshVisibleWindowsNow()
+        end)
     end
 end
 
@@ -688,8 +741,10 @@ local UI_CONSTANTS = {
     },
     COLORS = {} -- Will be set by GetCurrentTheme()
 }
--- Expose to the global environment so themes.lua can read UI_CONSTANTS.COLORS
-_G.UI_CONSTANTS = UI_CONSTANTS
+-- Shared with the modules through the addon table. This used to be a global
+-- named UI_CONSTANTS, a name generic enough for any other addon to overwrite
+-- (or be overwritten by).
+PVPHUB._UI_CONSTANTS = UI_CONSTANTS
 
 -- Function to calculate dynamic row height based on font size
 local function GetDynamicRowHeight()
@@ -989,21 +1044,17 @@ local function CreateDataBackup(force)
 
     if charCount > 0 then
         PVPHUB_DB_BACKUP = PVPHUB_DB_BACKUP or {}
-        -- Two slots, not three.
+        -- One slot.
         --
-        -- This ring exists purely so ValidateAndRestoreData can rebuild the DB
+        -- This copy exists purely so ValidateAndRestoreData can rebuild the DB
         -- if PVPHUB_DB itself comes back corrupted — and that function only
-        -- ever reads slot [1]. Slot [3] was written on every rotation and read
-        -- by nothing, costing a full extra copy of the database in the saved
-        -- variables file (~80 KB here, more on a full roster) for no benefit.
-        -- Slot [2] is kept as the one spare generation in case [1] is itself
-        -- the corrupted write.
-        --
-        -- Recovering from DELETED (rather than corrupted) data is not this
-        -- ring's job — it rotates completely within an hour of play. That is
-        -- what PVPHUB_DB_ARCHIVE is for.
+        -- ever reads slot [1]. Slots [2] and [3] each held another full copy
+        -- of the database in the saved variables file (about 230 KB apiece
+        -- on a large roster, loaded and kept in memory every session).
+        -- PVPHUB_DB_ARCHIVE already holds up to three complete dated
+        -- snapshots, which covers both a bad slot [1] and deleted data.
         PVPHUB_DB_BACKUP[3] = nil
-        PVPHUB_DB_BACKUP[2] = PVPHUB_DB_BACKUP[1]
+        PVPHUB_DB_BACKUP[2] = nil
         PVPHUB_DB_BACKUP[1] = {}
 
         -- Deep copy current data (unbounded depth — see DeepCopyTable)
@@ -2677,33 +2728,6 @@ hooksecurefunc("ToggleDropDownMenu", function(level)
     end)
 end)
 
--- Enhanced font setup for better Unicode support
-local function SetupUnicodeFriendlyFont(fontString, size, flags)
-    if not fontString then return end
-
-    size = size or 12
-    flags = flags or "OUTLINE"
-
-    -- Try to use the best available font for Unicode support
-    -- FRIZQT__.TTF generally has good Unicode support in WoW
-    local fontPath = "Fonts\\FRIZQT__.TTF"
-    
-    -- For some locales, there might be better font options
-    local locale = GetLocale()
-    if locale == "zhCN" or locale == "zhTW" then
-        -- Chinese locales might prefer different fonts, but FRIZQT__ usually works well
-        fontPath = "Fonts\\FRIZQT__.TTF"
-    elseif locale == "koKR" then
-        -- Korean locale
-        fontPath = "Fonts\\FRIZQT__.TTF"
-    elseif locale == "ruRU" then
-        -- Russian locale
-        fontPath = "Fonts\\FRIZQT__.TTF"
-    end
-    
-    fontString:SetFont(fontPath, size, flags)
-end
-
 -- Drop-in replacement for Blizzard's UIFrameFadeIn/UIFrameFadeOut (same
 -- frame/duration/fromAlpha/toAlpha signature). Blizzard's version registers
 -- the frame into a shared fade-processing table driven by one global
@@ -2997,95 +3021,6 @@ function PVPHUB_RecalcCardPositions(parent, allSections, startY)
     return yPos
 end
 
--- Function to apply modern TWW button styling with theme integration
-local function ApplyModernButtonStyling(button, themeColors, buttonType)
-    if not button then return end
-    
-    local colors = themeColors or UI_CONSTANTS.COLORS
-    -- Preserve existing buttonType if not passed explicitly
-    buttonType = buttonType or (button.modernStyling and button.modernStyling.buttonType) or "primary"
-    
-    -- Theme-aware color scheme (always recalculated from current theme)
-    local bgColor, hoverColor, clickColor, borderColor
-    if buttonType == "primary" then
-        bgColor = {colors.WINDOW_BG[1] * 1.2, colors.WINDOW_BG[2] * 1.2, colors.WINDOW_BG[3] * 1.2, 0.9}
-        hoverColor = {colors.HEADER_COLOR[1] * 0.5, colors.HEADER_COLOR[2] * 0.5, colors.HEADER_COLOR[3] * 0.5, 0.3}
-        clickColor = {colors.HEADER_COLOR[1] * 0.6, colors.HEADER_COLOR[2] * 0.6, colors.HEADER_COLOR[3] * 0.6, 1}
-        borderColor = {colors.WINDOW_BORDER[1] * 1.3, colors.WINDOW_BORDER[2] * 1.3, colors.WINDOW_BORDER[3] * 1.3, 1}
-    elseif buttonType == "secondary" then
-        bgColor = {colors.WINDOW_BG[1] * 0.9, colors.WINDOW_BG[2] * 0.9, colors.WINDOW_BG[3] * 0.9, 0.8}
-        hoverColor = {colors.SUMMARY_TEXT[1] * 0.9, colors.SUMMARY_TEXT[2] * 0.9, colors.SUMMARY_TEXT[3] * 0.9, 0.9}
-        clickColor = {colors.SUMMARY_TEXT[1] * 0.7, colors.SUMMARY_TEXT[2] * 0.7, colors.SUMMARY_TEXT[3] * 0.7, 1}
-        borderColor = {colors.WINDOW_BORDER[1], colors.WINDOW_BORDER[2], colors.WINDOW_BORDER[3], 0.8}
-    elseif buttonType == "accent" then
-        bgColor = {colors.SCALE_BUTTON_BG[1], colors.SCALE_BUTTON_BG[2], colors.SCALE_BUTTON_BG[3], 0.9}
-        hoverColor = {colors.SCALE_BUTTON_BG[1] * 1.3, colors.SCALE_BUTTON_BG[2] * 1.3, colors.SCALE_BUTTON_BG[3] * 1.3, 1}
-        clickColor = {colors.SCALE_BUTTON_BG[1] * 0.8, colors.SCALE_BUTTON_BG[2] * 0.8, colors.SCALE_BUTTON_BG[3] * 0.8, 1}
-        borderColor = {colors.WINDOW_GLOW[1], colors.WINDOW_GLOW[2], colors.WINDOW_GLOW[3], 1}
-    end
-
-    -- First-time setup: create textures and remove WoW template chrome
-    if not button.bg then
-        button:SetNormalTexture("")
-        button:SetHighlightTexture("")
-        button:SetPushedTexture("")
-        button:SetDisabledTexture("")
-
-        -- Background
-        local bg = button:CreateTexture(nil, "BACKGROUND")
-        bg:SetAllPoints()
-        bg:SetTexture("Interface\\Buttons\\WHITE8x8")
-        button.bg = bg
-
-        -- Border
-        local border = button:CreateTexture(nil, "BORDER")
-        border:SetTexture("Interface\\Buttons\\WHITE8x8")
-        border:SetPoint("TOPLEFT", -1, 1)
-        border:SetPoint("BOTTOMRIGHT", 1, -1)
-        button.border = border
-
-        -- Hover (ADD blend — colour updates just change the tint)
-        local hover = button:CreateTexture(nil, "HIGHLIGHT")
-        hover:SetAllPoints()
-        hover:SetTexture("Interface\\Buttons\\WHITE8x8")
-        hover:SetBlendMode("ADD")
-        button:SetHighlightTexture(hover)
-        button.hoverTex = hover
-
-        -- Click / pushed
-        local pushed = button:CreateTexture(nil, "ARTWORK")
-        pushed:SetAllPoints()
-        pushed:SetTexture("Interface\\Buttons\\WHITE8x8")
-        button:SetPushedTexture(pushed)
-        button.pushedTex = pushed
-    end
-
-    -- Always update vertex colors (works both on first call and theme refresh)
-    button.bg:SetVertexColor(unpack(bgColor))
-    button.border:SetVertexColor(unpack(borderColor))
-    button.hoverTex:SetVertexColor(unpack(hoverColor))
-    button.pushedTex:SetVertexColor(unpack(clickColor))
-
-    -- Font (always refresh so text color follows theme)
-    local fontString = button:GetFontString()
-    if fontString then
-        RegisterTrackedFont(fontString, 11, "OUTLINE")
-        fontString:SetTextColor(unpack(colors.TITLE_COLOR))
-        fontString:SetShadowOffset(1, -1)
-        fontString:SetShadowColor(0, 0, 0, 0.8)
-    end
-    
-    -- Store buttonType for theme-refresh calls that don't pass it explicitly
-    button.modernStyling = {
-        bgColor = bgColor,
-        hoverColor = hoverColor,
-        clickColor = clickColor,
-        borderColor = borderColor,
-        buttonType = buttonType
-    }
-
-end
-
 -- Function to apply modern TWW checkbox styling with theme integration
 local function ApplyModernCheckboxStyling(checkbox, themeColors)
     if not checkbox then return end
@@ -3195,9 +3130,6 @@ local function UpdateModernButtonAndCheckboxStyling()
         if cb.highlightTex then cb.highlightTex:SetVertexColor(1, 1, 1, 1) end
     end
 
-    -- Refresh main window action buttons and header row background
-    if PVPHUB.window then
-    end
 end
 
 local function RefreshAllWindows()
@@ -3364,14 +3296,6 @@ local function CreateSafeCharacterDisplayWithLength(charKey, isCompactMode, maxD
     
     -- Return character name with (possibly truncated) server name
     return realm and string.format("%s-%s", name, realm) or name
-end
-
--- Enhanced function to create safe character display names with better Unicode support
-local function CreateSafeCharacterDisplay(charKey, isCompactMode)
-    -- For compact mode, use more aggressive truncation to prevent line wrapping
-    -- For main window, also use reasonable truncation to prevent overlapping
-    local maxDisplayLength = isCompactMode and 12 or 18  -- Reduced from 25 to 18 for main window
-    return CreateSafeCharacterDisplayWithLength(charKey, isCompactMode, maxDisplayLength)
 end
 
 -- Create custom character tooltip frame
@@ -3961,15 +3885,20 @@ local function UpdateCurrencyData()
                     seasonData.weeklyCapAmount = info.maxQuantity
                 end
                 
-                -- Debug: Show all the values we're working with
-                DebugPrint("=== " .. currencyType .. " Weekly Tracking Debug ===")
-                DebugPrint("  Current Amount: " .. currentAmount)
-                DebugPrint("  Previous Amount: " .. previousAmount) 
-                DebugPrint("  Weekly Earned (Blizzard): " .. weeklyEarned)
-                DebugPrint("  Total Earned (Blizzard): " .. (info.totalEarned or 0))
-                DebugPrint("  Season Maximum: " .. (seasonData.seasonMaximum or 0))
-                DebugPrint("  Weekly Cap: " .. (info.maxQuantity or 0))
-                DebugPrint("==============================================")
+                -- Debug: Show all the values we're working with. Guarded here
+                -- rather than relying on DebugPrint's own check, since this
+                -- runs on every data update and the strings would otherwise be
+                -- built (and thrown away) each time.
+                if PVPHUB_DEBUG then
+                    DebugPrint("=== " .. currencyType .. " Weekly Tracking Debug ===")
+                    DebugPrint("  Current Amount: " .. currentAmount)
+                    DebugPrint("  Previous Amount: " .. previousAmount)
+                    DebugPrint("  Weekly Earned (Blizzard): " .. weeklyEarned)
+                    DebugPrint("  Total Earned (Blizzard): " .. (info.totalEarned or 0))
+                    DebugPrint("  Season Maximum: " .. (seasonData.seasonMaximum or 0))
+                    DebugPrint("  Weekly Cap: " .. (info.maxQuantity or 0))
+                    DebugPrint("==============================================")
+                end
                 
                 -- Check if weekly cap reached
                 if info.maxQuantity and info.maxQuantity > 0 then
@@ -4024,6 +3953,8 @@ local function UpdateCurrencyData()
 
     PVPHUB.RefreshUI()
 end
+-- Used by /pvphub resetseason to recalculate right away
+PVPHUB.UpdateCurrencyData = UpdateCurrencyData
 
 -- Helper function to store/retrieve last known MMR for each spec
 local function UpdateSpecMMRStorage(charKey, pvphubKey, specID, mmrValue)
@@ -4042,49 +3973,11 @@ local function UpdateSpecMMRStorage(charKey, pvphubKey, specID, mmrValue)
     }
 end
 
-local function GetLastKnownMMRForSpec(charKey, pvphubKey, specID)
-    if not charKey or not pvphubKey or not specID then return nil end
-    if not PVPHUB_DB[charKey] or not PVPHUB_DB[charKey].lastKnownMMR then return nil end
-    if not PVPHUB_DB[charKey].lastKnownMMR[pvphubKey] then return nil end
-    
-    return PVPHUB_DB[charKey].lastKnownMMR[pvphubKey][specID]
-end
-
 local function GetAllSpecMMRs(charKey, pvphubKey)
     if not charKey or not pvphubKey then return {} end
     if not PVPHUB_DB[charKey] or not PVPHUB_DB[charKey].lastKnownMMR then return {} end
     
     return PVPHUB_DB[charKey].lastKnownMMR[pvphubKey] or {}
-end
-
--- Helper function to get the latest MMR change for a bracket
-local function GetLatestMMRChange(charKey, bracketKey, currentSpecID)
-    if not PVPHUB_DB[charKey] or not PVPHUB_DB[charKey].mmrHistory or not PVPHUB_DB[charKey].mmrHistory[bracketKey] then
-        return nil, nil, nil
-    end
-    
-    local history = PVPHUB_DB[charKey].mmrHistory[bracketKey]
-    if #history == 0 then
-        return nil, nil, nil
-    end
-    
-    -- For shuffle/blitz, find the most recent match for the current spec
-    if bracketKey == "ratingShuffle" or bracketKey == "ratingBlitz" then
-        for i = #history, 1, -1 do
-            local match = history[i]
-            if match.specID == currentSpecID and match.preMatchMMR and match.postMatchMMR then
-                return match.preMatchMMR, match.postMatchMMR, match.postMatchMMR - match.preMatchMMR
-            end
-        end
-    else
-        -- For arena, just get the most recent match
-        local match = history[#history]
-        if match and match.preMatchMMR and match.postMatchMMR then
-            return match.preMatchMMR, match.postMatchMMR, match.postMatchMMR - match.preMatchMMR
-        end
-    end
-    
-    return nil, nil, nil
 end
 
 -- MMR Tracking functionality
@@ -4591,12 +4484,10 @@ local function TrackMMRChange(retryCount, eventWinner)
         end
     end
     
-    -- Force refresh compact mode display if it's visible
-    if PVPHUB_CompactModeFrame and PVPHUB_CompactModeFrame:IsShown() then
-        C_Timer.After(0.1, function()
-            RefreshCompactModeContent()
-        end)
-    end
+    -- Show the new match in whichever windows are open. (This used to check
+    -- PVPHUB_CompactModeFrame / RefreshCompactModeContent, neither of which
+    -- exists, so the compact window was never refreshed from here.)
+    PVPHUB_RefreshUI()
 end
 
 -- Helper function to get win/loss statistics for a bracket from Blizzard API
@@ -5412,9 +5303,6 @@ local _pvpTipSeps = {}    -- pooled separator textures (kept for compat, no long
 local _pvpTipSepN = 0
 local _pvpTipBands = {}   -- pooled background band quads (BORDER layer)
 local _pvpTipBandN = 0
-local _pvpTipSecStartY = 0  -- Y cursor recorded at PvPTipSectionStart()
-local _pvpTipSections = {}  -- up to 3 section band textures (BORDER layer, non-pooled)
-local _pvpTipSecN = 0
 
 -- Layout constants
 local PT_W   = 350   -- total frame width
@@ -5563,35 +5451,6 @@ local function PvPTipUnderline(r, g, b, a)
     _pvpTipY = _pvpTipY + 3
 end
 
--- Section background helpers.
--- Call PvPTipSectionStart() before any content row in the section.
--- Call PvPTipSectionEnd(r,g,b,a) after the last row.
--- Uses BORDER layer (above backdrop) so the tint is actually visible.
--- Section textures are NOT pooled because they need BORDER layer, which
--- cannot be changed after creation, so we keep a small fixed list.
-local function PvPTipSectionStart()
-    _pvpTipSecStartY = math.max(0, _pvpTipY - 2)
-end
-
-local function PvPTipSectionEnd(r, g, b, a)
-    local h = (_pvpTipY + 2) - _pvpTipSecStartY
-    if h <= 0 then return end
-    local f = EnsurePvPTip()
-    _pvpTipSecN = _pvpTipSecN + 1
-    local tex = _pvpTipSections[_pvpTipSecN]
-    if not tex then
-        tex = f:CreateTexture(nil, "BORDER")
-        tex:SetTexture("Interface\\Buttons\\WHITE8x8")
-        _pvpTipSections[_pvpTipSecN] = tex
-    end
-    tex:SetVertexColor(r or 0.20, g or 0.22, b or 0.30, a or 1)
-    tex:ClearAllPoints()
-    tex:SetPoint("TOPLEFT",  f, "TOPLEFT",  0, -_pvpTipSecStartY)
-    tex:SetPoint("TOPRIGHT", f, "TOPRIGHT", 0, -_pvpTipSecStartY)
-    tex:SetHeight(h)
-    tex:Show()
-end
-
 -- Add one row.
 -- iconPath : raw texture path or nil/""
 -- c1..c4   : colored text strings ("" or nil = hidden)
@@ -5668,7 +5527,6 @@ local function PvPTipShow(anchor)
             _pvpTipBands[i].right:Hide()
         end
     end
-    for i = _pvpTipSecN + 1, #_pvpTipSections do _pvpTipSections[i]:Hide() end
     f:SetHeight(_pvpTipY + PT_PAD)
     f:ClearAllPoints()
     if anchor then
@@ -5692,8 +5550,6 @@ local function ResetPvPTip()
     _pvpTipUsed      = 0
     _pvpTipSepN      = 0
     _pvpTipBandN     = 0
-    _pvpTipSecN      = 0
-    _pvpTipSecStartY = 0
     _pvpTipY         = PT_PAD
 end
 
@@ -6033,395 +5889,6 @@ local function ShowPVPHUBRatingTooltip(anchor, charKey, bracketKey, ratingsData)
     PvPTipShow(anchor)
 end
 
--- Helper function to add MMR information to rating tooltips
-local function AddMMRTooltipInfo(charKey, bracketKey, ratingsData)
-    if not PVPHUB_DB[charKey] then 
-        return 
-    end
-    
-    local isArena = (bracketKey == "rating2v2" or bracketKey == "rating3v3")
-    local isRated = (isArena or bracketKey == "ratingShuffle" or bracketKey == "ratingBlitz" or bracketKey == "ratingRBG")
-    local currentSpecID = PVPHUB_DB[charKey].specID or PVPHUB_DB[charKey].lastActiveSpecID
-    
-    -- Modern separator styling
-    GameTooltip:AddLine(" ", 1, 1, 1) -- Empty line
-    
-    -- Determine if we have ratings to show
-    local hasRatings = false
-    if type(ratingsData) == "number" and ratingsData > 0 then
-        hasRatings = true
-    elseif type(ratingsData) == "table" and next(ratingsData) then
-        hasRatings = true
-    end
-    
-    -- Skip MMR header if we have rating to show CR | MMR combined
-    if not (isRated and hasRatings) then
-        GameTooltip:AddLine("|cfffff700MMR|r", 1, 1, 1)
-    end
-    
-    local mmrData = PVPHUB_DB[charKey].mmrData and PVPHUB_DB[charKey].mmrData[bracketKey]
-    local hasAnyMMR = false
-    
-    -- Show MMR information
-    if bracketKey == "ratingShuffle" or bracketKey == "ratingBlitz" then
-        local allSpecMMRs = {}
-        
-        -- Get the latest MMR for each spec directly from match history
-        if PVPHUB_DB[charKey].mmrHistory and PVPHUB_DB[charKey].mmrHistory[bracketKey] then
-            local history = PVPHUB_DB[charKey].mmrHistory[bracketKey]
-            
-            -- Go through history from newest to oldest and get the latest MMR for each spec
-            for i = #history, 1, -1 do
-                local match = history[i]
-                if match.specID and match.postMatchMMR and match.postMatchMMR > 0 then
-                    -- Only add if we don't already have this spec (since we're going newest to oldest)
-                    if not allSpecMMRs[match.specID] then
-                        allSpecMMRs[match.specID] = {
-                            mmr = match.postMatchMMR,
-                            timestamp = match.timestamp or GetServerTime(),
-                            specID = match.specID
-                        }
-                    end
-                end
-            end
-        end
-        
-        -- Display the specs if we have any
-        if next(allSpecMMRs) then
-            hasAnyMMR = true
-            
-            local specList = {}
-            for specID, data in pairs(allSpecMMRs) do
-                table.insert(specList, {specID = tonumber(specID), mmr = data.mmr, data = data})
-            end
-            
-            table.sort(specList, function(a, b) return a.mmr > b.mmr end)
-
-            -- If the current spec has no MMR history (e.g. after respeccing) but has a 0-rating
-            -- entry stored, inject it into the list so the tooltip shows 0 CR for it.
-            if currentSpecID and not allSpecMMRs[currentSpecID] then
-                if type(ratingsData) == "table" and ratingsData[currentSpecID] ~= nil then
-                    table.insert(specList, {specID = currentSpecID, mmr = 0, data = {}})
-                end
-            end
-            
-            for _, spec in ipairs(specList) do
-                local mmrColor = "|cff4da6ff"
-                local specName = "Unknown"
-                local specIcon = ""
-                
-                if spec.specID and spec.specID > 0 then
-                    local _si = GetCachedSpecInfo(spec.specID)
-                    if _si then
-                        specName = _si.name
-                        specIcon = "|T" .. _si.icon .. ":18:18:0:0:64:64:4:60:4:60|t "
-                    end
-                end
-                
-                -- For Shuffle/Blitz: show combined CR | MMR if rating provided
-                local specRating = 0
-                if type(ratingsData) == "number" then
-                    specRating = ratingsData
-                elseif type(ratingsData) == "table" and spec.specID then
-                    specRating = ratingsData[spec.specID] or 0
-                end
-                
-                if specRating > 0 then
-                    if spec.specID == currentSpecID then
-                        -- Active spec (highlighted in gold/blue)
-                        GameTooltip:AddDoubleLine(
-                            specIcon .. "|cff40ff40" .. specName .. "|r",
-                            "|cffffd700" .. specRating .. " CR|r  |cff4da6ff" .. spec.mmr .. " MMR|r",
-                            1, 1, 1, 1, 1, 1
-                        )
-                    else
-                        -- Inactive spec (dimmed)
-                        GameTooltip:AddDoubleLine(
-                            specIcon .. "|cff777777" .. specName .. "|r",
-                            "|cff777777" .. specRating .. " CR|r  |cff555555" .. spec.mmr .. " MMR|r",
-                            1, 1, 1, 1, 1, 1
-                        )
-                    end
-                elseif spec.specID == currentSpecID then
-                    -- Current spec with 0 CR (respecced, no games played yet in this spec)
-                    GameTooltip:AddDoubleLine(
-                        specIcon .. "|cff40ff40" .. specName .. "|r",
-                        "|cffffd7000 CR|r" .. (spec.mmr > 0 and ("  |cff4da6ff" .. spec.mmr .. " MMR|r") or ""),
-                        1, 1, 1, 1, 1, 1
-                    )
-                else
-                    -- MMR only (no CR data available)
-                    GameTooltip:AddDoubleLine(
-                        specIcon .. "|cff777777" .. specName .. "|r",
-                        "|cff4da6ff" .. spec.mmr .. " MMR|r",
-                        1, 1, 1, 1, 1, 1
-                    )
-                end
-            end
-        end
-    else
-        -- Arena brackets (2v2, 3v3) - check both match history and lastKnownMMR
-        local allSpecMMRs = {}
-        
-        -- First, try to get MMR from match history (most recent and reliable)
-        if PVPHUB_DB[charKey].mmrHistory and PVPHUB_DB[charKey].mmrHistory[bracketKey] then
-            local history = PVPHUB_DB[charKey].mmrHistory[bracketKey]
-            
-            -- Go through history from newest to oldest and get the latest MMR for each spec
-            for i = #history, 1, -1 do
-                local match = history[i]
-                if match.specID and match.postMatchMMR and match.postMatchMMR > 0 then
-                    -- Only add if we don't already have this spec (since we're going newest to oldest)
-                    if not allSpecMMRs[match.specID] then
-                        allSpecMMRs[match.specID] = {
-                            mmr = match.postMatchMMR,
-                            timestamp = match.timestamp or GetServerTime(),
-                            specID = match.specID
-                        }
-                    end
-                end
-            end
-        end
-        
-        -- If no match history, fall back to lastKnownMMR system
-        if not next(allSpecMMRs) then
-            allSpecMMRs = GetAllSpecMMRs(charKey, bracketKey)
-        end
-        
-        -- Add current MMR data if available and not already included
-        if mmrData and mmrData.mmr and mmrData.mmr > 0 then
-            local currentSpecID = mmrData.specID or PVPHUB_DB[charKey].specID or PVPHUB_DB[charKey].lastActiveSpecID
-            if currentSpecID and not allSpecMMRs[currentSpecID] then
-                allSpecMMRs[currentSpecID] = {
-                    mmr = mmrData.mmr,
-                    timestamp = mmrData.lastUpdate or GetServerTime(),
-                    specID = currentSpecID
-                }
-            end
-        end
-        
-        if next(allSpecMMRs) then
-            hasAnyMMR = true
-            
-            local specList = {}
-            for specID, data in pairs(allSpecMMRs) do
-                table.insert(specList, {specID = tonumber(specID), mmr = data.mmr, data = data})
-            end
-            
-            table.sort(specList, function(a, b) return a.mmr > b.mmr end)
-            
-            for _, spec in ipairs(specList) do
-                local mmrColor = "|cffffffff"
-                local specName = "Unknown"
-                local specIcon = ""
-                
-                if spec.specID and spec.specID > 0 then
-                    local _si = GetCachedSpecInfo(spec.specID)
-                    if _si then
-                        specName = _si.name
-                        specIcon = "|T" .. _si.icon .. ":18:18:0:0:64:64:4:60:4:60|t "
-                    end
-                end
-                
-                -- For arena: show combined CR | MMR on one line
-                local specRating = 0
-                if type(ratingsData) == "number" then
-                    specRating = ratingsData
-                elseif type(ratingsData) == "table" and spec.specID then
-                    specRating = ratingsData[spec.specID] or 0
-                end
-                
-                if specRating > 0 then
-                    if spec.specID == currentSpecID then
-                        -- Active spec (highlighted in gold/blue)
-                        GameTooltip:AddDoubleLine(
-                            specIcon .. "|cff40ff40" .. specName .. "|r",
-                            "|cffffd700" .. specRating .. " CR|r  |cff4da6ff" .. spec.mmr .. " MMR|r",
-                            1, 1, 1, 1, 1, 1
-                        )
-                    else
-                        -- Inactive spec (dimmed)
-                        GameTooltip:AddDoubleLine(
-                            specIcon .. "|cff777777" .. specName .. "|r",
-                            "|cff777777" .. specRating .. " CR|r  |cff555555" .. spec.mmr .. " MMR|r",
-                            1, 1, 1, 1, 1, 1
-                        )
-                    end
-                elseif spec.specID == currentSpecID then
-                    -- Current spec with 0 CR (respecced, no games played yet in this spec)
-                    GameTooltip:AddDoubleLine(
-                        specIcon .. "|cff40ff40" .. specName .. "|r",
-                        "|cffffd7000 CR|r" .. (spec.mmr > 0 and ("  |cff4da6ff" .. spec.mmr .. " MMR|r") or ""),
-                        1, 1, 1, 1, 1, 1
-                    )
-                else
-                    -- MMR only (no CR data available)
-                    GameTooltip:AddDoubleLine(
-                        specIcon .. "|cff777777" .. specName .. "|r",
-                        "|cff4da6ff" .. spec.mmr .. " MMR|r",
-                        1, 1, 1, 1, 1, 1
-                    )
-                end
-            end
-        elseif mmrData and mmrData.mmr and mmrData.mmr > 0 then
-            -- Fallback to single MMR display
-            hasAnyMMR = true
-            local mmrColor = "|cff4da6ff"
-            local statusText = mmrData.fallback and " |cff888888(estimated)|r" or ""
-            
-            GameTooltip:AddDoubleLine(
-                "|cffccccccMMR|r",
-                mmrColor .. mmrData.mmr .. "|r" .. statusText,
-                1, 1, 1, 1, 1, 1
-            )
-        end
-    end
-    
-    -- Add Win/Loss Statistics - Always show for better visibility
-    local wins, losses, winrate = GetWinLossStats(charKey, bracketKey)
-    GameTooltip:AddLine(" ", 1, 1, 1) -- Empty line for spacing
-    
-    local winrateColor
-    if winrate >= 60 then
-        winrateColor = "|cff40ff40"
-    elseif winrate >= 55 then
-        winrateColor = "|cffffa500"
-    else
-        winrateColor = "|cffff4040"
-    end
-    
-    -- Single inline line: "27 W / 19 L  (57.0%)"
-    GameTooltip:AddLine(
-        "|cff40ff40" .. wins .. "|r W / |cffff4040" .. losses .. "|r L  " .. winrateColor .. string.format("(%.1f%%)|r", winrate),
-        1, 1, 1
-    )
-    
-    -- Recent MMR changes - show for all brackets (Arena, Shuffle, Blitz)
-    if PVPHUB_DB[charKey].mmrHistory and PVPHUB_DB[charKey].mmrHistory[bracketKey] then
-        local history = PVPHUB_DB[charKey].mmrHistory[bracketKey]
-        local recentMatches = {}
-        local isArena = (bracketKey == "rating2v2" or bracketKey == "rating3v3")
-        -- Use setting value (default to 1 if not set)
-        local matchesToShow = PVPHUB_SETTINGS.matchHistoryEntries or 1
-        
-        for i = math.max(1, #history - (matchesToShow - 1)), #history do
-            table.insert(recentMatches, history[i])
-        end
-        
-        if #recentMatches > 0 then
-            hasAnyMMR = true  -- Mark that we found MMR data in history
-            GameTooltip:AddLine(" ", 1, 1, 1) -- Spacing
-            
-            -- Section title
-            local historyCount = PVPHUB_SETTINGS.matchHistoryEntries or 1
-            if isArena then
-                local headerText = historyCount == 1 and "|cfffff700Latest Match|r" or "|cfffff700Latest Matches|r"
-                GameTooltip:AddLine(headerText, 1, 1, 1)
-            else
-                local headerText = historyCount == 1 and "|cfffff700Latest Lobby|r" or "|cfffff700Latest Lobbies|r"
-                GameTooltip:AddLine(headerText, 1, 1, 1)
-            end
-            
-            -- Column header row
-            if isArena then
-                GameTooltip:AddDoubleLine(
-                    "|cff555555CR / MMR|r",
-                    "|cff555555Date|r",
-                    1, 1, 1, 1, 1, 1
-                )
-            else
-                GameTooltip:AddDoubleLine(
-                    "|cff555555MMR / CR|r",
-                    "|cff555555Rounds  Date|r",
-                    1, 1, 1, 1, 1, 1
-                )
-            end
-            
-            for i = #recentMatches, 1, -1 do
-                local match = recentMatches[i]
-                
-                -- Get spec icon for this match
-                local matchSpecIcon = ""
-                if match.specID and match.specID > 0 then
-                    local _si = GetCachedSpecInfo(match.specID)
-                    if _si and _si.icon then
-                        matchSpecIcon = "|T" .. _si.icon .. ":16:16:0:0:64:64:4:60:4:60|t "
-                    end
-                end
-                
-                if isArena then
-                    -- Arena row: left = [icon] +20 CR  +15 MMR  1870 | right = date
-                    if match.postMatchMMR and match.ratingChange then
-                        local crColor
-                        if match.ratingChange == 0 then
-                            crColor = "|cffffffff"
-                        elseif match.ratingChange > 0 then
-                            crColor = "|cff40ff40"
-                        else
-                            crColor = "|cffff4040"
-                        end
-                        local crSign = match.ratingChange >= 0 and "+" or ""
-                        local mmrColor = match.mmrChange >= 0 and "|cff40ff40" or "|cffff4040"
-                        local mmrSign = match.mmrChange >= 0 and "+" or ""
-                        local timeText = match.timestamp and FormatTimestamp(match.timestamp) or ""
-                        GameTooltip:AddDoubleLine(
-                            matchSpecIcon .. crColor .. crSign .. match.ratingChange .. " CR|r  " .. mmrColor .. mmrSign .. match.mmrChange .. " MMR|r  |cffaaaaaa" .. match.postMatchMMR .. "|r",
-                            timeText ~= "" and ("|cff666666" .. timeText .. "|r") or "",
-                            1, 1, 1, 1, 1, 1
-                        )
-                    else
-                        local timeText = match.timestamp and FormatTimestamp(match.timestamp) or ""
-                        GameTooltip:AddDoubleLine(
-                            matchSpecIcon .. "|cffaaaaaa" .. (match.postMatchMMR or match.preMatchMMR or "?") .. " MMR|r",
-                            timeText ~= "" and ("|cff666666" .. timeText .. "|r") or "",
-                            1, 1, 1, 1, 1, 1
-                        )
-                    end
-                else
-                    -- Shuffle/Blitz row: left = [icon] +14 MMR  +8 CR | right = 4-2  date
-                    local crChange = match.ratingChange or 0
-                    local crColor = crChange > 0 and "|cff40ff40" or (crChange < 0 and "|cffff4040" or "|cffffffff")
-                    local crSign = crChange >= 0 and "+" or ""
-                    local mmrColor = match.mmrChange >= 0 and "|cff40ff40" or "|cffff4040"
-                    local mmrSign = match.mmrChange >= 0 and "+" or ""
-                    local timeText = match.timestamp and FormatTimestamp(match.timestamp) or ""
-                    -- Right column: rounds score + date
-                    local rightCol = ""
-                    if match.roundsWon ~= nil and match.roundsLost ~= nil then
-                        local roundColor
-                        if match.roundsWon > match.roundsLost then
-                            roundColor = "|cff40ff40"
-                        elseif match.roundsWon < match.roundsLost then
-                            roundColor = "|cffff4040"
-                        else
-                            roundColor = "|cffaaaaaa"   -- 3-3 draw
-                        end
-                        rightCol = roundColor .. match.roundsWon .. "-" .. match.roundsLost .. "|r"
-                        if timeText ~= "" then rightCol = rightCol .. "  |cff666666" .. timeText .. "|r" end
-                    elseif timeText ~= "" then
-                        rightCol = "|cff666666" .. timeText .. "|r"
-                    end
-                    -- Left column: MMR delta first (more important), then CR delta, then resulting MMR
-                    GameTooltip:AddDoubleLine(
-                        matchSpecIcon .. mmrColor .. mmrSign .. match.mmrChange .. " MMR|r  " .. crColor .. crSign .. crChange .. " CR|r  |cffaaaaaa" .. match.postMatchMMR .. "|r",
-                        rightCol,
-                        1, 1, 1, 1, 1, 1
-                    )
-                end
-            end
-        end
-    end
-    
-    -- Show "Play a game" message only if we have no MMR data at all
-    if not hasAnyMMR then
-        GameTooltip:AddDoubleLine(
-            "|cffccccccNo data available|r",
-            "|cff888888Play to track|r",
-            1, 1, 1, 1, 1, 1
-        )
-    end
-end
-
 -- Exposed for queue_timer.lua: show the full match-history tooltip for a
 -- rated bracket by its short display name ("Shuffle", "2v2", etc.).
 local QUEUE_BRACKET_KEY_MAP = {
@@ -6588,13 +6055,8 @@ local function UpdatePvPRatings()
         PVPHUB.lastRatingUpdate = charKey
     end
 
-    -- Refresh both main and compact windows if they exist
-    if PVPHUB.window and PVPHUB.window:IsShown() and PVPHUB.window.UpdateContent then
-        PVPHUB.window:UpdateContent()
-    end
-    if PVPHUB.compactWindow and PVPHUB.UpdateCompactWindow then
-        PVPHUB:UpdateCompactWindow()
-    end
+    -- Refresh whichever windows are visible (coalesced, skipped if unchanged)
+    PVPHUB_RefreshUI()
 end
 
 -- Warband Bank gold is account-wide (shared across every character on the
@@ -6857,14 +6319,7 @@ PVPHUB.frame:HookScript("OnEvent", function(self, event, ...)
                                 { "PVP - Expressway",           "Expressway.ttf"          },
                                 { "PVP - Prototype",            "Prototype.ttf"           },
                                 { "PVP - Accidental Presidency","AccidentalPresidency.ttf"},
-                                { "PVP - Exo 2 Bold",           "Exo2-Bold.ttf"           },
-                                { "PVP - Inter Bold",           "Inter-Bold.ttf"          },
                                 { "PVP - Oswald Bold",          "Oswald-Bold.ttf"         },
-                                { "PVP - Rajdhani SemiBold",    "Rajdhani-SemiBold.ttf"   },
-                                { "PVP - Bebas Neue",           "BebasNeue-Regular.ttf"   },
-                                { "PVP - Barlow Condensed Bold","BarlowCondensed-Bold.ttf"},
-                                { "PVP - Titillium Bold",       "TitilliumWeb-Bold.ttf"   },
-                                { "PVP - 2002 Bold",            "2002Bold.ttf"            },
                                 { "PVP - Avant Garde",          "AvantGarde.ttf"          },
                             }
                             -- Only register fonts whose TTF files actually exist on disk.
@@ -7200,12 +6655,7 @@ PVPHUB.frame:HookScript("OnEvent", function(self, event, ...)
                     end)
 
                     -- Refresh windows if they're open
-                    if PVPHUB.window and PVPHUB.window:IsShown() and PVPHUB.window.UpdateContent then
-                        PVPHUB.window:UpdateContent()
-                    end
-                    if PVPHUB.compactWindow and PVPHUB.UpdateCompactWindow then
-                        PVPHUB:UpdateCompactWindow()
-                    end
+                    PVPHUB_RefreshUI()
                 end
             end
         end
@@ -7442,10 +6892,10 @@ PVPHUB.frame:HookScript("OnEvent", function(self, event, ...)
             end
         end
     elseif event == "PLAYER_LOGOUT" then
-        -- The rotating backup ring is throttled to once per 5 minutes and only
-        -- keeps 3 slots, so under normal play it cycles past anything useful
-        -- within the hour. Forcing one here guarantees there is always a
-        -- snapshot from the end of the session to fall back on.
+        -- The corruption backup is throttled to once per 5 minutes, so the
+        -- last few minutes of a session would otherwise be missing from it.
+        -- Forcing one here guarantees there is always a snapshot from the end
+        -- of the session to fall back on.
         CreateDataBackup(true)
         -- Also offer the archive a dated entry. Self-throttled, so this only
         -- lands when the newest one is already a day old.
@@ -7514,16 +6964,6 @@ end
 -- with no skipped numbers, or everything after the gap silently stops working.
 SLASH_PVPHUB1  = "/pvphub"
 SLASH_PVPHUB2  = "/ph"
-SLASH_PVPHUB3  = "/pvphub streamer"
-SLASH_PVPHUB4  = "/pvphub compact"
-SLASH_PVPHUB5  = "/pvphub resethonor"
-SLASH_PVPHUB6  = "/pvphub fix"
-SLASH_PVPHUB7  = "/pvphub welcome"
-SLASH_PVPHUB8  = "/pvphub resetseason"
-SLASH_PVPHUB9  = "/pvphub help"
-SLASH_PVPHUB10 = "/pvphub test"
-SLASH_PVPHUB11 = "/pvphub cleartest"
-SLASH_PVPHUB12 = "/pvphub seasonlabel"
 SlashCmdList["PVPHUB"] = function(msg)
     local args = {strsplit(" ", msg or "")}
     local command = args[1] and string.lower(args[1]) or ""
@@ -9371,18 +8811,6 @@ SlashCmdList["PVPHUB"] = function(msg)
                 ["Morpheus"]         = "Fonts\\MORPHEUS.TTF",
                 ["Skurri"]           = "Fonts\\skurri.ttf",
             }
-
-            local function GetFontPath(fontName)
-                -- Check bundled fonts first (guaranteed to exist)
-                if PVPHUB.bundledFonts and PVPHUB.bundledFontBase then
-                    for _, entry in ipairs(PVPHUB.bundledFonts) do
-                        if entry[1] == fontName then
-                            return PVPHUB.bundledFontBase .. entry[2]
-                        end
-                    end
-                end
-                return builtInFonts[fontName] or "Fonts\\FRIZQT__.TTF"
-            end
 
             local function GetAvailableFonts()
                 local seen = {}
@@ -12745,10 +12173,9 @@ SlashCmdList["PVPHUB"] = function(msg)
                                     info.text = hasNote and "Edit Note" or "Add Note"
                                     info.icon = "Interface\\Icons\\INV_Inscription_Parchment"
                                     info.func = function()
-                                        local popup = StaticPopup_Show("PVPHUB_EDIT_NOTE")
-                                        if popup then
-                                            popup.charKey = tooltipBtn.charName
-                                        end
+                                        -- Character goes in as the data argument so
+                                        -- the dialog's OnShow already has it.
+                                        StaticPopup_Show("PVPHUB_EDIT_NOTE", nil, nil, tooltipBtn.charName)
                                         CloseDropDownMenus()
                                     end
                                     info.notCheckable = true
@@ -13128,6 +12555,17 @@ SlashCmdList["PVPHUB"] = function(msg)
             end
         end
 
+        -- Remember which data this render was built from so PVPHUB_RefreshUI
+        -- can skip identical rebuilds. Cleared first and only set once the
+        -- render finished, so a render that errors is retried next time.
+        local buildContent = f.UpdateContent
+        function f:UpdateContent(...)
+            local sig = PVPHUB._ComputeDisplaySignature()
+            PVPHUB._mainRenderSig = nil
+            buildContent(self, ...)
+            PVPHUB._mainRenderSig = sig
+        end
+
         PVPHUB.window = f
         if PVPHUB.Themes then PVPHUB.Themes:UpdateWindow(f) end
         tinsert(UISpecialFrames, f:GetName())
@@ -13331,10 +12769,12 @@ honorTrackingFrame:SetScript("OnEvent", function(self, event, addonName, ...)
         C_Timer.After(2, function()
             CheckHonorWarnings()
         end)
-    elseif event == "CURRENCY_DISPLAY_UPDATE" then
+    elseif event == "CURRENCY_DISPLAY_UPDATE" or event == "CHAT_MSG_COMBAT_HONOR_GAIN" then
         -- Coalesce rapid-fire currency ticks (e.g. honor gained repeatedly
         -- during a match) into a single deferred refresh instead of
         -- stacking one full-window-rebuild PVPHUB_RefreshUI() call per tick.
+        -- An honor kill fires both events, so they share the one timer
+        -- (the chat event used to schedule its own update per kill).
         if not _pendingCurrencyRefresh then
             _pendingCurrencyRefresh = true
             C_Timer.After(0.5, function()
@@ -13367,13 +12807,6 @@ honorTrackingFrame:SetScript("OnEvent", function(self, event, addonName, ...)
     elseif event == "QUEST_TURNED_IN" then
         -- After turning in quests (PvP dailies/weeklies)
         C_Timer.After(1, function()
-            UpdateHonorDataStandalone()
-            CheckHonorWarnings()
-            PVPHUB_RefreshUI()
-        end)
-    elseif event == "CHAT_MSG_COMBAT_HONOR_GAIN" then
-        -- Honor gained in PvP combat - save immediately so DB stays current
-        C_Timer.After(0.5, function()
             UpdateHonorDataStandalone()
             CheckHonorWarnings()
             PVPHUB_RefreshUI()
@@ -13583,40 +13016,17 @@ local function RegisterAddonCompartment()
     _G["PVPHUB_AddonCompartmentFuncOnEnter"] = PVPHUB_AddonCompartmentFuncOnEnter
     _G["PVPHUB_AddonCompartmentFuncOnLeave"] = PVPHUB_AddonCompartmentFuncOnLeave
     
-    -- LibDBIcon compatibility for addon collection tools.
+    -- LibStub, LibDataBroker and LibDBIcon ship in the release zip (.pkgmeta
+    -- externals). Without them (a bare git checkout and no other addon loading
+    -- them) there is simply no minimap button. The stand-ins that used to
+    -- cover that case only wrote LibDataBroker_PVPHUB / LibDBIcon_PVPHUB
+    -- globals that nothing reads.
     -- IMPORTANT: never assign a stand-in to _G.LibStub. A real LibStub that
     -- loads later (from another addon) checks `LibStub.minor < LIBSTUB_MINOR`
-    -- during its own setup; our stand-in has no .minor field, so that
-    -- comparison (nil < number) throws and aborts the real LibStub's init,
-    -- breaking every other addon that depends on it. Keep the fallback local
-    -- and only use it when the real LibStub genuinely isn't present.
+    -- during its own setup; a stand-in without .minor makes that throw and
+    -- breaks every other addon that depends on it.
     local function GetLib(major)
-        if LibStub then
-            return LibStub(major, true)
-        end
-        if major == "LibDataBroker-1.1" then
-            return {
-                NewDataObject = function(self, name, obj)
-                    _G["LibDataBroker_" .. name] = obj
-                    return obj
-                end
-            }
-        elseif major == "LibDBIcon-1.0" then
-            return {
-                Register = function(self, name, obj, settings)
-                    -- Minimal registration for collection addon detection
-                    _G["LibDBIcon_" .. name] = {
-                        button = obj.miniMapButton,
-                        icon = obj.icon,
-                        IsRegistered = function() return true end,
-                        Show = function() end,
-                        Hide = function() end
-                    }
-                end,
-                IsRegistered = function(self, name) return _G["LibDBIcon_" .. name] ~= nil end
-            }
-        end
-        return nil
+        return LibStub and LibStub(major, true)
     end
 
     -- Create LibDataBroker data object
@@ -13679,24 +13089,9 @@ local function RegisterAddonCompartment()
             end)
         end
     end
-    
-    -- The TOC file should be sufficient for addon compartment registration
-    -- We don't need to manually register if it's already working through TOC
-    
-    -- Only do fallback registration if compartment doesn't detect us
-    if C_AddOns and C_AddOns.GetAddOnMetadata then
-        local addonName = "PVPHUB"
-        if not C_AddOns.GetAddOnMetadata(addonName, "AddonCompartmentFunc") then
-            -- Fallback metadata for collection addons that don't read TOC properly
-            _G["__ADDONCOMPARTMENT_" .. addonName] = {
-                func = "PVPHUB_AddonCompartmentFunc",
-                funcOnEnter = "PVPHUB_AddonCompartmentFuncOnEnter",
-                funcOnLeave = "PVPHUB_AddonCompartmentFuncOnLeave",
-                icon = "Interface\\AddOns\\PVPHUB\\media\\PVPHUB.png",
-                title = "PVPHUB"
-            }
-        end
-    end
+
+    -- The addon compartment entry itself comes from the TOC
+    -- (## AddonCompartmentFunc), so nothing else needs registering here.
 end
 
 -- Register after addon loaded (simplified to prevent multiple registrations)
@@ -13854,26 +13249,35 @@ StaticPopupDialogs["PVPHUB_EDIT_NOTE"] = {
     button3 = "Clear Note",
     hasEditBox = true,
     maxLetters = 50,
-    OnShow = function(self)
-        local charKey = self.charKey
+    -- The character arrives as StaticPopup_Show's data argument, which the
+    -- dialog already has when OnShow runs. It used to be assigned to the
+    -- dialog after StaticPopup_Show returned, too late for OnShow, so the box
+    -- was prefilled with the note of whichever character the shared dialog
+    -- frame had last been opened for, and saving wrote that note to the new one.
+    OnShow = function(self, data)
+        local charKey = data or self.data
+        if not charKey then return end
+        local editBox = self.EditBox or self.editBox
         local note = PVPHUB_DB[charKey] and PVPHUB_DB[charKey].note or ""
-        self.EditBox:SetText(note)
-        self.EditBox:SetFocus()
-        self.EditBox:HighlightText()
-        
-        -- Add character name to dialog
-        local data = PVPHUB_DB[charKey]
-        if data then
-            local class = data.class or "PRIEST"
+        editBox:SetText(note)
+        editBox:SetFocus()
+        editBox:HighlightText()
+
+        -- Add character name to dialog (the text region is "Text" since 11.x)
+        local charData = PVPHUB_DB[charKey]
+        local textRegion = self.Text or self.text
+        if charData and textRegion then
+            local class = charData.class or "PRIEST"
             local color = RAID_CLASS_COLORS[class] or NORMAL_FONT_COLOR
             local displayName = charKey:match("^([^%-]+)")
-            self.text:SetFormattedText("Set note for |c%s%s|r:", color.colorStr or "ffffffff", displayName)
+            textRegion:SetFormattedText("Set note for |c%s%s|r:", color.colorStr or "ffffffff", displayName)
         end
     end,
-    OnAccept = function(self)
-        local charKey = self.charKey
-        local note = self.EditBox:GetText()
-        
+    OnAccept = function(self, data)
+        local charKey = data or self.data
+        if not charKey then return end
+        local note = (self.EditBox or self.editBox):GetText()
+
         if not PVPHUB_DB[charKey] then
             PVPHUB_DB[charKey] = {}
         end
@@ -13891,10 +13295,10 @@ StaticPopupDialogs["PVPHUB_EDIT_NOTE"] = {
             PVPHubPrint("|cffff0000[PVPHUB]|r Note cleared")
         end
     end,
-    OnAlt = function(self)
+    OnAlt = function(self, data)
         -- Clear Note button
-        local charKey = self.charKey
-        if PVPHUB_DB[charKey] then
+        local charKey = data or self.data
+        if charKey and PVPHUB_DB[charKey] then
             PVPHUB_DB[charKey].note = nil
         end
         

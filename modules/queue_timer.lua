@@ -57,6 +57,25 @@ end
 
 local TICK_DOTS = { ".", "..", "..." }
 
+-- Seconds left to accept a popped queue. Read from the client, which knows
+-- the real window for each queue type; the fixed 28 s countdown this used to
+-- show is only the fallback for when that read fails. confirmStart is the
+-- GetTime() at which the slot was first seen as ready.
+local FALLBACK_ACCEPT_SECONDS = 28
+local function GetAcceptSecondsLeft(index, confirmStart)
+    if GetBattlefieldPortExpiration then
+        local ok, secondsLeft = pcall(function()
+            local expiration = GetBattlefieldPortExpiration(index)
+            if type(expiration) ~= "number" or expiration <= 0 then return nil end
+            -- Documented as seconds; guard against a client reporting ms.
+            if expiration > 1000 then expiration = expiration / 1000 end
+            return math.ceil(expiration)
+        end)
+        if ok and secondsLeft then return secondsLeft end
+    end
+    return math.ceil(math.max(0, FALLBACK_ACCEPT_SECONDS - (GetTime() - confirmStart)))
+end
+
 -- Small right-pointing arrow used in the "Detail" style's MMR line
 -- ("2672 -> 2638"). An atlas texture rather than a Unicode arrow glyph,
 -- since FRIZQT__.TTF has no glyph for U+2192 and silently drops it.
@@ -926,7 +945,7 @@ function PVPHUB.QueueTimer:Update()
                     self.confirmTimes[slot.index] = GetTime()
                     PlayMatchReadySound()
                 end
-                local remaining = math.ceil(math.max(0, 28 - (GetTime() - self.confirmTimes[slot.index])))
+                local remaining = GetAcceptSecondsLeft(slot.index, self.confirmTimes[slot.index])
                 row.compactLine:SetText(string.format("|cffffd100%s|r   |cff40ff40READY|r   Accept %ds", displayName, remaining))
             else
                 self.confirmTimes[slot.index] = nil
@@ -972,7 +991,7 @@ function PVPHUB.QueueTimer:Update()
                     -- First tick this slot became READY — play the alert sound
                     PlayMatchReadySound()
                 end
-                local remaining = math.ceil(math.max(0, 28 - (GetTime() - self.confirmTimes[slot.index])))
+                local remaining = GetAcceptSecondsLeft(slot.index, self.confirmTimes[slot.index])
                 if style == "simple" then
                     row.avgLabel:SetText("Accept:")
                     row.avgValue:SetText(remaining .. " sec")

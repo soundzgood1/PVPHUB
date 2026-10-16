@@ -9,6 +9,9 @@ desktop.ini
 *.swp
 .claude/
 
+# Libraries fetched by the packager (.pkgmeta externals)
+Libs/
+
 # WoW SavedVariables (per-account/per-character, not addon code)
 *.lua.bak
 WTF/

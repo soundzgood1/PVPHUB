@@ -614,6 +614,288 @@ function PVPHUB:CreateCompactWindow()
     PVPHUB_SETTINGS.compactWindowStayOpen = true
 end
 
+-- Streamer Mode widgets are pooled: the header row and every character row
+-- are created once and reconfigured on each update. They used to be rebuilt
+-- from scratch on every update with the old ones only hidden and detached,
+-- but the client never frees frames, so a stream left running for hours kept
+-- piling up rows, buttons and textures (a few dozen per update, and updates
+-- arrive with every rating and currency change).
+
+-- True when a stored rating (flat number or per-spec table) has anything
+-- above 0 for the rating tooltip to show.
+local function HasRatingToShow(value)
+    if type(value) == "number" then return value > 0 end
+    if type(value) == "table" then
+        for _, v in pairs(value) do
+            if type(v) == "number" and v > 0 then return true end
+        end
+    end
+    return false
+end
+
+local function GetCompactHeaderRow()
+    local cw = PVPHUB.compactWindow
+    if cw.headerRow then return cw.headerRow end
+
+    local headerRow = CreateFrame("Frame", nil, cw.content)
+
+    local charHeader = headerRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    charHeader:SetPoint("LEFT", 8, 0)
+    charHeader:SetJustifyH("LEFT")
+    charHeader:SetWordWrap(false) -- Prevent text wrapping
+    charHeader:SetNonSpaceWrap(false) -- Prevent wrapping on non-space characters
+    charHeader:SetMaxLines(1) -- Force single line display
+    charHeader:SetText("|cffFFD700Character|r")
+    headerRow.charHeader = charHeader
+
+    -- One label per bracket in display order; hidden while its column is off.
+    headerRow.columns = {}
+    for i, header in ipairs(COMPACT_BRACKET_ORDER) do
+        local headerText = headerRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        headerText:SetJustifyH("CENTER") -- Center the header text
+        headerText:SetText("|cffFFD700" .. header.icon .. " " .. header.name .. "|r")
+        headerRow.columns[i] = headerText
+    end
+
+    cw.headerRow = headerRow
+    return headerRow
+end
+
+-- Returns pooled row #index, creating it on first use. Everything that
+-- depends on which character or spec the row shows is set by
+-- ConfigureCompactRow; the scripts below read it back from the row when
+-- hovered.
+local function AcquireCompactRow(index)
+    local cw = PVPHUB.compactWindow
+    cw.rowPool = cw.rowPool or {}
+    local row = cw.rowPool[index]
+    if row then return row end
+
+    local C = PVPHUB_CONSTANTS.COMPACT_WINDOW
+    row = CreateFrame("Frame", nil, cw.content)
+
+    -- Row hover highlight (same as main window)
+    local hoverBG = row:CreateTexture(nil, "OVERLAY")
+    hoverBG:SetTexture("Interface\\Buttons\\WHITE8x8")
+    hoverBG:SetAllPoints(row)
+    hoverBG:Hide()
+    row.hoverBG = hoverBG
+
+    -- Small tree connector, shown on sub-rows only
+    local connectorV = row:CreateTexture(nil, "OVERLAY")
+    connectorV:SetTexture("Interface\\Buttons\\WHITE8x8")
+    connectorV:SetVertexColor(0.5, 0.5, 0.55, 0.6)
+    connectorV:SetWidth(1)
+    connectorV:SetPoint("TOPLEFT", row, "TOPLEFT", 9, 0)
+    connectorV:SetPoint("BOTTOM", row, "CENTER", 0, 0)
+    row.connectorV = connectorV
+
+    local connectorH = row:CreateTexture(nil, "OVERLAY")
+    connectorH:SetTexture("Interface\\Buttons\\WHITE8x8")
+    connectorH:SetVertexColor(0.5, 0.5, 0.55, 0.6)
+    connectorH:SetHeight(1)
+    connectorH:SetPoint("LEFT", row, "LEFT", 9, 0)
+    connectorH:SetPoint("RIGHT", row, "LEFT", 16, 0) -- 16 = sub-row name indent
+    connectorH:SetPoint("TOP", row, "CENTER", 0, 0)
+    row.connectorH = connectorH
+
+    local nameText = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    nameText:SetJustifyH("LEFT")
+    nameText:SetWordWrap(false) -- Prevent text wrapping
+    nameText:SetNonSpaceWrap(false) -- Prevent wrapping on non-space characters
+    nameText:SetMaxLines(1) -- Force single line display
+    -- Add backdrop shadow for better readability
+    nameText:SetShadowOffset(2, -2)
+    nameText:SetShadowColor(0, 0, 0, 1)
+    row.nameText = nameText
+
+    -- Character tooltip over the name area
+    local nameTooltipBtn = CreateFrame("Button", nil, row)
+    nameTooltipBtn:SetScript("OnEnter", function(self)
+        row.hoverBG:Show()
+        ShowCharacterTooltip(row.charKey, self)
+    end)
+    nameTooltipBtn:SetScript("OnLeave", function()
+        row.hoverBG:Hide()
+        HideCharacterTooltip()
+    end)
+    row.nameTooltipBtn = nameTooltipBtn
+
+    -- One rating cell per bracket in display order: the value, the multi-spec
+    -- star and an invisible button for the rating tooltip.
+    row.slots = {}
+    for i, bracket in ipairs(COMPACT_BRACKET_ORDER) do
+        local slot = {}
+
+        local text = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        text:SetWidth(C.COLUMN_WIDTH - 10) -- Set width for centering
+        text:SetJustifyH("CENTER") -- Center the text
+        text:SetShadowOffset(2, -2)
+        text:SetShadowColor(0, 0, 0, 1)
+        slot.text = text
+
+        local star = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        star:SetText("|TInterface\\Common\\FavoritesIcon:12|t")
+        star:SetShadowOffset(2, -2)
+        star:SetShadowColor(0, 0, 0, 1)
+        slot.star = star
+
+        local hoverBtn = CreateFrame("Button", nil, row)
+        hoverBtn:SetSize(C.COLUMN_WIDTH - 10, C.ROW_HEIGHT)
+        hoverBtn:SetFrameLevel(row:GetFrameLevel() + 5)
+        hoverBtn:SetScript("OnEnter", function(self)
+            row.hoverBG:Show()
+            local value = row.data and row.data[bracket.key]
+            if HasRatingToShow(value) then
+                ShowPVPHUBRatingTooltip(self, row.charKey, bracket.key, value)
+            end
+        end)
+        hoverBtn:SetScript("OnLeave", function()
+            row.hoverBG:Hide()
+            GameTooltip:Hide()
+            ClosePVPHUBRatingTooltip()
+        end)
+        slot.hoverBtn = hoverBtn
+
+        row.slots[i] = slot
+    end
+
+    cw.rowPool[index] = row
+    return row
+end
+
+-- Points a pooled row at one character and lays it out.
+--
+-- pinnedSpecID (optional): renders this character's row showing THAT spec's
+-- rating across every enabled bracket column, instead of the character's live
+-- current spec — same shape as the default row, just scoped to one specific
+-- spec, so a character can have more than one spec shown as its own row at
+-- the same time (see PromoteToMultiSpecIfNeeded).
+-- isSubRow: true when this row sits directly under another row of the SAME
+-- character (its group's anchor) in the flattened, sorted list. A pinned-spec
+-- row is NOT automatically a sub-row — if its character has no main row shown,
+-- it's the only row for that character and may land next to a completely
+-- unrelated character after sorting, so it must render as a plain anchor row
+-- itself rather than visually latching onto whatever happens to be above it.
+local function ConfigureCompactRow(row, charKey, data, yOffset, windowWidth, pinnedSpecID, isSubRow)
+    local C = PVPHUB_CONSTANTS.COMPACT_WINDOW
+    local fontPath = PVPHUB.compactCurrentFontPath
+    row.charKey = charKey
+    row.data = data
+
+    row:SetSize((windowWidth or C.MIN_WIDTH) - 16, C.ROW_HEIGHT)
+    row:ClearAllPoints()
+    row:SetPoint("TOPLEFT", 0, -yOffset)
+
+    local hc = GetCurrentTheme().HOVER_BG
+    row.hoverBG:SetVertexColor(hc[1], hc[2], hc[3], hc[4])
+    row.hoverBG:Hide()
+
+    -- Sub-rows are indented with the tree connector so they read as belonging
+    -- to the row directly above them, instead of looking like an unrelated
+    -- duplicate entry once rows are grouped adjacently.
+    local nameIndent = isSubRow and 16 or 5
+    row.connectorV:SetShown(isSubRow == true)
+    row.connectorH:SetShown(isSubRow == true)
+
+    -- Character name (truncated if too long). On a pinned-spec row, show that
+    -- spec's icon instead of the character's currently-active one, so the
+    -- duplicated rows for one character are visually distinguishable.
+    local nameText = row.nameText
+    nameText:ClearAllPoints()
+    nameText:SetPoint("LEFT", nameIndent, 0)
+    nameText:SetWidth(C.BASE_WIDTH - 15 - (nameIndent - 5)) -- Leave some padding
+    if pinnedSpecID then
+        local pinnedSpecIcon = ""
+        local _si = GetCachedSpecInfo(pinnedSpecID)
+        if _si and _si.icon then
+            pinnedSpecIcon = "|T" .. _si.icon .. ":14|t "
+        end
+        -- Suppress the current-character dot on sub-rows — the anchor row
+        -- above already shows it, and repeating it here is just noise. A solo
+        -- pinned row (no main row shown) keeps its dot since it's the only
+        -- representation of that character in the list.
+        nameText:SetText(pinnedSpecIcon .. CreateCharacterName({char = charKey, data = data}, true, true, isSubRow))
+    else
+        nameText:SetText(CreateCharacterName({char = charKey, data = data}, true))
+    end
+    -- Slightly dimmed to read as a sub-row of the row above
+    nameText:SetAlpha((pinnedSpecID and isSubRow) and 0.85 or 1)
+    -- Use compact-specific font
+    SafeSetFont(nameText, fontPath, 11)
+
+    row.nameTooltipBtn:ClearAllPoints()
+    row.nameTooltipBtn:SetPoint("LEFT", nameIndent, 0)
+    row.nameTooltipBtn:SetSize(C.BASE_WIDTH - 15, C.ROW_HEIGHT)
+
+    -- Rating columns with dynamic positioning — same order as headers
+    local showRatings = PVPHUB_SETTINGS.compactMode and PVPHUB_SETTINGS.compactMode.showRatings
+    local columnIndex = 0
+    for i, bracket in ipairs(COMPACT_BRACKET_ORDER) do
+        local slot = row.slots[i]
+        if showRatings and showRatings[bracket.key] then
+            -- On a pinned-spec row, the per-spec brackets (Shuffle/Blitz) show
+            -- THAT spec's rating specifically. 2v2/3v3/RBG aren't spec-specific
+            -- to begin with, so they render exactly like the default row.
+            local currentRating, isMultiSpec
+            if pinnedSpecID and (bracket.key == "ratingShuffle" or bracket.key == "ratingBlitz") then
+                local ratingTable = data[bracket.key]
+                currentRating = (type(ratingTable) == "table" and ratingTable[pinnedSpecID]) or 0
+                isMultiSpec = false -- explicit single spec, no ambiguity to flag
+            else
+                -- GetShuffleDisplayInfo handles flat numbers (2v2/3v3) and per-spec
+                -- tables (Shuffle/Blitz) through the same code path.
+                local _, specCount
+                currentRating, _, specCount = GetShuffleDisplayInfo(data, charKey, bracket.key)
+                isMultiSpec = (specCount > 1)
+            end
+            -- 2v2/3v3/RBG aren't spec-specific — on a sub-row they'd just repeat
+            -- the exact same number already shown on the anchor row above, which
+            -- reads as if it might differ per spec when it can't. Show a "same as
+            -- above" placeholder there instead of the number itself (only when
+            -- there's actually a value to point back to).
+            local isCharacterWideBracket = bracket.key == "rating2v2" or bracket.key == "rating3v3" or bracket.key == "ratingRBG"
+            local showAsDitto = isSubRow and isCharacterWideBracket and currentRating > 0
+
+            local display
+            if showAsDitto then
+                display = "|cff666666^|r"
+            else
+                display = GetRatingColor(currentRating) .. (currentRating > 0 and currentRating or "-") .. "|r"
+            end
+
+            local xPos = C.BASE_WIDTH + (columnIndex * C.COLUMN_WIDTH) - 5
+            slot.text:ClearAllPoints()
+            slot.text:SetPoint("LEFT", xPos, 0)
+            slot.text:SetText(display)
+            SafeSetFont(slot.text, fontPath, 11)
+            slot.text:Show()
+
+            -- Star icon for multi-spec ratings, to the right of the centered rating
+            if isMultiSpec then
+                slot.star:ClearAllPoints()
+                slot.star:SetPoint("LEFT", xPos + (C.COLUMN_WIDTH / 2) + 15, 0)
+                SafeSetFont(slot.star, fontPath, 11)
+                slot.star:Show()
+            else
+                slot.star:Hide()
+            end
+
+            slot.hoverBtn:ClearAllPoints()
+            slot.hoverBtn:SetPoint("LEFT", xPos, 0)
+            slot.hoverBtn:Show()
+
+            columnIndex = columnIndex + 1
+        else
+            slot.text:Hide()
+            slot.star:Hide()
+            slot.hoverBtn:Hide()
+        end
+    end
+
+    row:Show()
+end
+
 -- Implementation for PVPHUB:UpdateCompactWindow (wrapped below in a pcall).
 -- Rebuilds the entire streamer overlay from scratch every call, with deep
 -- indexing into PVPHUB_DB/PVPHUB_SETTINGS and no per-call guards — unlike
@@ -719,57 +1001,35 @@ local function UpdateCompactWindowImpl()
         PVPHUB.compactWindow.sortBtnText:SetText(PVPHUB.compactWindow.GetSortLabel(PVPHUB_SETTINGS.compactSortKey or "highestRating"))
     end
     
-    -- Clear existing content: hide AND deparent so stale frames don't
-    -- accumulate as siblings under content, which causes WoW to glitch
-    -- rendering of newly created frames at the same anchor position.
-    for _, row in ipairs(PVPHUB.compactWindow.rows or {}) do
-        row:Hide()
-        row:SetParent(nil)
-    end
-    for _, header in ipairs(PVPHUB.compactWindow.headers or {}) do
-        header:Hide()
-        header:SetParent(nil)
-    end
-    PVPHUB.compactWindow.rows = {}
-    PVPHUB.compactWindow.headers = {}
-    
     local yOffset = 0
     local rowHeight = PVPHUB_CONSTANTS.COMPACT_WINDOW.ROW_HEIGHT
-    
-    -- Create headers first
-    local headerRow = CreateFrame("Frame", nil, PVPHUB.compactWindow.content)
+
+    -- Header row (pooled, see GetCompactHeaderRow)
+    local headerRow = GetCompactHeaderRow()
     headerRow:SetSize(dynamicWidth - 16, rowHeight)
+    headerRow:ClearAllPoints()
     headerRow:SetPoint("TOPLEFT", 0, -yOffset - 3) -- Add 3px top padding
-    
-    -- Character header
-    local charHeader = headerRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    charHeader:SetPoint("LEFT", 8, 0)
-    charHeader:SetWidth(PVPHUB_CONSTANTS.COMPACT_WINDOW.BASE_WIDTH - 15) -- Leave some padding
-    charHeader:SetJustifyH("LEFT")
-    charHeader:SetWordWrap(false) -- Prevent text wrapping
-    charHeader:SetNonSpaceWrap(false) -- Prevent wrapping on non-space characters
-    charHeader:SetMaxLines(1) -- Force single line display
-    charHeader:SetText("|cffFFD700Character|r")
-    SafeSetFont(charHeader, PVPHUB.compactCurrentFontPath, 10, "OUTLINE")
-    
+    headerRow.charHeader:SetWidth(PVPHUB_CONSTANTS.COMPACT_WINDOW.BASE_WIDTH - 15) -- Leave some padding
+    SafeSetFont(headerRow.charHeader, PVPHUB.compactCurrentFontPath, 10, "OUTLINE")
+
     -- Rating headers with dynamic positioning
-    local headerData = COMPACT_BRACKET_ORDER
-    
     local columnIndex = 0
-    for _, header in ipairs(headerData) do
+    for i, header in ipairs(COMPACT_BRACKET_ORDER) do
+        local headerText = headerRow.columns[i]
         if PVPHUB_SETTINGS.compactMode.showRatings[header.key] then
             local xPos = PVPHUB_CONSTANTS.COMPACT_WINDOW.BASE_WIDTH + (columnIndex * PVPHUB_CONSTANTS.COMPACT_WINDOW.COLUMN_WIDTH) - 5
-            local headerText = headerRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            headerText:ClearAllPoints()
             headerText:SetPoint("LEFT", xPos, 0)
             headerText:SetWidth(PVPHUB_CONSTANTS.COMPACT_WINDOW.COLUMN_WIDTH - 10) -- Set width for centering
-            headerText:SetJustifyH("CENTER") -- Center the header text
-            headerText:SetText("|cffFFD700" .. header.icon .. " " .. header.name .. "|r")
             SafeSetFont(headerText, PVPHUB.compactCurrentFontPath, 9, "OUTLINE")
+            headerText:Show()
             columnIndex = columnIndex + 1
+        else
+            headerText:Hide()
         end
     end
-    
-    table.insert(PVPHUB.compactWindow.headers, headerRow)
+    headerRow:Show()
+
     yOffset = yOffset + rowHeight + 5  -- Extra space after header
     
     -- Sort and show selected characters by compactSortKey
@@ -981,12 +1241,19 @@ local function UpdateCompactWindowImpl()
     end
 
     local visibleCharCount = 0
-    for _, entry in ipairs(selected) do
-        local row = PVPHUB:CreateCompactCharacterRow(entry.char, entry.data, yOffset, dynamicWidth, entry.pinnedSpecID, entry.isSubRow)
-        if row then
-            table.insert(PVPHUB.compactWindow.rows, row)
-            yOffset = yOffset + rowHeight
-            visibleCharCount = visibleCharCount + 1
+    PVPHUB.compactWindow.rows = {}
+    for i, entry in ipairs(selected) do
+        local row = AcquireCompactRow(i)
+        ConfigureCompactRow(row, entry.char, entry.data, yOffset, dynamicWidth, entry.pinnedSpecID, entry.isSubRow)
+        table.insert(PVPHUB.compactWindow.rows, row)
+        yOffset = yOffset + rowHeight
+        visibleCharCount = visibleCharCount + 1
+    end
+    -- Hide pooled rows left over from a longer list
+    local pool = PVPHUB.compactWindow.rowPool
+    if pool then
+        for i = #selected + 1, #pool do
+            pool[i]:Hide()
         end
     end
     
@@ -1004,249 +1271,16 @@ local function UpdateCompactWindowImpl()
 end
 
 function PVPHUB:UpdateCompactWindow()
+    -- Remember which data this render was built from so PVPHUB_RefreshUI can
+    -- skip identical rebuilds; only kept when the render succeeded.
+    local sig = PVPHUB._ComputeDisplaySignature and PVPHUB._ComputeDisplaySignature()
+    PVPHUB._compactRenderSig = nil
     local ok, err = pcall(UpdateCompactWindowImpl)
-    if not ok then
+    if ok then
+        PVPHUB._compactRenderSig = sig
+    else
         PVPHubPrint("|cffff0000[PVP HUB]|r Compact window update failed: " .. tostring(err))
     end
-end
-
--- pinnedSpecID (optional): renders this character's row showing THAT spec's
--- rating across every enabled bracket column, instead of the character's live
--- current spec — same shape as the default row, just scoped to one specific
--- spec, so a character can have more than one spec shown as its own row at
--- the same time (see PromoteToMultiSpecIfNeeded).
--- isSubRow: true when this row sits directly under another row of the SAME
--- character (its group's anchor) in the flattened, sorted list. A pinned-spec
--- row is NOT automatically a sub-row — if its character has no main row shown,
--- it's the only row for that character and may land next to a completely
--- unrelated character after sorting, so it must render as a plain anchor row
--- itself rather than visually latching onto whatever happens to be above it.
-function PVPHUB:CreateCompactCharacterRow(charKey, data, yOffset, windowWidth, pinnedSpecID, isSubRow)
-    local content = PVPHUB.compactWindow.content
-    local row = CreateFrame("Frame", nil, content)
-    row:SetSize((windowWidth or PVPHUB_CONSTANTS.COMPACT_WINDOW.MIN_WIDTH) - 16, PVPHUB_CONSTANTS.COMPACT_WINDOW.ROW_HEIGHT)
-    row:SetPoint("TOPLEFT", 0, -yOffset)
-
-    -- Row hover highlight (same as main window)
-    local hoverBG = row:CreateTexture(nil, "OVERLAY")
-    hoverBG:SetTexture("Interface\\Buttons\\WHITE8x8")
-    local _cTheme = GetCurrentTheme()
-    local _hc = _cTheme.HOVER_BG
-    hoverBG:SetVertexColor(_hc[1], _hc[2], _hc[3], _hc[4])
-    hoverBG:SetAllPoints(row)
-    hoverBG:Hide()
-
-    -- Character name (truncated if too long). On a pinned-spec row, show that
-    -- spec's icon instead of the character's currently-active one, so the
-    -- duplicated rows for one character are visually distinguishable.
-    -- Sub-rows are indented with a small tree connector so they read as
-    -- belonging to the row directly above them, instead of looking like an
-    -- unrelated duplicate entry once rows are grouped adjacently.
-    local nameIndent = isSubRow and 16 or 5
-    if isSubRow then
-        local connectorV = row:CreateTexture(nil, "OVERLAY")
-        connectorV:SetTexture("Interface\\Buttons\\WHITE8x8")
-        connectorV:SetVertexColor(0.5, 0.5, 0.55, 0.6)
-        connectorV:SetWidth(1)
-        connectorV:SetPoint("TOPLEFT", row, "TOPLEFT", 9, 0)
-        connectorV:SetPoint("BOTTOM", row, "CENTER", 0, 0)
-
-        local connectorH = row:CreateTexture(nil, "OVERLAY")
-        connectorH:SetTexture("Interface\\Buttons\\WHITE8x8")
-        connectorH:SetVertexColor(0.5, 0.5, 0.55, 0.6)
-        connectorH:SetHeight(1)
-        connectorH:SetPoint("LEFT", row, "LEFT", 9, 0)
-        connectorH:SetPoint("RIGHT", row, "LEFT", nameIndent, 0)
-        connectorH:SetPoint("TOP", row, "CENTER", 0, 0)
-    end
-
-    local nameText = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    nameText:SetPoint("LEFT", nameIndent, 0)
-    nameText:SetWidth(PVPHUB_CONSTANTS.COMPACT_WINDOW.BASE_WIDTH - 15 - (nameIndent - 5)) -- Leave some padding
-    nameText:SetJustifyH("LEFT")
-    nameText:SetWordWrap(false) -- Prevent text wrapping
-    nameText:SetNonSpaceWrap(false) -- Prevent wrapping on non-space characters
-    nameText:SetMaxLines(1) -- Force single line display
-    if pinnedSpecID then
-        local pinnedSpecIcon = ""
-        local _si = GetCachedSpecInfo(pinnedSpecID)
-        if _si and _si.icon then
-            pinnedSpecIcon = "|T" .. _si.icon .. ":14|t "
-        end
-        -- Suppress the current-character dot on sub-rows — the anchor row
-        -- above already shows it, and repeating it here is just noise. A solo
-        -- pinned row (no main row shown) keeps its dot since it's the only
-        -- representation of that character in the list.
-        nameText:SetText(pinnedSpecIcon .. CreateCharacterName({char = charKey, data = data}, true, true, isSubRow))
-        if isSubRow then
-            nameText:SetAlpha(0.85) -- Slightly dimmed to read as a sub-row of the row above
-        end
-    else
-        nameText:SetText(CreateCharacterName({char = charKey, data = data}, true))
-    end
-    -- Use compact-specific font
-    SafeSetFont(nameText, PVPHUB.compactCurrentFontPath, 11)
-    -- Add backdrop shadow for better readability
-    nameText:SetShadowOffset(2, -2)
-    nameText:SetShadowColor(0, 0, 0, 1)
-
-    -- Add character tooltip to name area
-    local nameTooltipBtn = CreateFrame("Button", nil, row)
-    nameTooltipBtn:SetPoint("LEFT", nameIndent, 0)
-    nameTooltipBtn:SetSize(PVPHUB_CONSTANTS.COMPACT_WINDOW.BASE_WIDTH - 15, PVPHUB_CONSTANTS.COMPACT_WINDOW.ROW_HEIGHT)
-    nameTooltipBtn:SetScript("OnEnter", function()
-        hoverBG:Show()
-        ShowCharacterTooltip(charKey, nameTooltipBtn)
-    end)
-    nameTooltipBtn:SetScript("OnLeave", function()
-        hoverBG:Hide()
-        HideCharacterTooltip()
-    end)
-    
-    -- Ensure compact mode settings exist
-    if not PVPHUB_SETTINGS.compactMode or not PVPHUB_SETTINGS.compactMode.showRatings then
-        return row
-    end
-
-    -- Rating columns with dynamic positioning — same order as headers
-    local columnIndex = 0
-    for _, bracket in ipairs(COMPACT_BRACKET_ORDER) do
-        if PVPHUB_SETTINGS.compactMode.showRatings[bracket.key] then
-            -- On a pinned-spec row, the per-spec brackets (Shuffle/Blitz) show
-            -- THAT spec's rating specifically. 2v2/3v3/RBG aren't spec-specific
-            -- to begin with, so they render exactly like the default row.
-            local currentRating, isMultiSpec
-            if pinnedSpecID and (bracket.key == "ratingShuffle" or bracket.key == "ratingBlitz") then
-                local ratingTable = data[bracket.key]
-                currentRating = (type(ratingTable) == "table" and ratingTable[pinnedSpecID]) or 0
-                isMultiSpec = false -- explicit single spec, no ambiguity to flag
-            else
-                -- GetShuffleDisplayInfo handles flat numbers (2v2/3v3) and per-spec
-                -- tables (Shuffle/Blitz) through the same code path.
-                local _, specCount
-                currentRating, _, specCount = GetShuffleDisplayInfo(data, charKey, bracket.key)
-                isMultiSpec = (specCount > 1)
-            end
-            -- 2v2/3v3/RBG aren't spec-specific — on a sub-row they'd just repeat
-            -- the exact same number already shown on the anchor row above, which
-            -- reads as if it might differ per spec when it can't. Show a "same as
-            -- above" placeholder there instead of the number itself (only when
-            -- there's actually a value to point back to).
-            local isCharacterWideBracket = bracket.key == "rating2v2" or bracket.key == "rating3v3" or bracket.key == "ratingRBG"
-            local showAsDitto = isSubRow and isCharacterWideBracket and currentRating > 0
-
-            local display
-            if showAsDitto then
-                display = "|cff666666^|r"
-            else
-                display = GetRatingColor(currentRating) .. (currentRating > 0 and currentRating or "-") .. "|r"
-            end
-
-            local text = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-            local xPos = PVPHUB_CONSTANTS.COMPACT_WINDOW.BASE_WIDTH + (columnIndex * PVPHUB_CONSTANTS.COMPACT_WINDOW.COLUMN_WIDTH) - 5
-            text:SetPoint("LEFT", xPos, 0)
-            text:SetWidth(PVPHUB_CONSTANTS.COMPACT_WINDOW.COLUMN_WIDTH - 10) -- Set width for centering
-            text:SetJustifyH("CENTER") -- Center the text
-            text:SetText(display)
-            SafeSetFont(text, PVPHUB.compactCurrentFontPath, 11)
-            -- Add backdrop shadow for better readability
-            text:SetShadowOffset(2, -2)
-            text:SetShadowColor(0, 0, 0, 1)
-
-            -- Add star icon for multi-spec ratings, positioned to the right of the centered rating
-            if isMultiSpec then
-                local starIcon = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-                starIcon:SetPoint("LEFT", xPos + (PVPHUB_CONSTANTS.COMPACT_WINDOW.COLUMN_WIDTH / 2) + 15, 0) -- Position to the right of center
-                starIcon:SetText("|TInterface\\Common\\FavoritesIcon:12|t")
-                SafeSetFont(starIcon, PVPHUB.compactCurrentFontPath, 11)
-                starIcon:SetShadowOffset(2, -2)
-                starIcon:SetShadowColor(0, 0, 0, 1)
-            end
-
-            columnIndex = columnIndex + 1
-
-            do
-                -- Create comprehensive tooltip for all ratings (copied from main window)
-                local hoverBtn = CreateFrame("Button", nil, row)
-                hoverBtn:SetPoint("LEFT", xPos, 0)
-                hoverBtn:SetSize(PVPHUB_CONSTANTS.COMPACT_WINDOW.COLUMN_WIDTH - 10, PVPHUB_CONSTANTS.COMPACT_WINDOW.ROW_HEIGHT)
-                hoverBtn:SetFrameLevel(row:GetFrameLevel() + 5)
-                hoverBtn:SetScript("OnEnter", function()
-                    hoverBG:Show()
-                    -- Show tooltip for shuffle ratings
-                    if bracket.key == "ratingShuffle" then
-                        local shuffleData = data.ratingShuffle
-
-                        if type(shuffleData) == "table" then
-                            local specCount = 0
-                            local specsWithRating = {}
-
-                            -- Count specs with ratings > 0
-                            for specID, ratingVal in pairs(shuffleData) do
-                                if ratingVal > 0 then
-                                    specCount = specCount + 1
-                                    table.insert(specsWithRating, {specID = specID, rating = ratingVal})
-                                end
-                            end
-
-                            -- Show tooltip if there are any specs with ratings > 0
-                            if specCount > 0 then
-                                ShowPVPHUBRatingTooltip(hoverBtn, charKey, "ratingShuffle", shuffleData)
-                            end
-                        elseif type(shuffleData) == "number" and shuffleData > 0 then
-                            ShowPVPHUBRatingTooltip(hoverBtn, charKey, "ratingShuffle", shuffleData)
-                        end
-                    -- Show tooltip for blitz ratings
-                    elseif bracket.key == "ratingBlitz" then
-                        local blitzData = data.ratingBlitz
-                        if type(blitzData) == "table" then
-                            local specCount = 0
-                            local specsWithRating = {}
-
-                            -- Count specs with ratings > 0
-                            for specID, ratingVal in pairs(blitzData) do
-                                if ratingVal > 0 then
-                                    specCount = specCount + 1
-                                    table.insert(specsWithRating, {specID = specID, rating = ratingVal})
-                                end
-                            end
-
-                            -- Show tooltip if there are any specs with ratings > 0
-                            if specCount > 0 then
-                                ShowPVPHUBRatingTooltip(hoverBtn, charKey, "ratingBlitz", blitzData)
-                            end
-                        elseif type(blitzData) == "number" and blitzData > 0 then
-                            ShowPVPHUBRatingTooltip(hoverBtn, charKey, "ratingBlitz", blitzData)
-                        end
-                    -- Show tooltip for RBG rating with MMR
-                    elseif bracket.key == "ratingRBG" then
-                        local ratingVal = data.ratingRBG
-                        if ratingVal and ratingVal > 0 then
-                            ShowPVPHUBRatingTooltip(hoverBtn, charKey, "ratingRBG", ratingVal)
-                        end
-                    -- Show tooltip for 2v2 rating with MMR
-                    elseif bracket.key == "rating2v2" then
-                        local ratingVal = data.rating2v2
-                        if ratingVal and ratingVal > 0 then
-                            ShowPVPHUBRatingTooltip(hoverBtn, charKey, "rating2v2", ratingVal)
-                        end
-                    elseif bracket.key == "rating3v3" then
-                        local ratingVal = data.rating3v3
-                        if ratingVal and ratingVal > 0 then
-                            ShowPVPHUBRatingTooltip(hoverBtn, charKey, "rating3v3", ratingVal)
-                        end
-                    end
-                end)
-                hoverBtn:SetScript("OnLeave", function()
-                    hoverBG:Hide()
-                    GameTooltip:Hide()
-                    ClosePVPHUBRatingTooltip()
-                end)
-            end
-        end
-    end
-
-    return row
 end
 
 function PVPHUB:ShowCompactSettings()
@@ -1386,7 +1420,6 @@ function PVPHUB:ShowCompactSettings()
             if PVPHUB.compactWindow and PVPHUB.compactWindow:IsShown() then
                 PVPHUB:UpdateCompactWindow()
             end
-            if SaveSettings then SaveSettings() end
             f:Hide()
         end)
 
@@ -1841,7 +1874,6 @@ function PVPHUB:ShowCompactSettings()
                 if PVPHUB.compactWindow and not PVPHUB_SETTINGS.compactMode.hideBackground then
                     PVPHUB.compactWindow:SetBackdropColor(r,g,b,a)
                 end
-                if SaveSettings then SaveSettings() end
             end
             local function cancelFunc(prev)
                 if prev then
@@ -1850,7 +1882,6 @@ function PVPHUB:ShowCompactSettings()
                     if PVPHUB.compactWindow and not PVPHUB_SETTINGS.compactMode.hideBackground then
                         PVPHUB.compactWindow:SetBackdropColor(prev.r,prev.g,prev.b,prev.a)
                     end
-                    if SaveSettings then SaveSettings() end
                 end
             end
             ColorPickerFrame:SetupColorPickerAndShow({

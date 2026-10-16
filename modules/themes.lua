@@ -7,7 +7,7 @@
 -- shadows the global ApplyTheme for every call inside core.lua. This module
 -- only updates the pieces core.lua's ApplyTheme delegates to it via
 -- PVPHUB.Themes:UpdateAllWindows(), reading the already-resolved colors off
--- the shared _G.UI_CONSTANTS.COLORS table.
+-- the shared PVPHUB._UI_CONSTANTS.COLORS table (set by core.lua, read at call time since this file loads first).
 
 local _, PVPHUB = ...
 
@@ -23,6 +23,7 @@ end
 
 -- Update a specific window with current theme
 function PVPHUB.Themes:UpdateWindow(frame)
+    local UI_CONSTANTS = PVPHUB._UI_CONSTANTS
     if not frame or not UI_CONSTANTS or not UI_CONSTANTS.COLORS then
         return
     end
@@ -67,6 +68,7 @@ end
 
 -- Update tab colors
 function PVPHUB.Themes:UpdateTabs(frame)
+    local UI_CONSTANTS = PVPHUB._UI_CONSTANTS
     if not frame.tabs then return end
 
     for _, tab in ipairs(frame.tabs) do
@@ -86,6 +88,7 @@ end
 
 -- Update settings elements
 function PVPHUB.Themes:UpdateSettingsElements(frame)
+    local UI_CONSTANTS = PVPHUB._UI_CONSTANTS
     if not frame.settingsFrame then return end
 
     -- Update settings titles
@@ -120,6 +123,7 @@ end
 
 -- Update greeting elements
 function PVPHUB.Themes:UpdateGreetingElements(frame)
+    local UI_CONSTANTS = PVPHUB._UI_CONSTANTS
     if not frame.greetingFrame then return end
 
     -- Update greeting title
