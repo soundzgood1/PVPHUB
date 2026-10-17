@@ -11,7 +11,8 @@ PVPHUB.QueueTimer = {}
 -- --------------------------------------------------------------------------
 
 -- Returns the currently selected visual style: "pvphub" (default, themed
--- chrome) or "simple" (flat dark card, see PVPHUB.QueueTimer style docs).
+-- chrome), "simple" ("Detail", flat dark card), "compact" (one line) or
+-- "fade" (frameless card whose sides fade out).
 local function GetQueueTimerStyle()
     return (PVPHUB_SETTINGS and PVPHUB_SETTINGS.queueTimer and PVPHUB_SETTINGS.queueTimer.style) or "pvphub"
 end
@@ -56,6 +57,27 @@ local function FormatMinutesShort(totalSeconds)
 end
 
 local TICK_DOTS = { ".", "..", "..." }
+
+-- How the timer shows you're still waiting in queue (Settings > Queue Timer
+-- > Indicator): "dots" animates the In Queue time ("1:23..", PVPHUB style
+-- only), "breathing" softly fades the card's background in and out (the
+-- text stays solid), "both" combines the two, "none" shows neither.
+local function GetQueuedIndicator()
+    return (PVPHUB_SETTINGS and PVPHUB_SETTINGS.queueTimer and PVPHUB_SETTINGS.queueTimer.queuedIndicator) or "dots"
+end
+
+local function ShowsDots()
+    local indicator = GetQueuedIndicator()
+    return indicator == "dots" or indicator == "both"
+end
+
+local function ShowsBreathing()
+    local indicator = GetQueuedIndicator()
+    return indicator == "breathing" or indicator == "both"
+end
+
+local BREATH_HALF_SECONDS = 1.0   -- fade out, then back in: one breath every 2 s
+local BREATH_MIN_ALPHA    = 0.35  -- background alpha at the bottom of a breath
 
 -- Seconds left to accept a popped queue. Read from the client, which knows
 -- the real window for each queue type; the fixed 28 s countdown this used to
@@ -388,6 +410,177 @@ local PAD_X    = 12   -- left/right inner padding of a row
 local PAD_Y    = 8    -- top/bottom inner padding of a row
 local LINE_GAP = 4    -- space between stacked lines
 
+-- "Fade" style: no frame at all. The card is one band that fades out to the
+-- left and right, like the row highlight in the arena stats tooltip, with a
+-- hairline along the top and bottom that fades out to both ends.
+local FADE_EDGE  = 64   -- width of each fading side of the Fade card
+local FADE_PAD_X = 24   -- row padding on Fade, keeps text off the faintest part
+
+local WHITE_TEX = "Interface\\Buttons\\WHITE8x8"
+
+local function GetRowPadX()
+    return (GetQueueTimerStyle() == "fade") and FADE_PAD_X or PAD_X
+end
+
+-- A band of three strips filling `parent` (inset on every side): a left
+-- side fading in, a solid middle, a right side fading out.
+local function CreateFadeBand(parent, layer, subLevel, inset, blend)
+    local l = parent:CreateTexture(nil, layer, nil, subLevel)
+    local m = parent:CreateTexture(nil, layer, nil, subLevel)
+    local r = parent:CreateTexture(nil, layer, nil, subLevel)
+    l:SetPoint("TOPLEFT",     parent, "TOPLEFT",      inset, -inset)
+    l:SetPoint("BOTTOMLEFT",  parent, "BOTTOMLEFT",   inset,  inset)
+    r:SetPoint("TOPRIGHT",    parent, "TOPRIGHT",    -inset, -inset)
+    r:SetPoint("BOTTOMRIGHT", parent, "BOTTOMRIGHT", -inset,  inset)
+    m:SetPoint("TOPLEFT",     l, "TOPRIGHT",   0, 0)
+    m:SetPoint("BOTTOMRIGHT", r, "BOTTOMLEFT", 0, 0)
+    for _, t in ipairs({ l, m, r }) do
+        t:SetTexture(WHITE_TEX)
+        if blend then t:SetBlendMode(blend) end
+    end
+    return { left = l, mid = m, right = r }
+end
+
+-- Colors a fade band. `fade` is the width of each fading side; 0 paints a
+-- plain solid rectangle (how the framed styles use the same band). The
+-- color objects are kept on the band: breathing repaints it every frame.
+local function PaintFadeBand(band, r, g, b, a, fade)
+    band.cFull = band.cFull or CreateColor(r, g, b, a)
+    band.cEdge = band.cEdge or CreateColor(r, g, b, a)
+    band.cFull:SetRGBA(r, g, b, a)
+    band.cEdge:SetRGBA(r, g, b, (fade > 0) and 0 or a)
+    band.left:SetWidth(math.max(1, fade))
+    band.right:SetWidth(math.max(1, fade))
+    band.left:SetGradient("HORIZONTAL", band.cEdge, band.cFull)
+    band.right:SetGradient("HORIZONTAL", band.cFull, band.cEdge)
+    band.mid:SetVertexColor(r, g, b, a)
+end
+
+-- A 1 px line along the "TOP" or "BOTTOM" edge of `parent`, strongest in the
+-- middle and fading out to both ends.
+local function CreateFadeLine(parent, side, layer)
+    local l = parent:CreateTexture(nil, layer)
+    local r = parent:CreateTexture(nil, layer)
+    l:SetTexture(WHITE_TEX)
+    r:SetTexture(WHITE_TEX)
+    l:SetHeight(1)
+    r:SetHeight(1)
+    l:SetPoint(side .. "LEFT",  parent, side .. "LEFT",  0, 0)
+    l:SetPoint(side .. "RIGHT", parent, side,            0, 0)
+    r:SetPoint(side .. "LEFT",  parent, side,            0, 0)
+    r:SetPoint(side .. "RIGHT", parent, side .. "RIGHT", 0, 0)
+    return { left = l, right = r }
+end
+
+local function PaintFadeLine(line, r, g, b, a)
+    line.cFull = line.cFull or CreateColor(r, g, b, a)
+    line.cNone = line.cNone or CreateColor(r, g, b, 0)
+    line.cFull:SetRGBA(r, g, b, a)
+    line.cNone:SetRGBA(r, g, b, 0)
+    line.left:SetGradient("HORIZONTAL", line.cNone, line.cFull)
+    line.right:SetGradient("HORIZONTAL", line.cFull, line.cNone)
+end
+
+-- Shows or hides every texture of a band or line.
+local PART_KEYS = { "left", "mid", "right" }
+local function SetPartsShown(parts, shown)
+    for _, key in ipairs(PART_KEYS) do
+        if parts[key] then parts[key]:SetShown(shown) end
+    end
+end
+
+-- Shows the Fade card (band + hairlines) on the Fade style only; the other
+-- styles draw their card with the backdrop.
+local function ShowFadeCard(f, shown)
+    SetPartsShown(f.fadeBg, shown)
+    SetPartsShown(f.fadeTop, shown)
+    SetPartsShown(f.fadeBot, shown)
+end
+
+-- Fade style chrome: the backdrop goes fully transparent and the faded band
+-- and hairlines carry the theme colors, or green while a queue is ready.
+local function PaintFadeCard(f, alpha, ready)
+    f:SetBackdropColor(0, 0, 0, 0)
+    f:SetBackdropBorderColor(0, 0, 0, 0)
+    if f.Background then f.Background:SetVertexColor(0, 0, 0, 0) end
+    local colors = (PVPHUB.currentColors and next(PVPHUB.currentColors) and PVPHUB.currentColors) or {}
+    local bg, line
+    if ready then
+        bg, line = { 0.02, 0.14, 0.02 }, { 0.2, 1, 0.2 }
+    else
+        bg   = colors.WINDOW_BG   or { 0.08, 0.05, 0.05 }
+        line = colors.ACCENT_LINE or { 0.8, 0.3, 0.5 }
+    end
+    PaintFadeBand(f.fadeBg, bg[1], bg[2], bg[3], alpha, FADE_EDGE)
+    PaintFadeLine(f.fadeTop, line[1], line[2], line[3], 0.6 * alpha)
+    PaintFadeLine(f.fadeBot, line[1], line[2], line[3], 0.6 * alpha)
+end
+
+-- Colors the ready pulse for the current style: a 1 px
+-- edge plus a flat wash on the framed styles; on Fade, a wash with faded
+-- sides and faded hairlines in place of the edge. `edge` and `wash` are
+-- { r, g, b, a }.
+local function PaintGlow(glow, edge, wash)
+    local fade = (GetQueueTimerStyle() == "fade")
+    local r, g, b, a = edge[1], edge[2], edge[3], edge[4]
+    glow:SetBackdropBorderColor(r, g, b, fade and 0 or a)
+    PaintFadeLine(glow.fadeTop, r, g, b, a)
+    PaintFadeLine(glow.fadeBot, r, g, b, a)
+    PaintFadeBand(glow.wash, wash[1], wash[2], wash[3], wash[4], fade and FADE_EDGE or 0)
+    SetPartsShown(glow.fadeTop, fade)
+    SetPartsShown(glow.fadeBot, fade)
+end
+
+-- Anchors a row's first line (and divider) for the current style's side
+-- padding.
+local function ApplyRowPadding(row)
+    local padX = GetRowPadX()
+    if row._padX == padX then return end
+    row._padX = padX
+    row.nameLabel:ClearAllPoints()
+    row.nameLabel:SetPoint("TOPLEFT", row, "TOPLEFT", padX, -PAD_Y)
+    row.compactLine:ClearAllPoints()
+    row.compactLine:SetPoint("TOPLEFT", row, "TOPLEFT", padX, -PAD_Y)
+    row.divider:ClearAllPoints()
+    row.divider:SetPoint("BOTTOMLEFT",  row, "BOTTOMLEFT",   padX - 4, 0)
+    row.divider:SetPoint("BOTTOMRIGHT", row, "BOTTOMRIGHT", -(padX - 4), 0)
+end
+
+-- Alpha of the card's background: the opacity setting, times the current
+-- breath while the Breathing indicator runs (see SetBreathing).
+local function GetCardAlpha()
+    local opacity = (PVPHUB_SETTINGS and PVPHUB_SETTINGS.queueTimer and PVPHUB_SETTINGS.queueTimer.opacity) or 0.95
+    local f = PVPHUB.QueueTimer.frame
+    return opacity * ((f and f.breathMul) or 1)
+end
+
+-- The PVPHUB style's per-row highlight band: accent while waiting, green
+-- when ready. The other styles don't use it (on Fade the whole card is one).
+local function PaintRowBands(row, isReady)
+    row._bandReady = isReady
+    if GetQueueTimerStyle() ~= "pvphub" then
+        row.bandLeft:Hide()
+        row.bandRight:Hide()
+        return
+    end
+    local alpha = GetCardAlpha()
+    local r, g, b, a
+    if isReady then
+        r, g, b, a = 0.05, 0.35, 0.05, 0.55 * alpha
+    else
+        local accent = (PVPHUB.currentColors and PVPHUB.currentColors.ACCENT_LINE) or { 0.8, 0.3, 0.5, 0.8 }
+        r, g, b, a = accent[1], accent[2], accent[3], 0.18 * alpha
+    end
+    row.cBandFull = row.cBandFull or CreateColor(r, g, b, a)
+    row.cBandNone = row.cBandNone or CreateColor(r, g, b, 0)
+    row.cBandFull:SetRGBA(r, g, b, a)
+    row.cBandNone:SetRGBA(r, g, b, 0)
+    row.bandLeft:SetGradient("HORIZONTAL", row.cBandNone, row.cBandFull)
+    row.bandRight:SetGradient("HORIZONTAL", row.cBandFull, row.cBandNone)
+    row.bandLeft:Show()
+    row.bandRight:Show()
+end
+
 -- Measures how tall a row needs to be to fit its text lines, so unused rows
 -- don't leave dead space below the last row's text.
 local function ComputeRowHeight(row)
@@ -420,9 +613,9 @@ local function ResizeToContent(f)
         return total * 1.06 + 2
     end
 
-    -- Row content sits PAD_X in from both sides; the body is inset 3 px on
-    -- each side of the frame.
-    local INSETS = PAD_X * 2 + 6
+    -- Row content sits the style's padding in from both sides; the body is
+    -- inset 3 px on each side of the frame.
+    local INSETS = GetRowPadX() * 2 + 6
     for _, row in ipairs(f.slotRows or {}) do
         if row:IsShown() then
             if row.compactLine:IsShown() then
@@ -472,6 +665,12 @@ function PVPHUB.QueueTimer:CreateFrame()
         edgeSize = 12,
         insets   = { left = 3, right = 3, top = 3, bottom = 3 },
     })
+
+    -- Fade style card (see PaintFadeCard); hidden on the framed styles.
+    frame.fadeBg  = CreateFadeBand(frame, "BACKGROUND", 1, 0)
+    frame.fadeTop = CreateFadeLine(frame, "TOP", "BORDER")
+    frame.fadeBot = CreateFadeLine(frame, "BOTTOM", "BORDER")
+    ShowFadeCard(frame, false)
 
     -- Dragging (left button) + right-click context menu
     frame:SetMovable(true)
@@ -659,12 +858,10 @@ function PVPHUB.QueueTimer:CreateFrame()
     readyGlow:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, 0)
     readyGlow:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", 0, 0)
     readyGlow:SetBackdrop({ edgeFile = "Interface\\Buttons\\WHITE8x8", edgeSize = 1 })
-    readyGlow:SetBackdropBorderColor(0.45, 1, 0.5, 0.55)
-    local readyWash = readyGlow:CreateTexture(nil, "ARTWORK")
-    readyWash:SetPoint("TOPLEFT", frame, "TOPLEFT", 3, -3)
-    readyWash:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -3, 3)
-    readyWash:SetColorTexture(0.3, 1, 0.35, 0.14)
-    readyWash:SetBlendMode("ADD")
+    -- Wash and hairlines are colored per style by PaintGlow.
+    readyGlow.wash    = CreateFadeBand(readyGlow, "ARTWORK", 0, 3, "ADD")
+    readyGlow.fadeTop = CreateFadeLine(readyGlow, "TOP", "OVERLAY")
+    readyGlow.fadeBot = CreateFadeLine(readyGlow, "BOTTOM", "OVERLAY")
     readyGlow:Hide()
     local readyPulse = readyGlow:CreateAnimationGroup()
     readyPulse:SetLooping("BOUNCE")
@@ -674,8 +871,12 @@ function PVPHUB.QueueTimer:CreateFrame()
     pulseAlpha:SetDuration(0.8)
     pulseAlpha:SetSmoothing("IN_OUT")
     frame.readyGlow = readyGlow
-    frame.readyWash = readyWash
+
     frame.readyPulse = readyPulse
+
+    -- Drives the "breathing" indicator (see SetBreathing); its OnUpdate only
+    -- runs while breathing is on.
+    frame.breathDriver = CreateFrame("Frame", nil, frame)
 
     frame:Hide()
     self.frame = frame
@@ -690,7 +891,7 @@ end
 -- Scales all fonts and row positions proportionally to the current frame height.
 -- Base height is 80px (matches the default 12/13pt sizes).
 --
--- Font FAMILY follows the Appearance tab's selected font (PVPHUB._ResolveFontPath,
+-- Font FAMILY follows the Style section's selected font (PVPHUB._ResolveFontPath,
 -- exported from core.lua) same as everywhere else in the addon except Streamer
 -- Mode. Called both on resize and from core.lua's ApplyFontChanges() so an open
 -- Queue Timer window updates immediately when the user picks a new font.
@@ -712,12 +913,18 @@ function PVPHUB.QueueTimer:_ScaleFonts()
 end
 
 -- Applies saved opacity to the background texture only (real-time safe).
+-- Also how breathing animates the card (GetCardAlpha includes the breath).
 function PVPHUB.QueueTimer:ApplyOpacity()
     if not self.frame then return end
     local f = self.frame
-    local alpha = (PVPHUB_SETTINGS and PVPHUB_SETTINGS.queueTimer and PVPHUB_SETTINGS.queueTimer.opacity) or 0.95
+    local alpha = GetCardAlpha()
 
     local style = GetQueueTimerStyle()
+    ShowFadeCard(f, style == "fade")
+    if style == "fade" then
+        PaintFadeCard(f, alpha, false)
+        return
+    end
     if style == "simple" or style == "compact" then
         f:SetBackdropColor(0.05, 0.05, 0.06, alpha)
         if f.Background then f.Background:SetVertexColor(0.05, 0.05, 0.06, alpha) end
@@ -761,10 +968,19 @@ end
 -- Internal: applies theme colors to frame chrome only (not per-row content).
 function PVPHUB.QueueTimer:_ApplyColors()
     local f = self.frame
-    local alpha = (PVPHUB_SETTINGS and PVPHUB_SETTINGS.queueTimer and PVPHUB_SETTINGS.queueTimer.opacity) or 0.95
+    local alpha = GetCardAlpha()
+
+    local style = GetQueueTimerStyle()
+    ShowFadeCard(f, style == "fade")
+    if style == "fade" then
+        PaintFadeCard(f, alpha, false)
+        f.headerBg:SetColorTexture(0, 0, 0, 0)
+        f.separator:SetColorTexture(0, 0, 0, 0)
+        f.nameLabel:SetTextColor(1, 0.82, 0, 1)
+        return
+    end
 
     -- "Detail" / "Compact" styles: flat dark card, no theme accent colors at all.
-    local style = GetQueueTimerStyle()
     if style == "simple" or style == "compact" then
         f:SetBackdropColor(0.05, 0.05, 0.06, alpha)
         if f.Background then f.Background:SetVertexColor(0.05, 0.05, 0.06, alpha) end
@@ -796,7 +1012,6 @@ end
 
 -- Colors a single slot row: green READY highlight or normal theme colors.
 function PVPHUB.QueueTimer:_ApplyRowColors(row, isReady)
-    local alpha = (PVPHUB_SETTINGS and PVPHUB_SETTINGS.queueTimer and PVPHUB_SETTINGS.queueTimer.opacity) or 0.95
     local style = GetQueueTimerStyle()
 
     -- "Compact" style: one line, no bands. Most of the color already lives
@@ -835,28 +1050,18 @@ function PVPHUB.QueueTimer:_ApplyRowColors(row, isReady)
         return
     end
 
+    -- "PVPHUB" and "Fade": same text colors. Only PVPHUB gets the per-row
+    -- highlight band; on Fade the whole card already is one.
+    PaintRowBands(row, isReady)
     local colors = (PVPHUB.currentColors and next(PVPHUB.currentColors) and PVPHUB.currentColors)
                    or {}
     if isReady then
-        local cFull = CreateColor(0.05, 0.35, 0.05, 0.55 * alpha)
-        local cNone = CreateColor(0.05, 0.35, 0.05, 0)
-        row.bandLeft:SetGradient("HORIZONTAL", cNone, cFull)
-        row.bandRight:SetGradient("HORIZONTAL", cFull, cNone)
-        row.bandLeft:Show()
-        row.bandRight:Show()
         row.nameLabel:SetTextColor(0.2, 1, 0.2, 1)
         row.avgLabel:SetTextColor(0.5, 0.9, 0.5, 1)
         row.avgValue:SetTextColor(0.2, 1, 0.2, 1)
         row.inQLabel:SetTextColor(0.5, 0.9, 0.5, 1)
         row.inQValue:SetTextColor(0.2, 1, 0.2, 1)
     else
-        local accent = (PVPHUB.currentColors and PVPHUB.currentColors.ACCENT_LINE) or { 0.8, 0.3, 0.5, 0.8 }
-        local cFull = CreateColor(accent[1], accent[2], accent[3], 0.18 * alpha)
-        local cNone = CreateColor(accent[1], accent[2], accent[3], 0)
-        row.bandLeft:SetGradient("HORIZONTAL", cNone, cFull)
-        row.bandRight:SetGradient("HORIZONTAL", cFull, cNone)
-        row.bandLeft:Show()
-        row.bandRight:Show()
         row.nameLabel:SetTextColor(1, 0.82, 0, 1)  -- fixed yellow for readability
         local dim = { 0.7, 0.7, 0.7, 1 }
         row.avgLabel:SetTextColor(dim[1], dim[2], dim[3], 1)
@@ -964,7 +1169,7 @@ function PVPHUB.QueueTimer:Update()
 
     -- Advance the tick counter used for the animated dots indicator
     self.frame._tickCount = ((self.frame._tickCount or 0) + 1) % 3
-    local dots = TICK_DOTS[self.frame._tickCount + 1]
+    local dots = ShowsDots() and TICK_DOTS[self.frame._tickCount + 1] or ""
 
     -- Populate slot rows
     local anyReady = false
@@ -981,6 +1186,7 @@ function PVPHUB.QueueTimer:Update()
         local inQSec = math.floor(slot.elapsed / 1000)
 
         row.avgLabel:ClearAllPoints()
+        ApplyRowPadding(row)
 
         if style == "compact" then
             -- Everything on one line, as minimal as possible.
@@ -1119,6 +1325,8 @@ function PVPHUB.QueueTimer:Update()
         self:ApplyOpacity()
         ResizeToContent(self.frame)
         self:SetReadyPulse(anyReady)
+        -- A popped queue takes over from the waiting indicator
+        self:SetBreathing(not anyReady and ShowsBreathing())
 
         -- When any slot is READY, paint the entire frame chrome green,
         -- scaled by the user's opacity setting. At 0% opacity only green
@@ -1126,7 +1334,9 @@ function PVPHUB.QueueTimer:Update()
         if anyReady then
             local alpha = (PVPHUB_SETTINGS and PVPHUB_SETTINGS.queueTimer and PVPHUB_SETTINGS.queueTimer.opacity) or 0.95
             local readyStyle = GetQueueTimerStyle()
-            if readyStyle == "simple" or readyStyle == "compact" then
+            if readyStyle == "fade" then
+                PaintFadeCard(self.frame, alpha, true)
+            elseif readyStyle == "simple" or readyStyle == "compact" then
                 self.frame:SetBackdropColor(0.03, 0.09, 0.03, alpha)
                 self.frame:SetBackdropBorderColor(0.30, 0.85, 0.30, 0.45 * alpha)
                 self.frame.headerBg:SetColorTexture(0, 0, 0, 0)
@@ -1155,22 +1365,66 @@ end
 function PVPHUB.QueueTimer:Hide()
     self:StopTick()
     self:SetReadyPulse(false)
+    self:SetBreathing(false)
     if self.frame then
         self.frame:Hide()
     end
 end
 
--- Starts or stops the pulsing outline shown while a queue has popped.
--- Scaled by the Queue Timer opacity setting like the rest of the card, so at
--- 0% the pulse is invisible too. Called every tick while a queue is ready,
--- so an opacity change applies right away.
+-- Repaints everything whose alpha follows GetCardAlpha: the card itself and,
+-- on the PVPHUB style, the rows' highlight bands. Text is never touched.
+-- (Texture:SetAlpha can't be used for this: it overwrites the color's own
+-- alpha, which flattens the Fade card's gradients into a solid box.)
+local function RepaintCardAlpha(f)
+    PVPHUB.QueueTimer:ApplyOpacity()
+    for _, row in ipairs(f.slotRows) do
+        if row:IsShown() and row._bandReady ~= nil then PaintRowBands(row, row._bandReady) end
+    end
+end
+
+local BREATH_REPAINT_SECONDS = 1 / 30
+
+-- One smooth breath: full alpha, down to BREATH_MIN_ALPHA, back up.
+local function BreathOnUpdate(driver, elapsed)
+    driver.sinceRepaint = (driver.sinceRepaint or 0) + elapsed
+    if driver.sinceRepaint < BREATH_REPAINT_SECONDS then return end
+    driver.sinceRepaint = 0
+    local f = driver:GetParent()
+    local halves = (GetTime() - f.breathStart) / BREATH_HALF_SECONDS
+    f.breathMul = BREATH_MIN_ALPHA + (1 - BREATH_MIN_ALPHA) * (0.5 + 0.5 * math.cos(halves * math.pi))
+    RepaintCardAlpha(f)
+end
+
+-- Starts or stops the breathing indicator shown while waiting in queue: the
+-- card's background fades softly out and back in, in its own colors and
+-- shape, while the text stays solid. Works on top of the opacity setting,
+-- so at 0% there's nothing to see.
+function PVPHUB.QueueTimer:SetBreathing(on)
+    local f = self.frame
+    if not f or not f.breathDriver then return end
+    if on then
+        if f.breathing then return end
+        f.breathing = true
+        f.breathStart = GetTime()
+        f.breathDriver:SetScript("OnUpdate", BreathOnUpdate)
+    elseif f.breathing then
+        f.breathing = false
+        f.breathDriver:SetScript("OnUpdate", nil)
+        f.breathMul = nil
+        RepaintCardAlpha(f)
+    end
+end
+
+-- Starts or stops the pulsing glow shown while a queue has popped. Scaled by
+-- the Queue Timer opacity setting like the rest of the card, so at 0% the
+-- pulse is invisible too. Called every tick while a queue is ready, so an
+-- opacity or style change applies right away.
 function PVPHUB.QueueTimer:SetReadyPulse(on)
     local f = self.frame
     if not f or not f.readyPulse then return end
     local opacity = (PVPHUB_SETTINGS and PVPHUB_SETTINGS.queueTimer and PVPHUB_SETTINGS.queueTimer.opacity) or 0.95
     if on and opacity > 0 then
-        f.readyGlow:SetBackdropBorderColor(0.45, 1, 0.5, 0.55 * opacity)
-        f.readyWash:SetColorTexture(0.3, 1, 0.35, 0.14 * opacity)
+        PaintGlow(f.readyGlow, { 0.45, 1, 0.5, 0.55 * opacity }, { 0.3, 1, 0.35, 0.14 * opacity })
         f.readyGlow:Show()
         if not f.readyPulse:IsPlaying() then f.readyPulse:Play() end
     else
@@ -1188,6 +1442,8 @@ end
 function PVPHUB.QueueTimer:_ShowTestPreview()
     if not self.frame then self:CreateFrame() end
     self:SetReadyPulse(false) -- e.g. a pop preview just ended
+    -- Show the chosen waiting indicator in the preview too
+    self:SetBreathing(ShowsBreathing())
 
     self.frame.header:Hide()
     self.frame.separator:Hide()
@@ -1201,9 +1457,17 @@ function PVPHUB.QueueTimer:_ShowTestPreview()
         r1:SetPoint("TOPRIGHT", self.frame.body, "TOPRIGHT", 0, 0)
     end
 
+    -- The preview behaves like a live queue: the In Queue time counts up from
+    -- 1:23 and the dots indicator advances with the once-a-second tick that
+    -- re-renders it, so the chosen indicator can be judged before queueing.
+    local inQSec = 83 + math.floor(GetTime() - (self._previewStartedAt or GetTime()))
+    self.frame._tickCount = ((self.frame._tickCount or 0) + 1) % 3
+    local dots = ShowsDots() and TICK_DOTS[self.frame._tickCount + 1] or ""
+
     local row = self.frame.slotRows[1]
     if row then
         row.avgLabel:ClearAllPoints()
+        ApplyRowPadding(row)
         local style = GetQueueTimerStyle()
         if style == "compact" then
             row.mmrLine:Hide()
@@ -1213,7 +1477,7 @@ function PVPHUB.QueueTimer:_ShowTestPreview()
             row.inQLabel:Hide()
             row.inQValue:Hide()
             row.compactLine:Show()
-            row.compactLine:SetText("|cffffd1002v2|r |cffaaaaaa(1850)|r   Avg 3m   Q 1:23")
+            row.compactLine:SetText("|cffffd1002v2|r |cffaaaaaa(1850)|r   Avg 3m   Q " .. FormatElapsedExact(inQSec))
         else
             row.compactLine:Hide()
             row.nameLabel:Show()
@@ -1229,7 +1493,7 @@ function PVPHUB.QueueTimer:_ShowTestPreview()
                 row.avgLabel:SetText("Avg:")
                 row.avgValue:SetText("3 min 12 sec")
                 row.inQLabel:SetText("Q:")
-                row.inQValue:SetText("1 min 23 sec")
+                row.inQValue:SetText(FormatDurationLong(inQSec))
             else
                 row.mmrLine:Hide()
                 row.avgLabel:SetPoint("TOPLEFT", row.nameLabel, "BOTTOMLEFT", 0, -LINE_GAP)
@@ -1237,7 +1501,7 @@ function PVPHUB.QueueTimer:_ShowTestPreview()
                 row.avgLabel:SetText("Avg Wait:")
                 row.avgValue:SetText("3 min")
                 row.inQLabel:SetText("In Queue:")
-                row.inQValue:SetText("1:23.")
+                row.inQValue:SetText(FormatElapsedExact(inQSec) .. dots)
             end
         end
         self:_ApplyRowColors(row, false)
@@ -1268,6 +1532,7 @@ end
 function PVPHUB.QueueTimer:_ShowPlaceholder()
     if not self.frame then self:CreateFrame() end
     self:SetReadyPulse(false)
+    self:SetBreathing(false)
     local f = self.frame
 
     f.header:Hide()
@@ -1282,6 +1547,7 @@ function PVPHUB.QueueTimer:_ShowPlaceholder()
         row:SetPoint("TOPLEFT",  f.body, "TOPLEFT",  0, 0)
         row:SetPoint("TOPRIGHT", f.body, "TOPRIGHT", 0, 0)
         row.currentDisplayName = nil
+        ApplyRowPadding(row)
         row.mmrLine:Hide()
         row.nameLabel:Hide()
         row.avgLabel:Hide()
@@ -1334,6 +1600,7 @@ function PVPHUB.QueueTimer:TogglePreview()
     self._testMode = not self._testMode
 
     if self._testMode then
+        self._previewStartedAt = GetTime() -- the preview's In Queue time counts up from here
         if PVPHUB_SETTINGS and PVPHUB_SETTINGS.queueTimerEnabled == false then
             -- Temporarily allow show even if the master toggle is off,
             -- so the user can still preview the widget visually.
@@ -1478,6 +1745,9 @@ queueEventFrame:SetScript("OnEvent", function(self, event, arg1)
         end
         if PVPHUB_SETTINGS.queueTimer.hideInInstances == nil then
             PVPHUB_SETTINGS.queueTimer.hideInInstances = true
+        end
+        if PVPHUB_SETTINGS.queueTimer.queuedIndicator == nil then
+            PVPHUB_SETTINGS.queueTimer.queuedIndicator = "dots"
         end
         PVPHUB.QueueTimer:ApplyScale()
         WarnIfSFXVolumeLooksStuck()

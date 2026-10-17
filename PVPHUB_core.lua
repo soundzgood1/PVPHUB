@@ -66,7 +66,7 @@ local function SafeSetFont(fontString, path, size, flags)
     end
 end
 
--- Global registry of every FontString that should track the Appearance-tab
+-- Global registry of every FontString that should track the Style section's
 -- font selection: main window rows/headers, Settings/Stats tab chrome, hover
 -- tooltips, the Queue Timer window — everything except Streamer Mode, which
 -- keeps its own independent font setting (compactMode.selectedFont in
@@ -2837,6 +2837,94 @@ local function ApplyWindowBGColor(frame, alpha)
     end
 end
 
+-- Rounded corners for the main window's background, border ring and glow.
+-- Each shape gets small corner masks of a fixed size, so its corners are
+-- true circles with a crisp edge however big the window is. (This used to
+-- be one 2048x1024 mask stretched over the whole window, which made the
+-- corners elliptical, feathered them over ~5 px and left the border ring
+-- uneven.) Outside its own square a corner mask is white (CLAMPTOWHITE), so
+-- each one only cuts its own corner. Masks must sit on the same frame as
+-- the texture they cut.
+--
+-- The client didn't apply a fourth mask to one texture (the bottom-right
+-- corner stayed square), so a shape is a top and a bottom half meeting in
+-- the middle, each cut by its own two corners. It behaves like a single
+-- texture for the calls made on it: SetVertexColor, SetGradient, Show, Hide.
+PVPHUB.WINDOW_CORNER_RADIUS = 32
+do
+    local CORNER_FILE = "Interface\\AddOns\\PVPHUB\\media\\window_corner_"
+
+    local function CornerMask(frame, point, suffix, sx, sy, outset, radius)
+        local mask = frame:CreateMaskTexture()
+        mask:SetTexture(CORNER_FILE .. suffix, "CLAMPTOWHITE", "CLAMPTOWHITE")
+        mask:SetSize(radius, radius)
+        mask:SetPoint(point, frame, point, sx * outset, sy * outset)
+        return mask
+    end
+
+    local Shape = {}
+    Shape.__index = Shape
+
+    function Shape:SetVertexColor(r, g, b, a)
+        self.top:SetVertexColor(r, g, b, a)
+        self.bottom:SetVertexColor(r, g, b, a)
+    end
+
+    -- A vertical gradient (minColor at the bottom) is split at its midpoint
+    -- color, so the two halves add up to one smooth gradient.
+    function Shape:SetGradient(orientation, minColor, maxColor)
+        if orientation ~= "VERTICAL" then
+            self.top:SetGradient(orientation, minColor, maxColor)
+            self.bottom:SetGradient(orientation, minColor, maxColor)
+            return
+        end
+        local r1, g1, b1, a1 = minColor:GetRGBA()
+        local r2, g2, b2, a2 = maxColor:GetRGBA()
+        local mid = CreateColor((r1 + r2) / 2, (g1 + g2) / 2, (b1 + b2) / 2, (a1 + a2) / 2)
+        self.bottom:SetGradient("VERTICAL", minColor, mid)
+        self.top:SetGradient("VERTICAL", mid, maxColor)
+    end
+
+    function Shape:Show() self.top:Show(); self.bottom:Show() end
+    function Shape:Hide() self.top:Hide(); self.bottom:Hide() end
+    function Shape:SetShown(shown) self.top:SetShown(shown); self.bottom:SetShown(shown) end
+
+    -- Rounds (on = true) or squares the shape's corners.
+    function Shape:SetRounded(on)
+        on = on and true or false
+        if self.rounded == on then return end
+        self.rounded = on
+        for _, part in ipairs(self.parts) do
+            for _, mask in ipairs(part.masks) do
+                if on then part.tex:AddMaskTexture(mask) else part.tex:RemoveMaskTexture(mask) end
+            end
+        end
+    end
+
+    -- A rounded rectangle filling `frame`, grown by `outset` on every side.
+    -- Starts square; call SetRounded(true) to round it.
+    function PVPHUB.CreateRoundedShape(frame, layer, subLevel, outset, radius)
+        local top = frame:CreateTexture(nil, layer, nil, subLevel)
+        top:SetColorTexture(1, 1, 1, 1)
+        top:SetPoint("TOPLEFT",     frame, "TOPLEFT", -outset, outset)
+        top:SetPoint("BOTTOMRIGHT", frame, "RIGHT",    outset, 0)
+        local bottom = frame:CreateTexture(nil, layer, nil, subLevel)
+        bottom:SetColorTexture(1, 1, 1, 1)
+        bottom:SetPoint("TOPLEFT",     frame, "LEFT",        -outset, 0)
+        bottom:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT",  outset, -outset)
+        local shape = setmetatable({ top = top, bottom = bottom, rounded = false }, Shape)
+        shape.parts = {
+            { tex = top, masks = {
+                CornerMask(frame, "TOPLEFT",  "tl", -1, 1, outset, radius),
+                CornerMask(frame, "TOPRIGHT", "tr",  1, 1, outset, radius) } },
+            { tex = bottom, masks = {
+                CornerMask(frame, "BOTTOMLEFT",  "bl", -1, -1, outset, radius),
+                CornerMask(frame, "BOTTOMRIGHT", "br",  1, -1, outset, radius) } },
+        }
+        return shape
+    end
+end
+
 -- Shows or hides the main window's soft ambient edge glow AND its thin
 -- border ring based on the "Window Glow" appearance setting (defaults to
 -- on). Both are separate textures (glowLayers = blurred layers, borderTex =
@@ -2980,6 +3068,75 @@ local function ApplyModernDropdownStyling(dropdown)
 
     -- Apply current theme colors (runs every call so they stay in sync)
     RefreshDropdownColors(dropdown)
+end
+
+-- "NEW" tags for settings added in a release. A tag shows only while the
+-- installed version's major.minor is NEW_BADGE_VERSION, and only until the
+-- user has opened the setting it marks (MarkNewBadgeSeen). A tag standing
+-- for several keys (a section header) hides once all of them are seen.
+PVPHUB.NEW_BADGE_VERSION = "6.7"
+do
+    local badges = {} -- every tag created, so seeing one updates the others
+
+    local function IsBadgeRelease()
+        local v = C_AddOns.GetAddOnMetadata("PVPHUB", "Version") or ""
+        return v:match("^(%d+%.%d+)") == PVPHUB.NEW_BADGE_VERSION
+    end
+
+    local function Refresh(badge)
+        local seen = PVPHUB_SETTINGS and PVPHUB_SETTINGS.newBadgesSeen or {}
+        local unseen = false
+        for _, key in ipairs(badge.keys) do
+            if not seen[key] then unseen = true end
+        end
+        local show = unseen and IsBadgeRelease()
+        badge:SetShown(show)
+        if not show then
+            badge.blink:Stop()
+        elseif not badge.blink:IsPlaying() then
+            badge.blink:Play()
+        end
+    end
+
+    -- Creates a small, softly blinking "NEW" tag on `parent`. `keys` is the
+    -- key (or list of keys) of the setting(s) it marks; the caller anchors it.
+    function PVPHUB.CreateNewBadge(parent, keys)
+        local badge = CreateFrame("Frame", nil, parent, "BackdropTemplate")
+        badge.keys = (type(keys) == "table") and keys or { keys }
+        badge:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8x8",
+                            edgeFile = "Interface\\Buttons\\WHITE8x8", edgeSize = 1 })
+        badge:SetBackdropColor(1, 0.80, 0.10, 0.95)
+        badge:SetBackdropBorderColor(1, 0.92, 0.55, 1)
+
+        local text = badge:CreateFontString(nil, "OVERLAY")
+        RegisterTrackedFont(text, 9, "")
+        text:SetPoint("CENTER", badge, "CENTER", 0, 0)
+        text:SetTextColor(0.15, 0.09, 0, 1)
+        text:SetText("NEW")
+        badge:SetSize(30, 13)
+
+        local blink = badge:CreateAnimationGroup()
+        blink:SetLooping("BOUNCE")
+        local fade = blink:CreateAnimation("Alpha")
+        fade:SetFromAlpha(1)
+        fade:SetToAlpha(0.35)
+        fade:SetDuration(0.8)
+        fade:SetSmoothing("IN_OUT")
+        badge.blink = blink
+        -- (Re)start whenever the settings panel or section makes it visible
+        badge:SetScript("OnShow", function(self) self.blink:Play() end)
+
+        badges[#badges + 1] = badge
+        Refresh(badge)
+        return badge
+    end
+
+    function PVPHUB.MarkNewBadgeSeen(key)
+        PVPHUB_SETTINGS.newBadgesSeen = PVPHUB_SETTINGS.newBadgesSeen or {}
+        if PVPHUB_SETTINGS.newBadgesSeen[key] then return end
+        PVPHUB_SETTINGS.newBadgesSeen[key] = true
+        for _, badge in ipairs(badges) do Refresh(badge) end
+    end
 end
 
 -- Drop-in replacement for Blizzard's UIFrameFadeIn/UIFrameFadeOut (same
@@ -7802,41 +7959,23 @@ SlashCmdList["PVPHUB"] = function(msg)
         -- Create window frame
         local f = CreateFrame("Frame", "PVPHUBWindow", UIParent)
 
-        -- Rounded border ring (2 px larger on all sides, drawn behind background)
-        local borderTex = f:CreateTexture(nil, "BACKGROUND", nil, -2)
-        borderTex:SetColorTexture(1, 1, 1, 1)
-        borderTex:SetPoint("TOPLEFT",     f, "TOPLEFT",     -7,  7)
-        borderTex:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT",  7, -7)
-        local borderMask = f:CreateMaskTexture()
-        borderMask:SetTexture("Interface\\AddOns\\PVPHUB\\media\\rounded_mask",
-            "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
-        borderMask:SetPoint("TOPLEFT",     f, "TOPLEFT",     -7,  7)
-        borderMask:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT",  7, -7)
-        borderTex:AddMaskTexture(borderMask)
-        f.borderTex  = borderTex
-        f.borderMask = borderMask
+        -- Border ring (7 units larger on all sides, drawn behind the
+        -- background). Its corners are concentric with the background's, so
+        -- the ring is equally wide all the way round.
+        f.borderTex = PVPHUB.CreateRoundedShape(f, "BACKGROUND", -2, 7, PVPHUB.WINDOW_CORNER_RADIUS + 7)
 
-        -- Rounded background
-        local bgTex = f:CreateTexture(nil, "BACKGROUND", nil, -1)
-        bgTex:SetColorTexture(1, 1, 1, 1)
-        bgTex:SetAllPoints()
-        local bgMask = f:CreateMaskTexture()
-        bgMask:SetTexture("Interface\\AddOns\\PVPHUB\\media\\rounded_mask",
-            "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
-        bgMask:SetAllPoints()
-        bgTex:AddMaskTexture(bgMask)
-        f.bgTex  = bgTex
-        f.bgMask = bgMask
+        -- Background
+        f.bgTex = PVPHUB.CreateRoundedShape(f, "BACKGROUND", -1, 0, PVPHUB.WINDOW_CORNER_RADIUS)
 
+        -- "Rounded Frame" setting: rounds or squares the background, the
+        -- border ring and the glow layers together.
         function f:ApplyFrameStyle()
             local rounded = PVPHUB_SETTINGS.mainWindow and PVPHUB_SETTINGS.mainWindow.roundedFrame
             if rounded == nil then rounded = true end
-            if rounded then
-                self.bgTex:AddMaskTexture(self.bgMask)
-                self.borderTex:AddMaskTexture(self.borderMask)
-            else
-                self.bgTex:RemoveMaskTexture(self.bgMask)
-                self.borderTex:RemoveMaskTexture(self.borderMask)
+            self.bgTex:SetRounded(rounded)
+            self.borderTex:SetRounded(rounded)
+            for _, layer in ipairs(self.glowLayers or {}) do
+                layer:SetRounded(rounded)
             end
         end
 
@@ -7927,7 +8066,8 @@ SlashCmdList["PVPHUB"] = function(msg)
             end
         end)
         
-        -- Multi-layer soft glow: each layer sits further behind and more transparent
+        -- Multi-layer soft glow: each layer sits further behind and more
+        -- transparent; their corners are concentric with the window's.
         local glowLayers = {}
         local glowOffsets = { {2, 0.25}, {4, 0.14}, {7, 0.07}, {10, 0.03} }
         local gc = UI_CONSTANTS.COLORS.WINDOW_GLOW
@@ -7938,19 +8078,13 @@ SlashCmdList["PVPHUB"] = function(msg)
             layer:SetPoint("TOPLEFT",     f, "TOPLEFT",     -off,  off)
             layer:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT",  off, -off)
             layer:SetFrameLevel(f:GetFrameLevel() - 1)
-            local tex = layer:CreateTexture(nil, "BACKGROUND", nil, -i)
-            tex:SetColorTexture(1, 1, 1, 1)
-            tex:SetAllPoints()
-            local mask = layer:CreateMaskTexture()
-            mask:SetTexture("Interface\\AddOns\\PVPHUB\\media\\rounded_mask",
-                "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
-            mask:SetAllPoints()
-            tex:AddMaskTexture(mask)
+            local tex = PVPHUB.CreateRoundedShape(layer, "BACKGROUND", -i, 0, PVPHUB.WINDOW_CORNER_RADIUS + off)
             tex:SetVertexColor(gc[1], gc[2], gc[3], alpha * baseOpacity)
             glowLayers[i] = tex
         end
         f.glowFrame  = glowLayers[1] -- kept for compat
         f.glowLayers = glowLayers
+        f:ApplyFrameStyle() -- round the glow layers too
         ApplyWindowGlowVisibility(f)
 
         -- Blizzard close button, desaturated + recolored to silver
@@ -8054,7 +8188,7 @@ SlashCmdList["PVPHUB"] = function(msg)
         -- Modern title with gradient effect
         -- Deliberately NOT RegisterTrackedFont'd — this is the addon's own
         -- brand mark, so it's hardcoded to the bundled Prototype font and
-        -- stays put regardless of the user's Appearance font selection.
+        -- stays put regardless of the user's Style > Font selection.
         f.title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
         f.title:SetPoint("TOPLEFT", f, "TOPLEFT", 45, -15) -- Moved right to make room for logo
         f.title:SetText("PVP HUB")
@@ -8303,6 +8437,15 @@ SlashCmdList["PVPHUB"] = function(msg)
                 if region then region:SetDesaturated(true) end
             end
 
+            -- Soft blend from the window body into the tab: the tab's top
+            -- takes the body's color and fades into the tab's own, instead of
+            -- a hard edge. Above the tab art, below its text; colored and
+            -- sized in RefreshTabBar.
+            tab._pvpBlend = tab:CreateTexture(nil, "BORDER")
+            tab._pvpBlend:SetTexture("Interface\\Buttons\\WHITE8x8")
+            tab._pvpBlend:SetPoint("TOPLEFT",  tab, "TOPLEFT",   1, 0)
+            tab._pvpBlend:SetPoint("TOPRIGHT", tab, "TOPRIGHT", -1, 0)
+
             -- Store tab data for our use
             f.tabs[data.id] = {
                 id = data.id,
@@ -8366,10 +8509,26 @@ SlashCmdList["PVPHUB"] = function(msg)
             local border  = colors.WINDOW_BORDER
             local accent  = colors.TITLE_COLOR
             local baseR, baseG, baseB = border[1] * 0.55, border[2] * 0.55, border[3] * 0.55
+            -- The body's color along the window's bottom edge, where the tabs
+            -- hang: a vertical gradient's minColor is its bottom, and
+            -- ApplyWindowBGColor passes WINDOW_BG_TOP as that.
+            local bodyBg = colors.WINDOW_BG
+            local edge   = colors.WINDOW_BG_TOP or bodyBg
+            local edgeA  = opacity * ((edge[4] or bodyBg[4]) / bodyBg[4])
 
             for tabId, tabInfo in pairs(f.tabs) do
                 local tab = tabInfo.button
                 if tab then
+                    -- The active tab blends in deep, so it reads as part of
+                    -- the window; inactive ones only lightly, so they sit behind.
+                    local blend = tab._pvpBlend
+                    if blend then
+                        local active = (f.currentTab == tabId)
+                        blend:SetHeight(active and 20 or 10)
+                        blend:SetGradient("VERTICAL",
+                            CreateColor(edge[1], edge[2], edge[3], 0),
+                            CreateColor(edge[1], edge[2], edge[3], active and edgeA or edgeA * 0.6))
+                    end
                     for _, regionName in ipairs({ "Left", "Middle", "Right" }) do
                         local region = tab[regionName]
                         if region then region:SetVertexColor(baseR, baseG, baseB, opacity) end
@@ -8707,6 +8866,10 @@ SlashCmdList["PVPHUB"] = function(msg)
                 "Gold Threshold:",
                 "Only count characters with more than this much Gold toward Total Gold. Value is in gold, not copper. 0 includes everyone.",
                 "goldThreshold")
+            -- Two columns: the thresholds form the right one, starting at the
+            -- section's middle, level with the first checkbox.
+            honorLabel:ClearAllPoints()
+            honorLabel:SetPoint("TOPLEFT", dispContent, "TOP", 4, -16)
 
             -- ============================================================
             -- SECTION: NOTIFICATIONS
@@ -8730,7 +8893,7 @@ SlashCmdList["PVPHUB"] = function(msg)
             end)
 
             local disablePrintCheckbox = CreateFrame("CheckButton", nil, notifContent, "InterfaceOptionsCheckButtonTemplate")
-            disablePrintCheckbox:SetPoint("TOPLEFT", disableHonorWarningsCheckbox, "BOTTOMLEFT", 0, -2)
+            disablePrintCheckbox:SetPoint("TOPLEFT", notifContent, "TOP", 0, -10) -- right column
             disablePrintCheckbox.Text:SetText("Disable Chat Notifications")
             PVPHUB_SETTINGS.disablePrintMessages = PVPHUB_SETTINGS.disablePrintMessages or false
             disablePrintCheckbox:SetChecked(PVPHUB_SETTINGS.disablePrintMessages)
@@ -8756,6 +8919,9 @@ SlashCmdList["PVPHUB"] = function(msg)
             -- ============================================================
             local sQT    = MakeSection("queueTimer",     "QUEUE TIMER",    {0.15, 0.55, 0.20}, "Interface\\Icons\\INV_Misc_PocketWatch_01")
             local qtContent = sQT.content
+            -- NEW tag for the 6.7 additions (Fade style, Indicator option)
+            PVPHUB.CreateNewBadge(sQT.header, { "qtStyle", "qtIndicator" })
+                :SetPoint("LEFT", sQT.arrowText, "RIGHT", 8, 0)
 
             -- Master toggle
             if PVPHUB_SETTINGS.queueTimerEnabled == nil then PVPHUB_SETTINGS.queueTimerEnabled = true end
@@ -8786,8 +8952,9 @@ SlashCmdList["PVPHUB"] = function(msg)
             end)
             queueTimerCheckbox:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
-            -- Style dropdown: "PVPHUB" (default, themed chrome) or
-            -- "Detail" (flat minimal card with a last-match MMR line).
+            -- Style dropdown: "PVPHUB" (default, themed chrome), "Detail"
+            -- (flat minimal card with a last-match MMR line), "Compact" (one
+            -- line) or "Fade" (frameless, sides fade out).
             if not PVPHUB_SETTINGS.queueTimer then PVPHUB_SETTINGS.queueTimer = {} end
             if PVPHUB_SETTINGS.queueTimer.style == nil then PVPHUB_SETTINGS.queueTimer.style = "pvphub" end
 
@@ -8796,7 +8963,7 @@ SlashCmdList["PVPHUB"] = function(msg)
             qtStyleLabel:SetText("Style:")
             qtStyleLabel:SetTextColor(0.85, 0.85, 0.85, 1)
 
-            local qtStyleNames = { pvphub = "PVPHUB", simple = "Detail", compact = "Compact" }
+            local qtStyleNames = { pvphub = "PVPHUB", simple = "Detail", compact = "Compact", fade = "Fade" }
             local qtStyleDropdown = CreateFrame("Frame", "PVPHUBQueueStyleDropdown", qtContent, "UIDropDownMenuTemplate")
             qtStyleDropdown:SetPoint("LEFT", qtStyleLabel, "RIGHT", -10, 0)
             UIDropDownMenu_SetWidth(qtStyleDropdown, 130)
@@ -8806,8 +8973,10 @@ SlashCmdList["PVPHUB"] = function(msg)
                 { value = "pvphub",  text = "PVPHUB" },
                 { value = "simple",  text = "Detail" },
                 { value = "compact", text = "Compact" },
+                { value = "fade",    text = "Fade" },
             }
             PVPHUB.AttachModernMenu(qtStyleDropdown, function(_, root)
+                PVPHUB.MarkNewBadgeSeen("qtStyle")
                 for _, opt in ipairs(qtStyleOptions) do
                     root:CreateRadio(opt.text,
                         function() return PVPHUB_SETTINGS.queueTimer.style == opt.value end,
@@ -8827,15 +8996,71 @@ SlashCmdList["PVPHUB"] = function(msg)
                 GameTooltip:AddLine("PVPHUB: the default themed look with colored accents", 0.7, 0.7, 0.7, true)
                 GameTooltip:AddLine("Detail: a minimal dark card showing your last match's MMR change", 0.7, 0.7, 0.7, true)
                 GameTooltip:AddLine("Compact: everything squeezed onto a single line", 0.7, 0.7, 0.7, true)
+                GameTooltip:AddLine("Fade: no frame, the card fades out to the left and right", 0.7, 0.7, 0.7, true)
                 GameTooltip:Show()
             end)
             qtStyleDropdown:SetScript("OnLeave", function() GameTooltip:Hide() end)
             f.qtStyleDropdown = qtStyleDropdown
 
+            -- Waiting indicator: dots / breathing background / both / none
+            if PVPHUB_SETTINGS.queueTimer.queuedIndicator == nil then PVPHUB_SETTINGS.queueTimer.queuedIndicator = "dots" end
+            local qtIndicatorLabel = qtContent:CreateFontString(nil, "ARTWORK", "GameFontNormal")
+            qtIndicatorLabel:SetPoint("TOPLEFT", qtStyleLabel, "BOTTOMLEFT", 0, -12)
+            qtIndicatorLabel:SetText("Indicator:")
+            qtIndicatorLabel:SetTextColor(0.85, 0.85, 0.85, 1)
+
+            local qtIndicatorOptions = {
+                { value = "dots",      text = "Dots" },
+                { value = "breathing", text = "Breathing" },
+                { value = "both",      text = "Both" },
+                { value = "none",      text = "None" },
+            }
+            local function IndicatorText(value)
+                for _, opt in ipairs(qtIndicatorOptions) do
+                    if opt.value == value then return opt.text end
+                end
+                return "Dots"
+            end
+            local qtIndicatorDropdown = CreateFrame("Frame", "PVPHUBQueueIndicatorDropdown", qtContent, "UIDropDownMenuTemplate")
+            UIDropDownMenu_SetWidth(qtIndicatorDropdown, 130)
+            ApplyModernDropdownStyling(qtIndicatorDropdown)
+            UIDropDownMenu_SetText(qtIndicatorDropdown, IndicatorText(PVPHUB_SETTINGS.queueTimer.queuedIndicator))
+            PVPHUB.AttachModernMenu(qtIndicatorDropdown, function(_, root)
+                PVPHUB.MarkNewBadgeSeen("qtIndicator")
+                for _, opt in ipairs(qtIndicatorOptions) do
+                    root:CreateRadio(opt.text,
+                        function() return PVPHUB_SETTINGS.queueTimer.queuedIndicator == opt.value end,
+                        function()
+                            PVPHUB_SETTINGS.queueTimer.queuedIndicator = opt.value
+                            UIDropDownMenu_SetText(qtIndicatorDropdown, opt.text)
+                            if PVPHUB.QueueTimer then PVPHUB.QueueTimer:Update() end
+                        end)
+                end
+            end)
+            qtIndicatorDropdown:SetScript("OnEnter", function(self)
+                GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
+                GameTooltip:SetText("Queue Indicator", 1, 1, 1)
+                GameTooltip:AddLine("How the timer shows that you're still in queue", 0.7, 0.7, 0.7, true)
+                GameTooltip:AddLine("Dots: animated dots after the In Queue time (PVPHUB and Fade styles)", 0.7, 0.7, 0.7, true)
+                GameTooltip:AddLine("Breathing: the timer's background softly fades out and back in every 2 seconds", 0.7, 0.7, 0.7, true)
+                GameTooltip:AddLine("Both: dots and breathing together", 0.7, 0.7, 0.7, true)
+                GameTooltip:AddLine("None: no indicator", 0.7, 0.7, 0.7, true)
+                GameTooltip:Show()
+            end)
+            qtIndicatorDropdown:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+            -- Line both dropdowns up after the wider of the two labels
+            local qtLabelWidth = math.max(qtStyleLabel:GetStringWidth(), qtIndicatorLabel:GetStringWidth())
+            qtStyleDropdown:ClearAllPoints()
+            qtStyleDropdown:SetPoint("LEFT", qtStyleLabel, "LEFT", qtLabelWidth - 10, 0)
+            qtIndicatorDropdown:SetPoint("LEFT", qtIndicatorLabel, "LEFT", qtLabelWidth - 10, 0)
+            PVPHUB.CreateNewBadge(qtContent, "qtStyle"):SetPoint("LEFT", qtStyleDropdown, "RIGHT", 6, 0)
+            PVPHUB.CreateNewBadge(qtContent, "qtIndicator"):SetPoint("LEFT", qtIndicatorDropdown, "RIGHT", 6, 0)
+
             -- Size slider
             PVPHUB_SETTINGS.queueTimerScale = PVPHUB_SETTINGS.queueTimerScale or 1.0
             local queueTimerSizeLabel = qtContent:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-            queueTimerSizeLabel:SetPoint("TOPLEFT", qtStyleLabel, "BOTTOMLEFT", 0, -12)
+            queueTimerSizeLabel:SetPoint("TOPLEFT", qtIndicatorLabel, "BOTTOMLEFT", 0, -12)
             queueTimerSizeLabel:SetText("Size:")
             queueTimerSizeLabel:SetTextColor(0.85, 0.85, 0.85, 1)
 
@@ -8941,7 +9166,9 @@ SlashCmdList["PVPHUB"] = function(msg)
                 PVPHUB_SETTINGS.queueTimer.hideInInstances = true
             end
             local hideInInstancesCheckbox = CreateFrame("CheckButton", nil, qtContent, "InterfaceOptionsCheckButtonTemplate")
-            hideInInstancesCheckbox:SetPoint("TOPLEFT", qtOpacityLabel, "BOTTOMLEFT", 0, -12)
+            -- Right column (behavior and sound), starting at the section's
+            -- middle, level with "Show Queue Timer"; the left column is the look.
+            hideInInstancesCheckbox:SetPoint("TOPLEFT", qtContent, "TOP", 0, -10)
             hideInInstancesCheckbox.Text:SetText("Hide Queue Timer in Arenas/BGs")
             hideInInstancesCheckbox.tooltipText = "Automatically hide the queue timer widget while inside arenas or battlegrounds"
             hideInInstancesCheckbox:SetChecked(PVPHUB_SETTINGS.queueTimer.hideInInstances)
@@ -9059,10 +9286,17 @@ SlashCmdList["PVPHUB"] = function(msg)
             end)
             qtPlaySoundBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
-            -- Preview toggle button
+            -- Preview toggle button, on the "Show Queue Timer" row so it's at
+            -- hand while changing settings. Its right edge lines up with the
+            -- Style/Indicator dropdown boxes, which end qtLabelWidth + 190 from
+            -- the checkbox's left (22 label inset - 10 dropdown offset + 180
+            -- dropdown width - 2 box inset); it never gets closer than 12 px
+            -- to the checkbox label.
             local qtPreviewBtn = CreateFrame("Button", nil, qtContent, "UIPanelButtonTemplate")
-            qtPreviewBtn:SetSize(150, 25)
-            qtPreviewBtn:SetPoint("LEFT", qtPlaySoundBtn, "RIGHT", 8, 0)
+            qtPreviewBtn:SetSize(120, 25)
+            qtPreviewBtn:SetPoint("LEFT", queueTimerCheckbox, "LEFT",
+                math.max(qtLabelWidth + 190 - 120,
+                         queueTimerCheckbox:GetWidth() + queueTimerCheckbox.Text:GetStringWidth() + 12), 0)
             qtPreviewBtn:SetText("Show Preview")
             qtPreviewBtn:GetFontString():SetTextColor(1, 1, 1)
             qtPreviewBtn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
@@ -9090,9 +9324,9 @@ SlashCmdList["PVPHUB"] = function(msg)
             f.qtPreviewBtn = qtPreviewBtn
 
             -- ============================================================
-            -- SECTION: APPEARANCE
+            -- SECTION: STYLE (saved under its old key "appearance")
             -- ============================================================
-            local sApp   = MakeSection("appearance",     "APPEARANCE",     {0.40, 0.20, 0.60}, "Interface\\Icons\\INV_Misc_Note_04")
+            local sApp   = MakeSection("appearance",     "STYLE",          {0.40, 0.20, 0.60}, "Interface\\Icons\\INV_Misc_Note_04")
             local appContent = sApp.content
 
             -- Built-in font fallback table (Friends/FRIENDS.TTF no longer ships with WoW)
@@ -9324,17 +9558,17 @@ SlashCmdList["PVPHUB"] = function(msg)
             f.transparencyValueLabel  = transparencyValueLabel
             ApplyTransparency(PVPHUB_SETTINGS.windowOpacity)
 
-            -- Re-anchor: Font → Theme → Transparency (no font size slider anymore)
-            fontsSubtitle:ClearAllPoints()
-            fontsSubtitle:SetPoint("TOPLEFT", appContent, "TOPLEFT", 18, -12)
-            fontDropdown:ClearAllPoints()
-            fontDropdown:SetPoint("TOPLEFT", fontsSubtitle, "BOTTOMLEFT", -15, -4)
+            -- Re-anchor: Theme → Font → Transparency (no font size slider anymore)
             themeSubtitle:ClearAllPoints()
-            themeSubtitle:SetPoint("TOPLEFT", fontDropdown, "BOTTOMLEFT", 15, -8)
+            themeSubtitle:SetPoint("TOPLEFT", appContent, "TOPLEFT", 18, -12)
             themeDropdown:ClearAllPoints()
             themeDropdown:SetPoint("TOPLEFT", themeSubtitle, "BOTTOMLEFT", -15, -4)
+            fontsSubtitle:ClearAllPoints()
+            fontsSubtitle:SetPoint("TOPLEFT", themeDropdown, "BOTTOMLEFT", 15, -8)
+            fontDropdown:ClearAllPoints()
+            fontDropdown:SetPoint("TOPLEFT", fontsSubtitle, "BOTTOMLEFT", -15, -4)
             transparencySubtitle:ClearAllPoints()
-            transparencySubtitle:SetPoint("TOPLEFT", themeDropdown, "BOTTOMLEFT", 15, -8)
+            transparencySubtitle:SetPoint("TOPLEFT", fontDropdown, "BOTTOMLEFT", 15, -8)
 
             -- Match History sub-label
             local matchHistorySubtitle = appContent:CreateFontString(nil, "ARTWORK", "GameFontNormal")
@@ -9385,7 +9619,9 @@ SlashCmdList["PVPHUB"] = function(msg)
 
             -- Date Format
             local dateFormatLabel = appContent:CreateFontString(nil, "ARTWORK", "GameFontNormal")
-            dateFormatLabel:SetPoint("TOPLEFT", historyLabel, "BOTTOMLEFT", 0, -14)
+            -- Right column (Date Format and the window checkboxes), starting at
+            -- the section's middle, level with "Theme"
+            dateFormatLabel:SetPoint("TOPLEFT", appContent, "TOP", 4, -12)
             dateFormatLabel:SetText("Date Format:")
             dateFormatLabel:SetTextColor(0.85, 0.85, 0.85, 1)
 
@@ -9502,7 +9738,7 @@ SlashCmdList["PVPHUB"] = function(msg)
             -- Manage Hidden Characters button
             local hiddenCharsButton = CreateFrame("Button", nil, advContent, "UIPanelButtonTemplate")
             hiddenCharsButton:SetSize(190, 25)
-            hiddenCharsButton:SetPoint("TOPLEFT", disableStreamerModeCheckbox, "BOTTOMLEFT", 3, -8)
+            hiddenCharsButton:SetPoint("TOPLEFT", advContent, "TOP", 0, -10) -- right column
             hiddenCharsButton:SetText("Manage Hidden Characters")
             hiddenCharsButton:SetScript("OnClick", function() ShowHiddenCharactersWindow() end)
             hiddenCharsButton:SetScript("OnEnter", function(self)
@@ -9559,28 +9795,35 @@ SlashCmdList["PVPHUB"] = function(msg)
             -- LAYOUT: set estimated heights, initial pass, then measure
             -- ============================================================
             -- Visual display order (independent of code order above)
-            allSections = {sDisp, sApp, sNotif, sQT, sAdv}
+            allSections = {sApp, sQT, sDisp, sNotif, sAdv}
 
-            sDisp.contentHeight  = 185
-            sApp.contentHeight   = 245
-            sNotif.contentHeight = 75
-            sQT.contentHeight    = 215
-            sAdv.contentHeight   = 145  -- +30 for the Manage Backups button
+            -- Estimates for the two-column sections; measured below
+            sDisp.contentHeight  = 110
+            sApp.contentHeight   = 220
+            sNotif.contentHeight = 45
+            sQT.contentHeight    = 170
+            sAdv.contentHeight   = 110
             RecalcPositions()
 
-            -- Remeasure after one frame when GetBottom() is valid
+            -- Remeasure after one frame when GetBottom() is valid. Each
+            -- section passes the last widget of each column; the lower one
+            -- sets the height.
             C_Timer.After(0, function()
-                local function MeasureHeight(content, lastWidget)
+                local function MeasureHeight(content, ...)
                     local ct = content:GetTop()
-                    local wb = lastWidget:GetBottom()
-                    if ct and wb then return math.abs(ct - wb) + 14 end
+                    local lowest
+                    for i = 1, select("#", ...) do
+                        local wb = select(i, ...):GetBottom()
+                        if wb and (not lowest or wb < lowest) then lowest = wb end
+                    end
+                    if ct and lowest then return math.abs(ct - lowest) + 14 end
                     return 100
                 end
-                sDisp.contentHeight  = MeasureHeight(dispContent,  goldThresholdBox)
-                sApp.contentHeight   = MeasureHeight(appContent,    windowGlowCheckbox)
-                sNotif.contentHeight = MeasureHeight(notifContent,  disablePrintCheckbox)
-                sQT.contentHeight    = MeasureHeight(qtContent,     qtPreviewBtn)
-                sAdv.contentHeight   = MeasureHeight(advContent,    resetButton)
+                sDisp.contentHeight  = MeasureHeight(dispContent,  enableGroupsCheckbox, goldThresholdBox)
+                sApp.contentHeight   = MeasureHeight(appContent,   historyLabel, historySlider, windowGlowCheckbox)
+                sNotif.contentHeight = MeasureHeight(notifContent, disableHonorWarningsCheckbox, disablePrintCheckbox)
+                sQT.contentHeight    = MeasureHeight(qtContent,    qtOpacityLabel, qtOpacitySlider, qtPlaySoundBtn)
+                sAdv.contentHeight   = MeasureHeight(advContent,   disableStreamerModeCheckbox, resetButton)
                 RecalcPositions()
             end)
 
