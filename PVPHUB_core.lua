@@ -10241,11 +10241,11 @@ SlashCmdList["PVPHUB"] = function(msg)
                 end
 
                 -- Rounded "pill" bar: 2 circular end-caps + a flat middle,
-                -- instead of a StatusBar + stretched rounded_mask.tga.
-                -- rounded_mask.tga is proportioned for large square-ish
-                -- elements (windows/cards) — its corner radius is nowhere
-                -- near 50% of its own size, so stretched over a 10px-tall
-                -- bar the radius shrinks to sub-pixel and vanishes entirely.
+                -- instead of a StatusBar + a stretched rounded-corner mask.
+                -- The old window mask (rounded_mask.tga, since removed) was
+                -- proportioned for large square-ish elements — its corner
+                -- radius was nowhere near 50% of its own size, so stretched
+                -- over a 10px-tall bar the radius shrank to sub-pixel.
                 -- A CIRCLE mask kept perfectly square (capSize x capSize,
                 -- never non-uniformly stretched) gives a true semicircle cap
                 -- at any bar width. Returns (container, SetFill) — SetFill
