@@ -4050,6 +4050,22 @@ local function GetShuffleDisplayInfo(data, charKey, bracketKey)
     return 0, nil, 0, 0, isCurrent
 end
 
+-- Helpers the card view (modules/cards.lua) shares with the list. Exposed as
+-- fields because this file is at Lua's 200-local limit and the module loads
+-- after it.
+PVPHUB._GetRatingColor             = GetRatingColor
+PVPHUB._GetCurrencyColor           = GetCurrencyColor
+PVPHUB._GetShuffleDisplayInfo      = GetShuffleDisplayInfo
+PVPHUB._GetCachedSpecInfo          = GetCachedSpecInfo
+PVPHUB._FormatNumber               = FormatNumber
+PVPHUB._IsCharacterStaleThisSeason = IsCharacterStaleThisSeason
+PVPHUB._ShowCharacterTooltip       = ShowCharacterTooltip
+PVPHUB._HideCharacterTooltip       = HideCharacterTooltip
+PVPHUB._GetFullName                = GetFullName
+PVPHUB._CLASS_ICON_PATHS           = CLASS_ICON_PATHS
+PVPHUB._GetCharacterGroup          = GetCharacterGroup
+PVPHUB._FormatTimestamp            = FormatTimestamp
+
 local function CreateCharacterName(entry, isCompactMode, suppressSpecIcon, suppressCurrentIndicator)
     local data = entry.data
     local class = data.class or "PRIEST"
@@ -5126,6 +5142,10 @@ local function GetTitleRequirementText(meta, tp)
     local seasonName = GetSeasonDisplayName(rawSeason) or "this season"
     return string.format(meta.reqTemplate, tp.required, seasonName)
 end
+
+-- The card view's info panel shows the same titles per character (modules/cards.lua)
+PVPHUB._TITLE_META              = TITLE_META
+PVPHUB._GetTitleRequirementText = GetTitleRequirementText
 
 -- True if this character has any rated PvP data recorded for the current
 -- season in at least one bracket — used to keep alts that were only ever
@@ -6309,6 +6329,10 @@ local QUEUE_BRACKET_KEY_MAP = {
     ["2v2"]      = "rating2v2",
     ["3v3"]      = "rating3v3",
 }
+-- The card view's bracket tiles open the same tooltip (modules/cards.lua)
+PVPHUB._ShowRatingTooltip  = ShowPVPHUBRatingTooltip
+PVPHUB._CloseRatingTooltip = ClosePVPHUBRatingTooltip
+
 function PVPHUB:ShowQueueBracketTooltip(anchor, displayName)
     local bracketKey = QUEUE_BRACKET_KEY_MAP[displayName]
     if not bracketKey then return end
@@ -8307,12 +8331,14 @@ SlashCmdList["PVPHUB"] = function(msg)
                 -- hidden on the other tabs (see below) and restored here.
                 if _G["PVPHUBSortDropdown"]   then _G["PVPHUBSortDropdown"]:Show()   end
                 if _G["PVPHUBColumnDropdown"] then _G["PVPHUBColumnDropdown"]:Show() end
+                if f.viewToggle then f.viewToggle:Show() end
 
                 -- Fade the list and its (just rebuilt) headers in together
                 local fadeObjects = { f.scrollFrame }
                 for _, header in ipairs(f.headers or {}) do
                     table.insert(fadeObjects, header)
                 end
+                if f.cardDetail then table.insert(fadeObjects, f.cardDetail) end
                 FadeInTab(fadeObjects)
             elseif tabId == "stats" then
                 -- Hide characters content
@@ -8348,6 +8374,8 @@ SlashCmdList["PVPHUB"] = function(msg)
                 -- doing nothing.
                 if _G["PVPHUBSortDropdown"]   then _G["PVPHUBSortDropdown"]:Hide()   end
                 if _G["PVPHUBColumnDropdown"] then _G["PVPHUBColumnDropdown"]:Hide() end
+                if f.viewToggle then f.viewToggle:Hide() end
+                if f.cardDetail then f.cardDetail:Hide() end
                 -- Hide settings content
                 if f.settingsFrame then f.settingsFrame:Hide() end
 
@@ -8392,6 +8420,8 @@ SlashCmdList["PVPHUB"] = function(msg)
                 -- act on, so keep them out of the way.
                 if _G["PVPHUBSortDropdown"]   then _G["PVPHUBSortDropdown"]:Hide()   end
                 if _G["PVPHUBColumnDropdown"] then _G["PVPHUBColumnDropdown"]:Hide() end
+                if f.viewToggle then f.viewToggle:Hide() end
+                if f.cardDetail then f.cardDetail:Hide() end
                 -- Hide stats content
                 if f.statsFrame then f.statsFrame:Hide() end
                 -- Show settings content
@@ -10923,6 +10953,9 @@ SlashCmdList["PVPHUB"] = function(msg)
         end)
         manageGroupsBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
+        -- List/Cards toggle, right-aligned on the same row (modules/cards.lua)
+        if PVPHUB.Cards then PVPHUB.Cards.CreateToggle(f) end
+
         -- Streamer Mode Toggle Button
         local compactToggleBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
         compactToggleBtn:SetSize(90, 18)
@@ -11208,6 +11241,66 @@ SlashCmdList["PVPHUB"] = function(msg)
             end
         end
 
+        -- Right-click menu for a character (Blizzard's MenuUtil, see
+        -- AttachModernMenu). Shared by the list rows and the cards.
+        function f:ShowCharacterMenu(owner, charKey)
+            if not PVPHUB_SETTINGS.mainWindow then
+                PVPHUB_SETTINGS.mainWindow = {}
+            end
+            local isCurrentlyPinned = (PVPHUB_SETTINGS.mainWindow.pinnedCharacter == charKey)
+
+            MenuUtil.CreateContextMenu(owner, function(_, root)
+                root:CreateTitle(charKey:match("^([^%-]+)") or charKey)
+
+                if isCurrentlyPinned then
+                    root:CreateButton(PVPHUB.MenuText("Unpin from Top", "Interface\\Buttons\\UI-GroupLoot-Pass-Up"), function()
+                        PVPHUB_SETTINGS.mainWindow.pinnedCharacter = nil
+                        f:UpdateContent()
+                    end)
+                else
+                    root:CreateButton(PVPHUB.MenuText("Pin to Top", "Interface\\Minimap\\UI-Minimap-ZoomInButton-Up"), function()
+                        PVPHUB_SETTINGS.mainWindow.pinnedCharacter = charKey
+                        f:UpdateContent()
+                    end)
+                end
+
+                -- Move to Group submenu (if grouping enabled)
+                if PVPHUB_SETTINGS.characterGroups and PVPHUB_SETTINGS.characterGroups.enabled and PVPHUB_SETTINGS.characterGroups.groups then
+                    local groupsMenu = root:CreateButton(PVPHUB.MenuText("Move to Group", "Interface\\Icons\\INV_Misc_GroupLooking"))
+                    for i, group in ipairs(PVPHUB_SETTINGS.characterGroups.groups) do
+                        groupsMenu:CreateRadio(group.name,
+                            function() return GetCharacterGroup(charKey) == i end,
+                            function()
+                                MoveCharacterToGroup(charKey, i)
+                                f:UpdateContent()
+                                PVPHubPrint("|cff00ff00[PVPHUB]|r Moved character to group '" .. group.name .. "'")
+                            end)
+                    end
+                end
+
+                root:CreateDivider()
+                local hasNote = PVPHUB_DB[charKey] and PVPHUB_DB[charKey].note
+                root:CreateButton(PVPHUB.MenuText(hasNote and "Edit Note" or "Add Note", "Interface\\Icons\\INV_Inscription_Parchment"), function()
+                    -- Character goes in as the data argument so
+                    -- the dialog's OnShow already has it.
+                    StaticPopup_Show("PVPHUB_EDIT_NOTE", nil, nil, charKey)
+                end)
+
+                root:CreateDivider()
+                root:CreateButton(PVPHUB.MenuText("Hide Character", "Interface\\Buttons\\UI-GuildButton-MOTD-Disabled"), function()
+                    HideCharacter(charKey)
+                end)
+                root:CreateButton(PVPHUB.MenuText("|cffff4040Delete Character|r", "Interface\\Buttons\\UI-GroupLoot-Pass-Down"), function()
+                    PVPHUB._deleteCharCtx = charKey
+                    StaticPopupDialogs["PVPHUB_DELETE_CHARACTER"].text = "Are you sure you want to permanently delete all data for |cff4da6ff" .. charKey .. "|r?\n\nThis action cannot be undone!"
+                    StaticPopup_Show("PVPHUB_DELETE_CHARACTER")
+                end)
+                root:CreateButton(PVPHUB.MenuText("Manage Hidden Characters", "Interface\\Buttons\\UI-GuildButton-PublicNote-Up"), function()
+                    ShowHiddenCharactersWindow()
+                end)
+            end)
+        end
+
         function f:UpdateContent()
             -- Resolve font from DB each time rows are built.
             local currentFont = PVPHUB_ResolveFontPath()
@@ -11227,11 +11320,14 @@ SlashCmdList["PVPHUB"] = function(msg)
             f.rows = {}
             f.rowBackgrounds = {}
 
-            -- Detach child Frames (cardFrames, backgroundBtns, groupHeaders, etc.)
+            -- Detach child Frames (cardFrames, backgroundBtns, groupHeaders, etc.).
+            -- The card view's pooled container is kept (_pvpKeep, see modules/cards.lua).
             local children = {f.contentFrame:GetChildren()}
             for _, child in ipairs(children) do
-                if child.Hide then child:Hide() end
-                if child.SetParent then child:SetParent(nil) end
+                if not child._pvpKeep then
+                    if child.Hide then child:Hide() end
+                    if child.SetParent then child:SetParent(nil) end
+                end
             end
 
             -- Hide orphaned regions (FontStrings / Textures) directly on contentFrame.
@@ -11755,6 +11851,17 @@ SlashCmdList["PVPHUB"] = function(msg)
             else
                 -- No grouping, use original sorted list
                 displayList = sorted
+            end
+
+            -- Card view (List/Cards toggle, modules/cards.lua): cards take the
+            -- place of the rows and the column headers. Everything below (the
+            -- empty state, totals, footer) is shared with the list.
+            if PVPHUB.Cards and PVPHUB.Cards.IsActive() then
+                for _, h in ipairs(f.headers) do h:Hide() end
+                contentHeight = PVPHUB.Cards.Render(f, displayList)
+                displayList = {}
+            elseif PVPHUB.Cards then
+                PVPHUB.Cards.Hide(f)
             end
 
             -- Check if there are any characters at all (not just visible ones)
@@ -12574,66 +12681,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                                 end
                                 f:UpdateContent()
                             elseif button == "RightButton" then
-                                -- Initialize pinned character setting if not present
-                                if not PVPHUB_SETTINGS.mainWindow then
-                                    PVPHUB_SETTINGS.mainWindow = {}
-                                end
-                                
-                                local currentPinnedChar = PVPHUB_SETTINGS.mainWindow.pinnedCharacter
-                                local isCurrentlyPinned = (currentPinnedChar == self.charName)
-                                
-                                -- Right-click menu (Blizzard's MenuUtil, see AttachModernMenu)
-                                local charKey = self.charName
-                                MenuUtil.CreateContextMenu(self, function(_, root)
-                                    root:CreateTitle(charKey:match("^([^%-]+)") or charKey)
-
-                                    if isCurrentlyPinned then
-                                        root:CreateButton(PVPHUB.MenuText("Unpin from Top", "Interface\\Buttons\\UI-GroupLoot-Pass-Up"), function()
-                                            PVPHUB_SETTINGS.mainWindow.pinnedCharacter = nil
-                                            f:UpdateContent()
-                                        end)
-                                    else
-                                        root:CreateButton(PVPHUB.MenuText("Pin to Top", "Interface\\Minimap\\UI-Minimap-ZoomInButton-Up"), function()
-                                            PVPHUB_SETTINGS.mainWindow.pinnedCharacter = charKey
-                                            f:UpdateContent()
-                                        end)
-                                    end
-
-                                    -- Move to Group submenu (if grouping enabled)
-                                    if PVPHUB_SETTINGS.characterGroups and PVPHUB_SETTINGS.characterGroups.enabled and PVPHUB_SETTINGS.characterGroups.groups then
-                                        local groupsMenu = root:CreateButton(PVPHUB.MenuText("Move to Group", "Interface\\Icons\\INV_Misc_GroupLooking"))
-                                        for i, group in ipairs(PVPHUB_SETTINGS.characterGroups.groups) do
-                                            groupsMenu:CreateRadio(group.name,
-                                                function() return GetCharacterGroup(charKey) == i end,
-                                                function()
-                                                    MoveCharacterToGroup(charKey, i)
-                                                    f:UpdateContent()
-                                                    PVPHubPrint("|cff00ff00[PVPHUB]|r Moved character to group '" .. group.name .. "'")
-                                                end)
-                                        end
-                                    end
-
-                                    root:CreateDivider()
-                                    local hasNote = PVPHUB_DB[charKey] and PVPHUB_DB[charKey].note
-                                    root:CreateButton(PVPHUB.MenuText(hasNote and "Edit Note" or "Add Note", "Interface\\Icons\\INV_Inscription_Parchment"), function()
-                                        -- Character goes in as the data argument so
-                                        -- the dialog's OnShow already has it.
-                                        StaticPopup_Show("PVPHUB_EDIT_NOTE", nil, nil, charKey)
-                                    end)
-
-                                    root:CreateDivider()
-                                    root:CreateButton(PVPHUB.MenuText("Hide Character", "Interface\\Buttons\\UI-GuildButton-MOTD-Disabled"), function()
-                                        HideCharacter(charKey)
-                                    end)
-                                    root:CreateButton(PVPHUB.MenuText("|cffff4040Delete Character|r", "Interface\\Buttons\\UI-GroupLoot-Pass-Down"), function()
-                                        PVPHUB._deleteCharCtx = charKey
-                                        StaticPopupDialogs["PVPHUB_DELETE_CHARACTER"].text = "Are you sure you want to permanently delete all data for |cff4da6ff" .. charKey .. "|r?\n\nThis action cannot be undone!"
-                                        StaticPopup_Show("PVPHUB_DELETE_CHARACTER")
-                                    end)
-                                    root:CreateButton(PVPHUB.MenuText("Manage Hidden Characters", "Interface\\Buttons\\UI-GuildButton-PublicNote-Up"), function()
-                                        ShowHiddenCharactersWindow()
-                                    end)
-                                end)
+                                f:ShowCharacterMenu(self, self.charName)
                             end
                         end)
                     else
@@ -12945,6 +12993,12 @@ SlashCmdList["PVPHUB"] = function(msg)
                 local screenHeight = UIParent:GetHeight()
                 local minHeight = settingsBaselineHeight
                 local maxHeight = math.min(600, screenHeight * 0.60) -- Activate scrolling sooner
+                -- Card view: tall enough for the character information too,
+                -- with a bit more room allowed (the panel scrolls beyond that)
+                if PVPHUB.Cards and PVPHUB.Cards.IsActive() then
+                    calculatedHeight = math.max(calculatedHeight, PVPHUB.Cards.neededWindowHeight or 0)
+                    maxHeight = math.min(720, screenHeight * 0.75)
+                end
                 local optimalHeight = math.min(maxHeight, math.max(minHeight, calculatedHeight))
                 
                 -- Only resize if significantly different from current height

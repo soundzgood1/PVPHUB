@@ -1,6 +1,6 @@
 ## Interface: 120105
 ## Title: |cffffd100PVPHUB|r
-## Version: 6.7.0
+## Version: 7.0.0-dev
 ## Author: Soundz
 ## Notes: Thanks for using PVPHUB — your feedback keeps making it better ♥
 ## SavedVariables: PVPHUB_DB, PVPHUB_DB_BACKUP, PVPHUB_DB_ARCHIVE, PVPHUB_IGNORED, PVPHUB_SETTINGS
@@ -41,3 +41,4 @@ PVPHUB_core.lua
 # Load modules that depend on core
 modules\compact.lua
 modules\popups.lua
+modules\cards.lua
