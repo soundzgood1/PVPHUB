@@ -4064,6 +4064,8 @@ PVPHUB._HideCharacterTooltip       = HideCharacterTooltip
 PVPHUB._GetFullName                = GetFullName
 PVPHUB._CLASS_ICON_PATHS           = CLASS_ICON_PATHS
 PVPHUB._GetCharacterGroup          = GetCharacterGroup
+PVPHUB._MoveCharacterToGroup       = MoveCharacterToGroup
+PVPHUB._ReorderGroup               = ReorderGroup
 PVPHUB._FormatTimestamp            = FormatTimestamp
 
 local function CreateCharacterName(entry, isCompactMode, suppressSpecIcon, suppressCurrentIndicator)
@@ -10889,6 +10891,7 @@ SlashCmdList["PVPHUB"] = function(msg)
             ratingShuffle = "Shuffle Rating",
             ratingBlitz = "Blitz Rating",
             ratingRBG = "RBG Rating",
+            custom = "Custom Order",
         }
         UIDropDownMenu_SetText(dropdown, "Sort: " .. (sortDisplayNames[PVPHUB_SETTINGS.sortKey or "highestRating"] or "Sort by"))
 
@@ -10919,6 +10922,8 @@ SlashCmdList["PVPHUB"] = function(msg)
             { text = "Shuffle Rating",      value = "ratingShuffle",      icon = "Interface\\Icons\\ability_dualwield" },
             { text = "Blitz Rating",        value = "ratingBlitz",        icon = "Interface\\Icons\\achievement_bg_killxenemies_generalsroom" },
             { text = "RBG Rating",          value = "ratingRBG",          icon = "Interface\\Icons\\achievement_pvp_a_15" },
+            -- Your own order, set by dragging characters in the card view
+            { text = "Custom Order",        value = "custom",             icon = nil },
         }
         PVPHUB.AttachModernMenu(dropdown, function(_, root)
             root:CreateTitle("Sort by")
@@ -11716,10 +11721,20 @@ SlashCmdList["PVPHUB"] = function(msg)
                 return maxRating
             end
 
+            -- Custom Order: the order set by dragging characters in the card
+            -- view (PVPHUB_SETTINGS.customOrder); characters not placed yet
+            -- come last, by name
+            local customIndex = {}
+            if sortKey == "custom" then
+                for i, key in ipairs(PVPHUB_SETTINGS.customOrder or {}) do customIndex[key] = i end
+            end
+
             for _, entry in ipairs(sorted) do
                 local d = entry.data
                 entry.sortName = entry.char:lower()
-                if sortKey == "highestRating" then
+                if sortKey == "custom" then
+                    entry.sortValue = customIndex[entry.char] or math.huge
+                elseif sortKey == "highestRating" then
                     entry.sortValue = getHighestRating(d)
                 elseif sortKey == "ratingShuffle" or sortKey == "ratingBlitz" then
                     entry.sortValue = getDisplayedRating(d[sortKey], d.specID or d.lastActiveSpecID)
@@ -11733,6 +11748,12 @@ SlashCmdList["PVPHUB"] = function(msg)
             local ascending = PVPHUB_SETTINGS.sortAscending and true or false
             local pinnedChar = PVPHUB_SETTINGS.mainWindow and PVPHUB_SETTINGS.mainWindow.pinnedCharacter
             table.sort(sorted, function(a, b)
+                -- Custom Order is exactly what the user arranged: no
+                -- logged-in or pinned character jumps to the top
+                if sortKey == "custom" then
+                    if a.sortValue ~= b.sortValue then return a.sortValue < b.sortValue end
+                    return a.sortName < b.sortName
+                end
                 -- Always put current character first, then the pinned one
                 if currentChar then
                     if a.char == currentChar then return true end
@@ -11858,7 +11879,7 @@ SlashCmdList["PVPHUB"] = function(msg)
             -- empty state, totals, footer) is shared with the list.
             if PVPHUB.Cards and PVPHUB.Cards.IsActive() then
                 for _, h in ipairs(f.headers) do h:Hide() end
-                contentHeight = PVPHUB.Cards.Render(f, displayList)
+                contentHeight = PVPHUB.Cards.Render(f, displayList, sorted)
                 displayList = {}
             elseif PVPHUB.Cards then
                 PVPHUB.Cards.Hide(f)
