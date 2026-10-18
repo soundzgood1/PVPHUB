@@ -11403,6 +11403,13 @@ SlashCmdList["PVPHUB"] = function(msg)
             local minContentWidth = dynamicContentWidth + 25  -- Add minimum right padding
             f.contentFrame:SetWidth(minContentWidth)
             local dynamicWindowWidth = math.max(minContentWidth + 65, 700) -- Minimum 700px width
+            -- The card view has its own fixed size (modules/cards.lua)
+            if PVPHUB.Cards and PVPHUB.Cards.IsActive() then
+                dynamicWindowWidth = PVPHUB.Cards.WindowWidth(f)
+            end
+            if PVPHUB.Cards and math.abs(f:GetWidth() - dynamicWindowWidth) > 0.5 then
+                PVPHUB.Cards.KeepTopLeft(f)
+            end
             f:SetWidth(dynamicWindowWidth)
             
             -- Store the dynamic content width for use in row backgrounds
@@ -12734,12 +12741,12 @@ SlashCmdList["PVPHUB"] = function(msg)
                 f.summaryTopLine = f:CreateTexture(nil, "ARTWORK")
                 f.summaryTopLine:SetTexture("Interface\\Buttons\\WHITE8x8")
                 f.summaryTopLine:SetVertexColor(unpack(UI_CONSTANTS.COLORS.SUMMARY_LINE))
-                f.summaryTopLine:SetSize(dynamicContentWidth - 30, 1) -- Subtract margin to match content width
+                f.summaryTopLine:SetSize(math.min(dynamicContentWidth - 30, f:GetWidth() - 40), 1) -- Content width minus margin; never wider than the window (the card view is narrower than the columns)
                 f.summaryTopLine:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 20, 50) -- Moved down from 72 to 50
             else
                 f.summaryTopLine:SetVertexColor(unpack(UI_CONSTANTS.COLORS.SUMMARY_LINE))
                 -- Update summary line width to match dynamic content width with proper margin
-                f.summaryTopLine:SetSize(dynamicContentWidth - 30, 1) -- Subtract margin to match content width
+                f.summaryTopLine:SetSize(math.min(dynamicContentWidth - 30, f:GetWidth() - 40), 1) -- Content width minus margin; never wider than the window (the card view is narrower than the columns)
             end
 
             -- Always keep summary text white regardless of theme
@@ -13014,21 +13021,27 @@ SlashCmdList["PVPHUB"] = function(msg)
                 local screenHeight = UIParent:GetHeight()
                 local minHeight = settingsBaselineHeight
                 local maxHeight = math.min(600, screenHeight * 0.60) -- Activate scrolling sooner
-                -- Card view: tall enough for the character information too,
-                -- with a bit more room allowed (the panel scrolls beyond that)
-                if PVPHUB.Cards and PVPHUB.Cards.IsActive() then
-                    calculatedHeight = math.max(calculatedHeight, PVPHUB.Cards.neededWindowHeight or 0)
-                    maxHeight = math.min(720, screenHeight * 0.75)
-                end
                 local optimalHeight = math.min(maxHeight, math.max(minHeight, calculatedHeight))
-                
-                -- Only resize if significantly different from current height
+                -- The card view has its own fixed height (modules/cards.lua)
+                local cardView = PVPHUB.Cards and PVPHUB.Cards.IsActive() or false
+                if cardView then
+                    optimalHeight = PVPHUB.Cards.WindowHeight(f)
+                end
+
+                -- Only resize if significantly different from current height,
+                -- except right after switching views: each view gets exactly
+                -- its own size
                 local currentHeight = f:GetHeight()
-                if math.abs(currentHeight - optimalHeight) > 50 then
+                local switched = (f._sizedForCards ~= cardView)
+                f._sizedForCards = cardView
+                if math.abs(currentHeight - optimalHeight) > ((switched or cardView) and 0.5 or 50) then
+                    if PVPHUB.Cards then PVPHUB.Cards.KeepTopLeft(f) end
                     f:SetHeight(optimalHeight)
-                    -- Save the new size but don't mark as user-resized
-                    PVPHUB_SETTINGS.windowSize = PVPHUB_SETTINGS.windowSize or {}
-                    PVPHUB_SETTINGS.windowSize.height = optimalHeight
+                    -- Save the list's size (not the card view's) but don't mark as user-resized
+                    if not cardView then
+                        PVPHUB_SETTINGS.windowSize = PVPHUB_SETTINGS.windowSize or {}
+                        PVPHUB_SETTINGS.windowSize.height = optimalHeight
+                    end
                 end
             end
         end

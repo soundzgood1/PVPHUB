@@ -68,6 +68,30 @@ function Cards.IsActive()
     return (mw and mw.characterView == "cards") and true or false
 end
 
+-- Window size for the card view: fixed, so it doesn't change with the
+-- list's columns or the selected character (the info panel scrolls when
+-- there's more). The list keeps sizing itself to its columns and rows.
+-- Never more than most of the screen, in the window's own (scaled) units.
+local CARD_WINDOW_W, CARD_WINDOW_H = 760, 720
+
+function Cards.WindowWidth(f)
+    return math.floor(math.min(CARD_WINDOW_W, UIParent:GetWidth() * 0.85 / f:GetScale()))
+end
+
+function Cards.WindowHeight(f)
+    return math.floor(math.min(CARD_WINDOW_H, UIParent:GetHeight() * 0.85 / f:GetScale()))
+end
+
+-- Pins the window by its top-left corner before its size changes, so it
+-- grows and shrinks to the right and down instead of around its center.
+function Cards.KeepTopLeft(f)
+    local left, top = f:GetLeft(), f:GetTop()
+    if left and top then
+        f:ClearAllPoints()
+        f:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", left, top)
+    end
+end
+
 function Cards.SetActive(on)
     PVPHUB_SETTINGS.mainWindow = PVPHUB_SETTINGS.mainWindow or {}
     PVPHUB_SETTINGS.mainWindow.characterView = on and "cards" or "list"
@@ -2137,10 +2161,9 @@ function Cards.Render(f, displayList, sorted)
     container:SetSize(listW, math.max(y, 1))
     container:Show()
 
-    -- The window grows to fit the information where the screen allows
-    -- (see the height logic in f:UpdateContent).
-    local detailH = PaintDetail(f, Cards.selected, detailW)
-    Cards.neededWindowHeight = -AREA_TOP + AREA_BOTTOM + DETAIL_PAD * 2 + detailH
+    -- The window keeps its fixed card view size (Cards.WindowHeight); the
+    -- info panel scrolls when the information is taller
+    PaintDetail(f, Cards.selected, detailW)
     return y
 end
 
