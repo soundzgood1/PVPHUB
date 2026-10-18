@@ -467,6 +467,8 @@ function PVPHUB:CreateCompactWindow()
             local point, relativeTo, relativePoint, xOfs, yOfs = PVPHUB.compactWindow:GetPoint()
             PVPHUB_SETTINGS.compactWindowPos = {point=point, relativePoint=relativePoint, x=xOfs, y=yOfs}
         end)
+        -- 7.0: the UI kit replaces the silver art with its thin "×"
+        if PVPHUB.UI then PVPHUB.UI.SkinCloseButton(PVPHUB.compactWindow.closeBtn) end
         
         -- Settings button (in toolbar, next to close button)
         PVPHUB.compactWindow.settingsBtn = CreateFrame("Button", nil, toolbar)
@@ -553,6 +555,7 @@ function PVPHUB:CreateCompactWindow()
         -- Store references for theme updates and fade functionality
         PVPHUB.compactWindow.scaleSlider = scaleSlider
         PVPHUB.compactWindow.scaleLabel = scaleLabel
+        if PVPHUB.UI then PVPHUB.UI.SkinSlider(scaleSlider) end
         
         -- Apply saved scale to compact window
         PVPHUB.compactWindow:SetScale(PVPHUB.compactWindow.currentScale)
@@ -1335,6 +1338,13 @@ function PVPHUB:ShowCompactSettings()
             b:SetScript("OnMouseUp",   function() bg:SetColorTexture(btnColor[1],btnColor[2],btnColor[3],1) end)
             b:SetScript("OnLeave",     function() bg:SetColorTexture(btnColor[1],btnColor[2],btnColor[3],1) end)
             SK_Border(b)
+            if PVPHUB.UI then
+                -- 7.0: rounded UI kit button; the flat art above stays hidden
+                for _, region in ipairs({ b:GetRegions() }) do
+                    if region:GetObjectType() == "Texture" then region:SetAlpha(0) end
+                end
+                PVPHUB.UI.SkinButton(b)
+            end
             return b, lbl
         end
 
@@ -1352,6 +1362,14 @@ function PVPHUB:ShowCompactSettings()
             lbl:SetPoint("LEFT", cb, "RIGHT", 4, 0)
             lbl:SetText(text)
             cb.lbl = lbl
+            if PVPHUB.UI then
+                -- 7.0: pill switch. The label follows the switch, not the
+                -- check button, since callers resize the button afterwards.
+                PVPHUB.UI.SkinSwitch(cb)
+                lbl:ClearAllPoints()
+                lbl:SetPoint("LEFT", cb.pvpSwitch, "RIGHT", 8, 0)
+                cb:SetHitRectInsets(0, -12, 0, 0)   -- the switch is wider than the button
+            end
             return cb
         end
 
@@ -1373,6 +1391,11 @@ function PVPHUB:ShowCompactSettings()
         f:SetScript("OnDragStop",  f.StopMovingOrSizing)
         table.insert(UISpecialFrames, frameName)
 
+        if PVPHUB.UI then
+            -- 7.0: rounded shell like PVPHUB's other small windows (no square
+            -- title bar or accent stripe, which would stick out of its corners)
+            PVPHUB.UI.SkinWindow(f)
+        else
         -- Theme-matched background/border
         local winBg = f:CreateTexture(nil,"BACKGROUND",nil,-1)
         winBg:SetAllPoints()
@@ -1390,6 +1413,7 @@ function PVPHUB:ShowCompactSettings()
         local titleBg = f:CreateTexture(nil,"BACKGROUND",nil,0)
         titleBg:SetColorTexture(bgC[1]*0.75, bgC[2]*0.75, bgC[3]*0.75, 1)
         titleBg:SetHeight(36); titleBg:SetPoint("TOPLEFT"); titleBg:SetPoint("TOPRIGHT")
+        end
 
         -- Separator under title bar
         local borderC = colors.SETTINGS_BORDER
@@ -1434,6 +1458,7 @@ function PVPHUB:ShowCompactSettings()
             end
             f:Hide()
         end)
+        if PVPHUB.UI then PVPHUB.UI.SkinCloseButton(closeBtn) end
 
         -- ── Scrollable, collapsible card area ────────────────────────────────
         local footerHeight = 46
@@ -1523,6 +1548,7 @@ function PVPHUB:ShowCompactSettings()
                 end
             end
         end)
+        if PVPHUB.UI then PVPHUB.UI.SkinSlider(scaleSlider) end
 
         sControls.contentHeight = 56
 

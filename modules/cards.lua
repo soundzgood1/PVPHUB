@@ -2085,6 +2085,8 @@ local function SetCardArea(f)
             GameTooltip:Show()
         end)
         b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        b:SetSize(listW - 2, NEW_GROUP_H)   -- before skinning: the corner radius follows the height
+        if PVPHUB.UI then PVPHUB.UI.SkinButton(b) end
         panel.newGroupButton = b
     end
     panel.newGroupButton:ClearAllPoints()

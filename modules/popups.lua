@@ -280,6 +280,10 @@ function PVPHUB:ShowWelcomePopup()
     xCloseBtn:SetScript("OnClick", function()
         f:Hide()
     end)
+    if PVPHUB.UI then
+        PVPHUB.UI.SkinButton(openMainBtn)
+        PVPHUB.UI.SkinCloseButton(xCloseBtn)
+    end
 
     -- Now that every element's actual size is known, size the window to fit
     -- it exactly instead of the earlier fixed guess.
@@ -504,6 +508,10 @@ function PVPHUB:ShowUpdatePopup(version)
     local xBtn = CreateFrame("Button", nil, f, "UIPanelCloseButton")
     xBtn:SetPoint("TOPRIGHT", -5, -5)
     xBtn:SetScript("OnClick", function() f:Hide() end)
+    if PVPHUB.UI then
+        PVPHUB.UI.SkinButton(openBtn)
+        PVPHUB.UI.SkinCloseButton(xBtn)
+    end
 
     -- Now that every element's actual size is known, size the window to fit
     -- it exactly instead of the earlier fixed guess.

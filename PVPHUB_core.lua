@@ -2229,10 +2229,11 @@ function PVPHUB:ShowGroupManagementWindow()
     end)
     
     -- Scroll frame for groups
-    local scrollFrame = CreateFrame("ScrollFrame", nil, window, "UIPanelScrollFrameTemplate")
+    local scrollFrame = CreateFrame("ScrollFrame", nil, window, "ScrollFrameTemplate")
     PVPHUB.EnableSmoothScroll(scrollFrame, 40)
     scrollFrame:SetPoint("TOPLEFT", 20, -85)
     scrollFrame:SetPoint("BOTTOMRIGHT", -40, 80)
+    PVPHUB._ApplyModernScrollbarStyling(scrollFrame, UI_CONSTANTS.COLORS)
     
     local scrollChild = CreateFrame("Frame", nil, scrollFrame)
     scrollChild:SetSize(440, 1)
@@ -2316,6 +2317,7 @@ function PVPHUB:ShowGroupManagementWindow()
                 deleteBtn:SetSize(70, 22)
                 deleteBtn:SetPoint("TOPRIGHT", -10, -8)
                 deleteBtn:SetText("Delete")
+                deleteBtn.pvpDanger = true   -- red in the modern button style
                 deleteBtn:SetScript("OnClick", function()
                     PVPHUB._deleteGroupCtx = { groupIndex = i }
                     StaticPopupDialogs["PVPHUB_DELETE_GROUP"].text = "Delete group '" .. group.name .. "'?\n\nCharacters will be moved to Ungrouped."
@@ -2325,10 +2327,16 @@ function PVPHUB:ShowGroupManagementWindow()
             
             yOffset = yOffset - 70
         end
-        
+
         scrollChild:SetHeight(math.abs(yOffset) + 20)
+        -- Rows are rebuilt every time, so their buttons get skinned here
+        if PVPHUB.UI then PVPHUB.UI.SkinDescendants(window) end
     end
-    
+
+    if PVPHUB.UI then
+        PVPHUB.UI.SkinWindow(window)
+        PVPHUB.UI.SkinCloseButton(closeBtn)
+    end
     window:UpdateContent()
     PVPHUB.groupMgmtWindow = window
 end
@@ -2388,10 +2396,11 @@ local function ShowBackupsWindow()
     closeBtn:SetPoint("TOPRIGHT", window, "TOPRIGHT", -5, -5)
     closeBtn:SetScript("OnClick", function() window:Hide() end)
 
-    local scrollFrame = CreateFrame("ScrollFrame", nil, window, "UIPanelScrollFrameTemplate")
+    local scrollFrame = CreateFrame("ScrollFrame", nil, window, "ScrollFrameTemplate")
     PVPHUB.EnableSmoothScroll(scrollFrame, 40)
     scrollFrame:SetPoint("TOPLEFT", window, "TOPLEFT", 18, -82)
     scrollFrame:SetPoint("BOTTOMRIGHT", window, "BOTTOMRIGHT", -38, 50)
+    PVPHUB._ApplyModernScrollbarStyling(scrollFrame, UI_CONSTANTS.COLORS)
     local scrollChild = CreateFrame("Frame", nil, scrollFrame)
     scrollFrame:SetScrollChild(scrollChild)
     scrollChild:SetSize(400, 200)
@@ -2537,6 +2546,8 @@ local function ShowBackupsWindow()
         end
 
         scrollChild:SetHeight(math.abs(y) + 10)
+        -- Rows are rebuilt every time, so their buttons get skinned here
+        if PVPHUB.UI then PVPHUB.UI.SkinDescendants(window) end
     end
 
     backupNowBtn:SetScript("OnClick", function()
@@ -2544,6 +2555,10 @@ local function ShowBackupsWindow()
         window.UpdateContent()
     end)
 
+    if PVPHUB.UI then
+        PVPHUB.UI.SkinWindow(window)
+        PVPHUB.UI.SkinCloseButton(closeBtn)
+    end
     window.UpdateContent()
     PVPHUB.backupsWindow = window
 end
@@ -2601,10 +2616,11 @@ local function ShowHiddenCharactersWindow()
     closeBtn:SetScript("OnClick", function() window:Hide() end)
 
     -- Scroll frame
-    local scrollFrame = CreateFrame("ScrollFrame", nil, window, "UIPanelScrollFrameTemplate")
+    local scrollFrame = CreateFrame("ScrollFrame", nil, window, "ScrollFrameTemplate")
     PVPHUB.EnableSmoothScroll(scrollFrame, 40)
     scrollFrame:SetPoint("TOPLEFT", window, "TOPLEFT", 20, -75)
     scrollFrame:SetPoint("BOTTOMRIGHT", window, "BOTTOMRIGHT", -40, 50)
+    PVPHUB._ApplyModernScrollbarStyling(scrollFrame, UI_CONSTANTS.COLORS)
     
     local scrollChild = CreateFrame("Frame", nil, scrollFrame)
     scrollFrame:SetScrollChild(scrollChild)
@@ -2751,11 +2767,17 @@ local function ShowHiddenCharactersWindow()
             
             scrollChild:SetHeight(math.max(200, yOffset))
         end
+        -- Rows are rebuilt every time, so their buttons get skinned here
+        if PVPHUB.UI then PVPHUB.UI.SkinDescendants(window) end
     end
-    
+
+    if PVPHUB.UI then
+        PVPHUB.UI.SkinWindow(window)
+        PVPHUB.UI.SkinCloseButton(closeBtn)
+    end
     -- Initial content update
     window.UpdateContent()
-    
+
     PVPHUB.hiddenCharsWindow = window
     window:Show()
 end
@@ -2836,6 +2858,7 @@ local function ApplyWindowBGColor(frame, alpha)
         frame.bgTex:SetVertexColor(bg[1], bg[2], bg[3], alpha)
     end
 end
+PVPHUB._ApplyWindowBGColor = ApplyWindowBGColor   -- small windows (modules/ui_kit.lua)
 
 -- Rounded corners for the main window's background, border ring and glow.
 -- Each shape gets small corner masks of a fixed size, so its corners are
@@ -2854,11 +2877,29 @@ PVPHUB.WINDOW_CORNER_RADIUS = 32
 do
     local CORNER_FILE = "Interface\\AddOns\\PVPHUB\\media\\window_corner_"
 
+    -- Masks come in 16, 32 and 64 pixels; each corner uses the one closest
+    -- to its size on screen. Masks aren't smoothed when drawn much smaller
+    -- than they are, so a 64 pixel mask on a switch's 8 unit corner came
+    -- out stepped.
+    -- Textures and their masks are drawn without pixel snapping, so they
+    -- line up exactly. Snapped, a texture sitting between two pixels (a
+    -- sliding switch knob always does) could shift a pixel against its
+    -- masks; its outer row then fell outside the mask, where CLAMPTOWHITE
+    -- counts as visible, and showed as a thin line along the edge.
+    local function NoSnap(region)
+        if region.SetSnapToPixelGrid then
+            region:SetSnapToPixelGrid(false)
+            region:SetTexelSnappingBias(0)
+        end
+    end
+
     local function CornerMask(frame, point, suffix, sx, sy, outset, radius)
+        local size = (radius <= 10 and "_16") or (radius <= 24 and "_32") or ""
         local mask = frame:CreateMaskTexture()
-        mask:SetTexture(CORNER_FILE .. suffix, "CLAMPTOWHITE", "CLAMPTOWHITE")
+        mask:SetTexture(CORNER_FILE .. suffix .. size, "CLAMPTOWHITE", "CLAMPTOWHITE")
         mask:SetSize(radius, radius)
         mask:SetPoint(point, frame, point, sx * outset, sy * outset)
+        NoSnap(mask)
         return mask
     end
 
@@ -2912,6 +2953,8 @@ do
         bottom:SetColorTexture(1, 1, 1, 1)
         bottom:SetPoint("TOPLEFT",     frame, "LEFT",        -outset, 0)
         bottom:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT",  outset, -outset)
+        NoSnap(top)
+        NoSnap(bottom)
         local shape = setmetatable({ top = top, bottom = bottom, rounded = false }, Shape)
         shape.parts = {
             { tex = top, masks = {
@@ -2962,10 +3005,12 @@ local function ApplyTheme()
     if PVPHUB.RefreshCompactTheme then
         PVPHUB:RefreshCompactTheme()
     end
-    -- The List/Cards switch takes the accent color (modules/cards.lua)
+    -- The List/Cards switch and the modern controls take the accent color
+    -- (modules/cards.lua, modules/ui_kit.lua)
     if PVPHUB.Cards and PVPHUB.window and PVPHUB.window.viewToggle then
         PVPHUB.Cards.PaintToggle(PVPHUB.window.viewToggle, true)
     end
+    if PVPHUB.UI then PVPHUB.UI.RefreshTheme() end
 end
 
 -- Function to apply modern styling to dropdowns
@@ -3299,6 +3344,9 @@ local function ApplyModernScrollbarStyling(scrollFrame, themeColors, nudge)
         end
     end
 end
+-- For the small windows defined above this (Manage Groups, Backups, Hidden
+-- Characters), which can't see this local
+PVPHUB._ApplyModernScrollbarStyling = ApplyModernScrollbarStyling
 
 -- ============================================================
 -- Reusable collapsible card widget
@@ -3575,7 +3623,7 @@ local function RefreshAllWindows()
         
         -- Update scale slider with theme colors
         if PVPHUB.window.scaleSlider then
-            -- MinimalSliderTemplate uses built-in styling, just update label color
+            -- The slider itself is repainted by PVPHUB.UI.RefreshTheme; just update label color
             if PVPHUB.window.scaleLabel then
                 PVPHUB.window.scaleLabel:SetTextColor(unpack(UI_CONSTANTS.COLORS.HEADER_COLOR))
             end
@@ -8138,6 +8186,8 @@ SlashCmdList["PVPHUB"] = function(msg)
         closeButton.highlightTex = _ht
         closeButton:SetScript("OnClick", function() f:Hide() end)
         f.closeButton = closeButton
+        -- 7.0: the UI kit replaces the silver art with its thin "×"
+        if PVPHUB.UI then PVPHUB.UI.SkinCloseButton(closeButton) end
 
         -- Force-close the interactive Honor/Conquest/Gold totals popup
         -- whenever the main window closes, however it closes (close button,
@@ -9330,12 +9380,13 @@ SlashCmdList["PVPHUB"] = function(msg)
             -- Style/Indicator dropdown boxes, which end qtLabelWidth + 190 from
             -- the checkbox's left (22 label inset - 10 dropdown offset + 180
             -- dropdown width - 2 box inset); it never gets closer than 12 px
-            -- to the checkbox label.
+            -- to the checkbox label, which starts 38 in (right of the pill
+            -- switch, see modules/ui_kit.lua).
             local qtPreviewBtn = CreateFrame("Button", nil, qtContent, "UIPanelButtonTemplate")
             qtPreviewBtn:SetSize(120, 25)
             qtPreviewBtn:SetPoint("LEFT", queueTimerCheckbox, "LEFT",
                 math.max(qtLabelWidth + 190 - 120,
-                         queueTimerCheckbox:GetWidth() + queueTimerCheckbox.Text:GetStringWidth() + 12), 0)
+                         38 + queueTimerCheckbox.Text:GetStringWidth() + 12), 0)
             qtPreviewBtn:SetText("Show Preview")
             qtPreviewBtn:GetFontString():SetTextColor(1, 1, 1)
             qtPreviewBtn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
@@ -9810,6 +9861,7 @@ SlashCmdList["PVPHUB"] = function(msg)
             resetButton:SetSize(190, 25)
             resetButton:SetPoint("TOPLEFT", backupsButton, "BOTTOMLEFT", 0, -5)
             resetButton:SetText("Reset All Data")
+            resetButton.pvpDanger = true   -- red in the modern button style (modules/ui_kit.lua)
             resetButton:GetFontString():SetTextColor(1, 1, 1)
             resetButton:SetScript("OnClick", function() StaticPopup_Show("PVPHUB_RESET_ALL_DATA") end)
             resetButton:SetScript("OnEnter", function(self)
@@ -9877,6 +9929,10 @@ SlashCmdList["PVPHUB"] = function(msg)
             f.settingsRightBg = nil
             f.settingsTitle   = nil
             f.styleTitle      = nil
+
+            -- Modern controls: on/off checkboxes become pill switches and the
+            -- red Blizzard buttons rounded accent buttons (modules/ui_kit.lua)
+            if PVPHUB.UI then PVPHUB.UI.SkinDescendants(settingsFrame) end
 
             -- Hide the container initially (not the scroll child)
             settingsContainer:Hide()
@@ -10946,6 +11002,7 @@ SlashCmdList["PVPHUB"] = function(msg)
         manageGroupsBtn:SetSize(105, 20)
         manageGroupsBtn:SetPoint("TOPLEFT", f, "TOPLEFT", 20, -62)
         manageGroupsBtn:SetText("+ New Group")
+        if PVPHUB.UI then PVPHUB.UI.SkinButton(manageGroupsBtn) end
         f.manageGroupsBtn = manageGroupsBtn
         
         -- Initially hide the button if grouping is not enabled
@@ -10974,6 +11031,7 @@ SlashCmdList["PVPHUB"] = function(msg)
         compactToggleBtn:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -145, 19)
         compactToggleBtn:SetText("Streamer Mode")
         compactToggleBtn:GetFontString():SetFont("Fonts\\ARIALN.TTF", 10)
+        if PVPHUB.UI then PVPHUB.UI.SkinButton(compactToggleBtn) end
 
         -- Store reference for theme updates
         f.compactToggleBtn = compactToggleBtn
@@ -11163,6 +11221,7 @@ SlashCmdList["PVPHUB"] = function(msg)
         -- Store references for theme updates
         f.scaleSlider = scaleSlider
         f.scaleLabel = scaleLabel
+        if PVPHUB.UI then PVPHUB.UI.SkinSlider(scaleSlider) end
         
         -- Apply saved scale
         f:SetScale(f.currentScale)

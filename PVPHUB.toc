@@ -41,4 +41,5 @@ PVPHUB_core.lua
 # Load modules that depend on core
 modules\compact.lua
 modules\popups.lua
+modules\ui_kit.lua
 modules\cards.lua
