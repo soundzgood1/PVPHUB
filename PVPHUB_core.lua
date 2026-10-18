@@ -2962,6 +2962,10 @@ local function ApplyTheme()
     if PVPHUB.RefreshCompactTheme then
         PVPHUB:RefreshCompactTheme()
     end
+    -- The List/Cards switch takes the accent color (modules/cards.lua)
+    if PVPHUB.Cards and PVPHUB.window and PVPHUB.window.viewToggle then
+        PVPHUB.Cards.PaintToggle(PVPHUB.window.viewToggle, true)
+    end
 end
 
 -- Function to apply modern styling to dropdowns
@@ -8332,7 +8336,10 @@ SlashCmdList["PVPHUB"] = function(msg)
                 -- Sort/Show-Hide only apply to the character list, so they're
                 -- hidden on the other tabs (see below) and restored here.
                 if _G["PVPHUBSortDropdown"]   then _G["PVPHUBSortDropdown"]:Show()   end
-                if _G["PVPHUBColumnDropdown"] then _G["PVPHUBColumnDropdown"]:Show() end
+                -- Show/Hide only switches the list's columns: not in the card view
+                if _G["PVPHUBColumnDropdown"] then
+                    _G["PVPHUBColumnDropdown"]:SetShown(not (PVPHUB.Cards and PVPHUB.Cards.IsActive()))
+                end
                 if f.viewToggle then f.viewToggle:Show() end
 
                 -- Fade the list and its (just rebuilt) headers in together
