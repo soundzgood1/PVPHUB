@@ -389,6 +389,9 @@ function PVPHUB_CreateFontPicker(parent, anchorTo, anchorPoint, xOff, yOff, maxH
         if popup._updateIndicators then popup._updateIndicators() end
     end)
     popup:SetScript("OnHide", function() catcher:Hide(); previewFrame:Hide() end)
+    -- The list is a frame of its own (UIParent): it closes with the dropdown,
+    -- e.g. when Escape closes the window while the list is open
+    wrapper:HookScript("OnHide", function() popup:Hide() end)
 
     if toggleBtn then
         -- The template opens its legacy dropdown list from OnMouseDown; this
@@ -3633,9 +3636,9 @@ local function RefreshAllWindows()
     end
     
     -- Refresh settings window if it exists
+    -- (It has no backdrop to color: it draws its own background, and a
+    -- theme change rebuilds it, see RefreshCompactTheme in compact.lua.)
     if PVPHUB.compactSettingsWindow then
-        PVPHUB.compactSettingsWindow:SetBackdropColor(unpack(UI_CONSTANTS.COLORS.SETTINGS_BG))
-        PVPHUB.compactSettingsWindow:SetBackdropBorderColor(unpack(UI_CONSTANTS.COLORS.SETTINGS_BORDER))
         
         -- Update settings window title
         if PVPHUB.compactSettingsWindow.title then
@@ -5106,15 +5109,24 @@ local TITLE_META = {
 local TITLE_META_BY_BRACKET = {}
 for _, m in ipairs(TITLE_META) do TITLE_META_BY_BRACKET[m.bracketKey] = m end
 
--- Human-readable season name, keyed by the raw ID C_PvP.GetUIDisplaySeason()
--- returns (Blizzard's internal running counter — not the per-expansion
--- season number players see, e.g. "Season 1" of a new expansion). A raw ID
--- with no entry here just displays as "Season <raw id>". This is what keeps
--- the Stats tab from silently relabeling next season's data as this one.
-local function GetSeasonDisplayName(rawSeason)
+-- Human-readable season name for the number C_PvP.GetUIDisplaySeason()
+-- returns, which counts per expansion (1, 2, ...): "<expansion> Season N",
+-- e.g. "Midnight Season 2", with the expansion name from the game's own
+-- strings. expansionLevel is the expansion the season belongs to (default:
+-- the current one). A name set with /pvphub seasonlabel wins. The Season tab
+-- used to save the live season's name as "Midnight Season 1" the first time
+-- it was opened, which named Season 2 that way for anyone who first opened
+-- it in Season 2; that is no longer saved, and the old value is ignored.
+local function GetSeasonDisplayName(rawSeason, expansionLevel)
     if not rawSeason or rawSeason <= 0 then return nil end
     local custom = PVPHUB_SETTINGS.seasonLabels and PVPHUB_SETTINGS.seasonLabels[rawSeason]
-    return custom or ("Season " .. rawSeason)
+    if custom and custom ~= "Midnight Season 1" then return custom end
+    local level = expansionLevel
+        or (GetServerExpansionLevel and GetServerExpansionLevel())
+        or (GetExpansionLevel and GetExpansionLevel())
+    local expansion = level and _G["EXPANSION_NAME" .. level]
+    if expansion then return expansion .. " Season " .. rawSeason end
+    return "Season " .. rawSeason
 end
 
 -- Builds the plain-text requirement line for a title tile/tooltip from its
@@ -5532,7 +5544,21 @@ end
 local _totalsPopup
 local _totalsPopupRows = {}
 local TP_PAD, TP_ROW_H, TP_WIDTH = 12, 20, 260
-local ScheduleHideTotalsPopup -- forward declaration; defined below EnsureTotalsPopup, used inside it
+local TP_HIDE_DELAY = 0.25   -- seconds off both the popup and its button before it closes
+
+-- Closes the popup once the mouse has been off both it and the button that
+-- opened it for a moment. Checked all the time while it's shown: the old
+-- check ran once after an OnLeave, and leaving the popup straight from a
+-- row's delete button (a child frame) never fired the popup's own OnLeave,
+-- so it stayed open until it was hovered again.
+local function TotalsPopupOnUpdate(self, elapsed)
+    if self:IsMouseOver() or (self.triggerBtn and self.triggerBtn:IsMouseOver()) then
+        self.away = 0
+        return
+    end
+    self.away = (self.away or 0) + elapsed
+    if self.away >= TP_HIDE_DELAY then self:Hide() end
+end
 
 local function EnsureTotalsPopup()
     if _totalsPopup then return _totalsPopup end
@@ -5555,6 +5581,13 @@ local function EnsureTotalsPopup()
     f.title:SetPoint("TOPLEFT", TP_PAD, -10)
     RegisterTrackedFont(f.title, 13, "OUTLINE")
 
+    -- How many characters are listed, on the title's line
+    f.count = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    f.count:SetPoint("TOPRIGHT", -TP_PAD, -12)
+    f.count:SetJustifyH("RIGHT")
+    f.count:SetTextColor(0.55, 0.55, 0.55, 1)
+    RegisterTrackedFont(f.count, 11, "")
+
     f.emptyText = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     f.emptyText:SetJustifyH("LEFT")
     f.emptyText:SetTextColor(0.6, 0.6, 0.6, 1)
@@ -5573,25 +5606,24 @@ local function EnsureTotalsPopup()
     f.divider:SetColorTexture(0.45, 0.45, 0.5, 0.6)
     f.divider:Hide()
 
-    f:SetScript("OnLeave", function(self) ScheduleHideTotalsPopup() end)
+    f:SetScript("OnShow", function(self) self.away = 0 end)
+    f:SetScript("OnUpdate", TotalsPopupOnUpdate)
+    f:SetScript("OnHide", function(self)
+        -- Take a delete button's tooltip with it
+        local owner = GameTooltip:GetOwner()
+        if owner and owner.isTotalsDelete then GameTooltip:Hide() end
+    end)
 
     _totalsPopup = f
     return f
 end
 
--- Only hide once the mouse has left BOTH the popup itself and whatever
--- button opened it — otherwise moving off the trigger button to reach a
--- delete "x" inside the popup would close it before the click lands. Shared
--- by the popup's own OnLeave and every trigger button's OnLeave.
-ScheduleHideTotalsPopup = function()
-    C_Timer.After(0.15, function()
-        if not _totalsPopup or not _totalsPopup:IsShown() then return end
-        local overPopup  = _totalsPopup:IsMouseOver()
-        local overButton = _totalsPopup.triggerBtn and _totalsPopup.triggerBtn:IsMouseOver()
-        if not overPopup and not overButton then
-            _totalsPopup:Hide()
-        end
-    end)
+-- A row: name and amount; while it's hovered, a highlight and its delete
+-- button. Deleting is for a character left behind (e.g. by a realm
+-- transfer) and asks first, so the button only shows on the row you point at.
+local function ShowRowHover(row, on)
+    row.band:SetShown(on)
+    row.deleteBtn:SetShown(on and row.deleteBtn.charKey ~= nil)
 end
 
 local function GetTotalsPopupRow(n)
@@ -5601,24 +5633,34 @@ local function GetTotalsPopupRow(n)
     local row = CreateFrame("Frame", nil, f)
     row:SetHeight(TP_ROW_H)
     row:SetWidth(TP_WIDTH)
+    row:EnableMouse(true)
+
+    row.band = row:CreateTexture(nil, "BACKGROUND")
+    row.band:SetPoint("TOPLEFT", -4, 0)
+    row.band:SetPoint("BOTTOMRIGHT", 4, 0)
+    row.band:SetColorTexture(1, 1, 1, 0.06)
+    row.band:Hide()
 
     row.deleteBtn = CreateFrame("Button", nil, row)
+    row.deleteBtn.isTotalsDelete = true
     row.deleteBtn:SetSize(16, 16)
     row.deleteBtn:SetPoint("RIGHT", row, "RIGHT", 0, 0)
     row.deleteBtn.text = row.deleteBtn:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     row.deleteBtn.text:SetAllPoints()
     row.deleteBtn.text:SetJustifyH("CENTER")
     row.deleteBtn.text:SetText("|cff888888x|r")
+    row.deleteBtn:Hide()
     row.deleteBtn:SetScript("OnEnter", function(self)
         self.text:SetText("|cffff4040x|r")
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
         GameTooltip:SetText("Remove this character")
-        GameTooltip:AddLine("Permanently deletes all PVPHUB data for this character.", 1, 1, 1, true)
+        GameTooltip:AddLine("Permanently deletes all PVPHUB data for this character. You'll be asked first.", 1, 1, 1, true)
         GameTooltip:Show()
     end)
     row.deleteBtn:SetScript("OnLeave", function(self)
         self.text:SetText("|cff888888x|r")
         GameTooltip:Hide()
+        if not row:IsMouseOver() then ShowRowHover(row, false) end
     end)
     row.deleteBtn:SetScript("OnClick", function(self)
         local charKey = self.charKey
@@ -5630,6 +5672,12 @@ local function GetTotalsPopupRow(n)
         StaticPopup_Show("PVPHUB_DELETE_CHARACTER")
     end)
 
+    -- Moving onto the delete button counts as still on the row
+    row:SetScript("OnEnter", function(self) ShowRowHover(self, true) end)
+    row:SetScript("OnLeave", function(self)
+        if not self:IsMouseOver() then ShowRowHover(self, false) end
+    end)
+
     row.name = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     row.name:SetPoint("LEFT", row, "LEFT", 0, 0)
     row.name:SetJustifyH("LEFT")
@@ -5637,6 +5685,7 @@ local function GetTotalsPopupRow(n)
     row.name:SetWordWrap(false)
     RegisterTrackedFont(row.name, 12, "")
 
+    -- Stays put whether the delete button shows or not
     row.value = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     row.value:SetPoint("RIGHT", row.deleteBtn, "LEFT", -8, 0)
     row.value:SetJustifyH("RIGHT")
@@ -5660,6 +5709,7 @@ local function ShowTotalsPopup(triggerBtn, titleText, titleColor, entries)
     for _, row in ipairs(_totalsPopupRows) do row:Hide() end
 
     local y = -10 - popup.title:GetStringHeight() - 8
+    local chars = 0
 
     if #entries == 0 then
         popup.emptyText:ClearAllPoints()
@@ -5679,9 +5729,10 @@ local function ShowTotalsPopup(triggerBtn, titleText, titleColor, entries)
             -- Entries with no char (e.g. Warband Bank — account-wide, not a
             -- character) get no delete button; there's nothing to delete.
             row.deleteBtn.charKey = entry.char
-            row.deleteBtn:SetShown(entry.char ~= nil)
+            ShowRowHover(row, false)
             row:Show()
             y = y - TP_ROW_H
+            if entry.char then chars = chars + 1 end
 
             -- Visually separate an account-wide entry from the character
             -- rows below it with a divider line and a little extra room.
@@ -5694,12 +5745,13 @@ local function ShowTotalsPopup(triggerBtn, titleText, titleColor, entries)
             end
         end
     end
+    popup.count:SetText(chars > 0 and (chars .. (chars == 1 and " character" or " characters")) or "")
 
     popup.hint:ClearAllPoints()
     popup.hint:SetPoint("TOPLEFT", TP_PAD, y - 4)
     popup.hint:SetWidth(TP_WIDTH)
-    popup.hint:SetText("Click |cffff5555x|r to permanently remove a character (e.g. a stale entry left behind by a realm transfer).")
-    y = y - 4 - popup.hint:GetStringHeight()
+    popup.hint:SetText(chars > 0 and "Hover a character to remove it with |cffff5555x|r, e.g. one left behind by a realm transfer." or "")
+    y = y - 4 - (chars > 0 and popup.hint:GetStringHeight() or 0)
 
     popup:SetWidth(TP_WIDTH + TP_PAD * 2)
     popup:SetHeight(-y + 12)
@@ -7317,6 +7369,10 @@ PVPHUB.frame:HookScript("OnEvent", function(self, event, ...)
         -- Also offer the archive a dated entry. Self-throttled, so this only
         -- lands when the newest one is already a day old.
         ArchiveSnapshot("logout")
+        -- A reload or logout with the window open doesn't hide it first
+        if PVPHUB.window and PVPHUB.window:IsShown() and PVPHUB.window.SaveWindowPos then
+            PVPHUB.window:SaveWindowPos()
+        end
     elseif event == "PLAYER_REGEN_DISABLED" then
         -- Player entered combat - mark combat status
         PVPHUB._inCombat = true
@@ -8116,6 +8172,15 @@ SlashCmdList["PVPHUB"] = function(msg)
         -- take it down with it.
         f:HookScript("OnHide", function()
             if _totalsPopup then _totalsPopup:Hide() end
+            -- A column or group drag the window closes in the middle of
+            -- (Escape, /pvphub) drops nothing, and its copy doesn't come back
+            -- with the window; the next opening redraws the faded header
+            if PVPHUB._draggingColumnKey or PVPHUB._draggingGroupIndex then
+                PVPHUB._draggingColumnKey, PVPHUB._draggingGroupIndex = nil, nil
+                if PVPHUB._columnDragGhost then PVPHUB._columnDragGhost:End() end
+                if PVPHUB._groupDragGhost then PVPHUB._groupDragGhost:End() end
+                PVPHUB._mainRenderSig = nil
+            end
         end)
 
         -- Create scroll frame with modern TWW styling
@@ -8172,11 +8237,19 @@ SlashCmdList["PVPHUB"] = function(msg)
         f:SetScript("OnDragStart", function(self)
             self:StartMoving()
         end)
+        -- Saves where the window is by its top-left corner, so it opens there
+        -- again whatever size it has then (its width follows the columns,
+        -- and a centre-based position moved the corner when that changed).
+        -- Saved after a drag, whenever it closes (X, Escape, /pvphub) and at
+        -- logout or reload while it's open.
+        function f:SaveWindowPos()
+            local left, top = self:GetLeft(), self:GetTop()
+            if not (left and top) then return end
+            PVPHUB_SETTINGS.windowPos = { point = "TOPLEFT", relativePoint = "BOTTOMLEFT", x = left, y = top }
+        end
         f:SetScript("OnDragStop", function(self)
             self:StopMovingOrSizing()
-            if not PVPHUB_SETTINGS.windowPos then PVPHUB_SETTINGS.windowPos = {} end
-            local point, relativeTo, relativePoint, xOfs, yOfs = self:GetPoint()
-            PVPHUB_SETTINGS.windowPos = {point=point, relativePoint=relativePoint, x=xOfs, y=yOfs}
+            self:SaveWindowPos()
         end)
         -- Restore position if saved
         if PVPHUB_SETTINGS.windowPos then
@@ -9857,11 +9930,8 @@ SlashCmdList["PVPHUB"] = function(msg)
         -- Always initialize with CHARACTERS tab (prevents header generation bugs when reopening from settings tab)
         SwitchTab("characters")
         
-        closeButton:HookScript("OnClick", function()
-            if not PVPHUB_SETTINGS.windowPos then PVPHUB_SETTINGS.windowPos = {} end
-            local point, relativeTo, relativePoint, xOfs, yOfs = f:GetPoint()
-            PVPHUB_SETTINGS.windowPos = {point=point, relativePoint=relativePoint, x=xOfs, y=yOfs}
-        end)
+        -- However it closes (X, Escape, /pvphub toggle)
+        f:HookScript("OnHide", function(self) self:SaveWindowPos() end)
         -- Author credit aligned under the title (locked to Prototyp font with fallback),
         -- followed by the installed version read from the .toc so it never goes stale
         f.author = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -9957,18 +10027,8 @@ SlashCmdList["PVPHUB"] = function(msg)
             -- permanently half-built tab — the next tab click retries the build.
             local buildOk, buildErr = pcall(function()
 
-            -- One-time seed: label whatever season is live right now as
-            -- "Midnight Season 1". This only ever fires the very first time this
-            -- feature runs (seasonLabels doesn't exist yet), so once the raw season
-            -- ID changes later, the new season is NOT auto-relabeled — it shows a
-            -- generic "Season <raw id>" until relabeled with /pvphub seasonlabel.
-            if not PVPHUB_SETTINGS.seasonLabels then
-                PVPHUB_SETTINGS.seasonLabels = {}
-                local liveSeason = (C_PvP and C_PvP.GetUIDisplaySeason and C_PvP.GetUIDisplaySeason()) or 0
-                if liveSeason > 0 then
-                    PVPHUB_SETTINGS.seasonLabels[liveSeason] = "Midnight Season 1"
-                end
-            end
+            -- Season names are built from the expansion (GetSeasonDisplayName);
+            -- nothing to seed here any more.
             PVPHUB_SETTINGS.statsSections = PVPHUB_SETTINGS.statsSections or {}
 
             -- Forward-declared: AddCard's collapse/expand click handler (defined
@@ -12742,9 +12802,6 @@ SlashCmdList["PVPHUB"] = function(msg)
                     ShowTotalsPopup(f.honorTooltipBtn, "Total Honor", { 1, 0.42, 0 }, entries)
                 end)
 
-                f.honorTooltipBtn:SetScript("OnLeave", function()
-                    ScheduleHideTotalsPopup()
-                end)
                 
                 -- Conquest tooltip button
                 f.conquestTooltipBtn = CreateFrame("Button", nil, f)
@@ -12787,9 +12844,6 @@ SlashCmdList["PVPHUB"] = function(msg)
                     ShowTotalsPopup(f.conquestTooltipBtn, "Total Conquest", { 0.64, 0.21, 0.93 }, entries)
                 end)
 
-                f.conquestTooltipBtn:SetScript("OnLeave", function()
-                    ScheduleHideTotalsPopup()
-                end)
                 
                 -- Gold tooltip button
                 f.goldTooltipBtn = CreateFrame("Button", nil, f)
@@ -12850,9 +12904,6 @@ SlashCmdList["PVPHUB"] = function(msg)
                     ShowTotalsPopup(f.goldTooltipBtn, "Total Gold", { 1, 1, 0 }, entries)
                 end)
 
-                f.goldTooltipBtn:SetScript("OnLeave", function()
-                    ScheduleHideTotalsPopup()
-                end)
             end
             
             -- Match the user's font and size settings

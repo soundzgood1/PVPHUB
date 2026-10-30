@@ -348,6 +348,8 @@ function PVPHUB:CreateCompactWindow()
         ddCatcher:SetFrameStrata("FULLSCREEN_DIALOG"); ddCatcher:SetFrameLevel(199); ddCatcher:Hide()
         ddCatcher:SetScript("OnMouseDown", function() ddPopup:Hide() end)
         ddPopup:SetScript("OnHide", function() ddCatcher:Hide() end)
+        -- Closes with the compact window (Escape, the toggle) while open
+        sortDropBtn:HookScript("OnHide", function() ddPopup:Hide() end)
 
         -- Popup rows
         local function refreshHighlight()
