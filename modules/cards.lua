@@ -31,12 +31,14 @@ local CARD_RADIUS  = 5
 local EMBLEM_SIZE  = 38
 local GROUP_HEIGHT = 26     -- group bar in the list
 local NEW_GROUP_H  = 24     -- "New Group" button above the list
+local GROUPS_SWITCH_W = 92  -- the "Groups" switch and its label beside it
 local SEARCH_H     = 20     -- search box under it
 local LIST_HEAD_H  = NEW_GROUP_H + 4 + SEARCH_H + 6   -- both, above the list
 
 local DETAIL_PAD   = 14
 local BIG_PORTRAIT = 52
-local ROW_HEIGHT   = 22     -- ratings table row
+local TILE_HEIGHT  = 82     -- rating tile, one per bracket (and spec)
+local TILE_GAP     = 10
 
 local BRACKETS = {
     { key = "rating2v2",     label = "2v2",     icon = "Interface\\Icons\\achievement_arena_2v2_1" },
@@ -46,14 +48,6 @@ local BRACKETS = {
     { key = "ratingRBG",     label = "RBG",     icon = "Interface\\Icons\\achievement_pvp_a_15" },
 }
 
--- Ratings table columns: left edge as a share of the table width
-local COLUMNS = {
-    { key = "rating", title = "Rating", x = 0.42 },
-    { key = "best",   title = "Best",   x = 0.54 },
-    { key = "mmr",    title = "MMR",    x = 0.66 },
-    { key = "wl",     title = "W–L",    x = 0.78 },
-    { key = "win",    title = "Win",    x = 0.91 },
-}
 
 local WHITE       = "Interface\\Buttons\\WHITE8x8"
 local CIRCLE_MASK = "Interface\\CHARACTERFRAME\\TempPortraitAlphaMask"
@@ -123,16 +117,15 @@ local function GetColors()
     return (PVPHUB.currentColors and next(PVPHUB.currentColors) and PVPHUB.currentColors) or {}
 end
 
+-- The theme's highlight color, the same the UI kit's switches and sliders use
+local function ThemeColor()
+    if PVPHUB.UI and PVPHUB.UI.ThemeColor then return PVPHUB.UI.ThemeColor() end
+    return GetColors().ACCENT_LINE or { 0.8, 0.3, 0.5 }
+end
+
 local function ClassColor(data)
     local token = data and data.class and data.class:upper() or "WARRIOR"
     return RAID_CLASS_COLORS[token] or RAID_CLASS_COLORS.WARRIOR, token
-end
-
--- "|cffRRGGBB" -> r, g, b
-local function HexToRGB(code)
-    local hex = code:match("|c%x%x(%x%x%x%x%x%x)")
-    if not hex then return 1, 1, 1 end
-    return tonumber(hex:sub(1, 2), 16) / 255, tonumber(hex:sub(3, 4), 16) / 255, tonumber(hex:sub(5, 6), 16) / 255
 end
 
 -- Inline icon markup, cropped like the other icons
@@ -435,6 +428,7 @@ local function CreateGroupHeader(container)
 end
 
 local function PaintGroupHeader(h, entry)
+    h.entry      = entry
     h.groupIndex = entry.groupIndex
     h.groupName  = entry.groupName
     h.isDefault  = entry.groupIsDefault
@@ -465,23 +459,21 @@ function Cards.JustDragged()
     return Cards.dragEndedAt ~= nil and GetTime() - Cards.dragEndedAt < 0.25
 end
 
+-- While dragging, an exact copy of the card or group bar follows the cursor
+-- (held where it was grabbed) and the original stays faded in its place.
+-- The copies are a card and a group bar of their own, painted like the
+-- dragged one, on a solid background so they read over anything.
 local function GetDragVisuals()
-    if drag.ghost then return drag.ghost, drag.marker end
+    if drag.marker then return drag.marker end
 
-    local ghost = CreateFrame("Frame", nil, UIParent)
-    ghost:SetFrameStrata("TOOLTIP")
-    ghost:SetSize(170, 30)
-    ghost.ring = PVPHUB.CreateRoundedShape(ghost, "BACKGROUND", 0, 0, 5)
-    ghost.fill = PVPHUB.CreateRoundedShape(ghost, "BACKGROUND", 1, -1, 4)
-    ghost.ring:SetRounded(true)
-    ghost.fill:SetRounded(true)
-    ghost.ring:SetVertexColor(1, 0.85, 0.2, 1)
-    ghost.fill:SetVertexColor(0.1, 0.08, 0.04, 0.92)
-    ghost.text = NewText(ghost, 12)
-    ghost.text:SetPoint("CENTER")
-    ghost.text:SetJustifyH("CENTER")
-    ghost:Hide()
-    drag.ghost = ghost
+    local function Ghost(frame)
+        frame:SetFrameStrata("TOOLTIP")
+        frame:EnableMouse(false)
+        frame:Hide()
+        return frame
+    end
+    drag.cardGhost = Ghost(CreateCharCard(UIParent))
+    drag.groupGhost = Ghost(CreateGroupHeader(UIParent))
 
     -- Where the dragged card or group will land
     local marker = Cards.container:CreateTexture(nil, "OVERLAY", nil, 7)
@@ -490,7 +482,7 @@ local function GetDragVisuals()
     marker:SetVertexColor(1, 0.82, 0, 1)
     marker:Hide()
     drag.marker = marker
-    return ghost, marker
+    return marker
 end
 
 -- The cursor in the list's own units, relative to the top of its content
@@ -588,10 +580,10 @@ local function DragOnUpdate()
         return
     end
     local ghost = drag.ghost
-    local uiScale = UIParent:GetEffectiveScale()
+    local scale = ghost:GetEffectiveScale()
     local cx, cy = GetCursorPosition()
     ghost:ClearAllPoints()
-    ghost:SetPoint("CENTER", UIParent, "BOTTOMLEFT", cx / uiScale + 12, cy / uiScale - 10)
+    ghost:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", cx / scale - drag.grabX, cy / scale - drag.grabY)
 
     -- Scroll the list while the cursor is near its top or bottom edge
     local sf = PVPHUB.window.scrollFrame
@@ -612,15 +604,33 @@ end
 function Cards.BeginDrag(source, kind)
     -- Positions in a filtered list are ambiguous: no dragging while searching
     if drag.active or (Cards.searchText or "") ~= "" then return end
-    local ghost = GetDragVisuals()
+    if not source.entry then return end
+    GetDragVisuals()
     drag.active, drag.kind, drag.source = true, kind, source
+
+    local ghost
     if kind == "card" then
-        local data = source.charKey and PVPHUB_DB[source.charKey]
-        ghost.text:SetText("|cffffd100" .. ((data and data.displayName) or (source.charKey or ""):match("^([^%-]+)") or "") .. "|r")
+        ghost = drag.cardGhost
+        local selected = source.charKey == Cards.selected
+        PaintCharCard(ghost, source.entry, source:GetWidth(), selected)
+        if not selected then ghost.fill:SetVertexColor(0.04, 0.035, 0.03, 0.97) end
     else
-        ghost.text:SetText("|cffffffff" .. (source.groupName or "") .. "|r")
+        ghost = drag.groupGhost
+        PaintGroupHeader(ghost, source.entry)
+        ghost.fill:SetVertexColor(0.04, 0.035, 0.03, 0.97)
     end
+    ghost:SetSize(source:GetWidth(), source:GetHeight())
+    -- Same size on screen as the original, wherever the window is scaled
+    ghost:SetScale(source:GetEffectiveScale() / UIParent:GetEffectiveScale())
+    ghost:SetAlpha(0.9)
+    -- Keep the copy under the cursor where the original was grabbed
+    local cx, cy = GetCursorPosition()
+    local s = source:GetEffectiveScale()
+    drag.grabX = cx / s - source:GetLeft()
+    drag.grabY = cy / s - source:GetTop()
+    drag.ghost = ghost
     ghost:Show()
+
     drag.sourceAlpha = source:GetAlpha()
     source:SetAlpha(0.35)
     if not drag.driver then
@@ -715,6 +725,28 @@ end
 -- Character info panel
 -- --------------------------------------------------------------------------
 
+local function CurrentSeason()
+    return (C_PvP and C_PvP.GetUIDisplaySeason and C_PvP.GetUIDisplaySeason()) or 0
+end
+
+-- Past season picked in the info panel's season menu, per character for the
+-- session (nil = the current season)
+Cards.viewSeason = {}
+
+-- What the info panel shows for a character and which season that is: its
+-- live data for the current season, or the picked season from the season
+-- archive (modules/seasons.lua), shaped like live data.
+local function DetailData(charKey)
+    local data = charKey and PVPHUB_DB[charKey]
+    local season = charKey and Cards.viewSeason[charKey]
+    if data and season and PVPHUB.Seasons then
+        local view = PVPHUB.Seasons.View(charKey, season)
+        if view then return view, season, true end
+        Cards.viewSeason[charKey] = nil
+    end
+    return data, CurrentSeason(), false
+end
+
 -- Newest MMR for a bracket (and spec, for Shuffle/Blitz): the last recorded
 -- match, else the last value the game reported.
 local function GetMMR(data, bracketKey, specID)
@@ -743,11 +775,10 @@ local function GetMMR(data, bracketKey, specID)
     return nil
 end
 
--- This season's rated brackets as table rows; Shuffle and Blitz get one row
--- per spec, highest first.
-local function CollectRatingRows(data)
+-- The shown season's rated brackets as table rows; Shuffle and Blitz get one
+-- row per spec, highest first.
+local function CollectRatingRows(data, season)
     local rows = {}
-    local season = (C_PvP and C_PvP.GetUIDisplaySeason and C_PvP.GetUIDisplaySeason()) or 0
     local function isCurrent(s)
         return type(s) == "table" and (season == 0 or not s.season or s.season == season)
             and ((s.rating or 0) > 0 or (s.played or 0) > 0)
@@ -770,24 +801,6 @@ local function CollectRatingRows(data)
         end
     end
     return rows
-end
-
--- A row band that fades out to both sides, like the arena stats tooltip
-local function CreateBand(parent)
-    local left = parent:CreateTexture(nil, "BACKGROUND")
-    local right = parent:CreateTexture(nil, "BACKGROUND")
-    left:SetTexture(WHITE)
-    right:SetTexture(WHITE)
-    left:SetPoint("TOPLEFT")
-    left:SetPoint("BOTTOMRIGHT", parent, "BOTTOM")
-    right:SetPoint("TOPLEFT", parent, "TOP")
-    right:SetPoint("BOTTOMRIGHT")
-    return { left = left, right = right }
-end
-
-local function PaintBand(band, r, g, b, a)
-    band.left:SetGradient("HORIZONTAL", CreateColor(r, g, b, 0), CreateColor(r, g, b, a))
-    band.right:SetGradient("HORIZONTAL", CreateColor(r, g, b, a), CreateColor(r, g, b, 0))
 end
 
 -- Section header: gold title with an underline that fades out to the
@@ -864,32 +877,140 @@ local function CreateSectionBody(parent)
     return body
 end
 
+-- Tiles and list rows react the same way: hover shows the bracket's match
+-- tooltip, left-click shows the bracket in the rating history graph,
+-- right-click opens the menu that picks which brackets get tiles.
+local function BracketOnEnter(self)
+    self.hover = true
+    if self.PaintHover then self:PaintHover() end
+    -- The tooltip shows live data, so not while a past season is shown
+    local data = self.charKey and not Cards.viewSeason[self.charKey] and PVPHUB_DB[self.charKey]
+    if data then
+        PVPHUB._ShowRatingTooltip(self, self.charKey, self.bracketKey, data[self.bracketKey])
+    end
+end
+
+local function BracketOnLeave(self)
+    self.hover = false
+    if self.PaintHover then self:PaintHover() end
+    PVPHUB._CloseRatingTooltip()
+end
+
+local function BracketOnClick(self, button)
+    if Cards.JustDragged() then return end
+    if button == "RightButton" then
+        Cards.OpenTileMenu(self)
+    elseif self.info and self.info.id then
+        -- Also without recorded matches: the graph then says so
+        Cards.graphChoice[self.charKey] = self.info.id
+        Cards.RefreshDetail()
+    end
+end
+
+local function BracketScripts(b)
+    b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    b:SetScript("OnEnter", BracketOnEnter)
+    b:SetScript("OnLeave", BracketOnLeave)
+    b:SetScript("OnClick", BracketOnClick)
+    -- Drag onto a tile to put it there (Cards.BeginTileDrag)
+    b:RegisterForDrag("LeftButton")
+    b:SetScript("OnDragStart", function(self) Cards.BeginTileDrag(self) end)
+    b:SetScript("OnDragStop", function() Cards.EndTileDrag() end)
+end
+
+-- Rating tile, like check-pvp's bracket boxes: bracket on top (and the spec's
+-- icon in the corner), the rating big under it, then one small line with
+-- MMR left and season best right. The tile the graph shows is tinted gold.
+-- Three in a row (TILE_COUNT); the other brackets go in the list under
+-- them. Painted by PaintRatingTile.
+local TILE_COUNT = 3
+local TILE_PAD   = 9
+
+local function CreateRatingTile(content)
+    local t = CreateFrame("Button", nil, content)
+    t:SetHeight(TILE_HEIGHT)
+    t.bg = PVPHUB.CreateRoundedShape(t, "BACKGROUND", 0, 0, 8)
+    t.bg:SetRounded(true)
+
+    t.icon = t:CreateTexture(nil, "ARTWORK")
+    t.icon:SetSize(16, 16)
+    t.icon:SetPoint("TOPLEFT", TILE_PAD, -10)
+    t.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    t.label = NewText(t, 12)
+    t.label:SetPoint("LEFT", t.icon, "RIGHT", 5, 0)
+    t.specIcon = t:CreateTexture(nil, "ARTWORK")
+    t.specIcon:SetSize(18, 18)
+    t.specIcon:SetPoint("TOPRIGHT", -TILE_PAD, -9)
+    t.specIcon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+
+    t.rating = NewText(t, 24)
+    t.rating:SetPoint("TOPLEFT", TILE_PAD, -31)
+
+    -- One small line under the rating: MMR left, season best right
+    t.mmr = NewText(t, 11)
+    t.mmr:SetPoint("BOTTOMLEFT", TILE_PAD, 10)
+    t.best = NewText(t, 11)
+    t.best:SetPoint("BOTTOMRIGHT", -TILE_PAD, 10)
+    t.best:SetJustifyH("RIGHT")
+
+    t.PaintHover = function(self) Cards.PaintTileBackground(self) end
+    BracketScripts(t)
+    return t
+end
+
+-- The list under the tiles: one compact row per remaining bracket, in the
+-- columns the old ratings table had. Painted by PaintRatingRow.
+local LIST_ROW_H = 22
+local LIST_COLUMNS = {
+    { key = "rating", title = "Rating", x = 0.42 },
+    { key = "best",   title = "Best",   x = 0.54 },
+    { key = "mmr",    title = "MMR",    x = 0.66 },
+    { key = "wl",     title = "W–L",    x = 0.78 },
+    { key = "win",    title = "Win",    x = 0.91 },
+}
+
 local function CreateRatingRow(content)
     local row = CreateFrame("Button", nil, content)
-    row:SetHeight(ROW_HEIGHT)
-    row.band = CreateBand(row)
+    row:SetHeight(LIST_ROW_H)
+    local hl = row:CreateTexture(nil, "HIGHLIGHT")
+    hl:SetAllPoints()
+    hl:SetTexture(WHITE)
+    hl:SetVertexColor(1, 1, 1, 0.05)
 
     row.icon = row:CreateTexture(nil, "ARTWORK")
     row.icon:SetSize(16, 16)
     row.icon:SetPoint("LEFT", 4, 0)
     row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-
     row.label = NewText(row, 12)
     row.label:SetPoint("LEFT", row.icon, "RIGHT", 6, 0)
-
     row.cells = {}
-    for i = 1, #COLUMNS do
-        row.cells[i] = NewText(row, 12)
-    end
+    for i = 1, #LIST_COLUMNS do row.cells[i] = NewText(row, 12) end
 
-    row:SetScript("OnEnter", function(self)
-        local data = self.charKey and PVPHUB_DB[self.charKey]
-        if data then
-            PVPHUB._ShowRatingTooltip(self, self.charKey, self.bracketKey, data[self.bracketKey])
-        end
-    end)
-    row:SetScript("OnLeave", function() PVPHUB._CloseRatingTooltip() end)
+    -- Lights up while a tile is dragged over the row
+    row.dropHL = row:CreateTexture(nil, "BACKGROUND")
+    row.dropHL:SetAllPoints()
+    row.dropHL:SetTexture(WHITE)
+    row.dropHL:SetVertexColor(1, 0.82, 0, 0.18)
+    row.dropHL:Hide()
+    row.PaintHover = function(self) self.dropHL:SetShown(self.dropTarget == true) end
+
+    BracketScripts(row)
     return row
+end
+
+-- Gold tint for the tile the graph shows, lighter on hover; brightest while
+-- something is dragged over it
+function Cards.PaintTileBackground(t)
+    if t.isGhost then
+        -- The drag copy floats over anything: solid black, so it reads
+        t.bg:SetVertexColor(0.03, 0.03, 0.04, 0.97)
+    elseif t.dropTarget then
+        t.bg:SetVertexColor(0.5, 0.38, 0.08, 0.85)
+    elseif t.selected then
+        t.bg:SetVertexColor(0.32, 0.24, 0.05, t.hover and 0.7 or 0.55)
+    else
+        t.bg:SetVertexColor(1, 1, 1, t.hover and 0.09 or 0.05)
+    end
 end
 
 -- --------------------------------------------------------------------------
@@ -914,13 +1035,12 @@ local RANGES = {
 Cards.graphRange  = 50
 Cards.graphChoice = {}   -- [charKey] = series id the user picked, for the session
 
--- This season's match history as graph series: one per bracket, and one per
--- spec for Shuffle and Blitz, in BRACKETS order, matches oldest first.
-local function CollectSeries(data)
+-- The shown season's match history as graph series: one per bracket, and one
+-- per spec for Shuffle and Blitz, in BRACKETS order, matches oldest first.
+local function CollectSeries(data, season)
     local list = {}
     local hist = data.mmrHistory
     if type(hist) ~= "table" then return list end
-    local season = (C_PvP and C_PvP.GetUIDisplaySeason and C_PvP.GetUIDisplaySeason()) or 0
     for _, bracket in ipairs(BRACKETS) do
         local matches = hist[bracket.key]
         if type(matches) == "table" then
@@ -1022,6 +1142,10 @@ local function PlaceDots(g, i, hovering)
     end
 end
 
+-- "before -> after" arrow: an atlas icon, as in the queue timer, because
+-- WoW's fonts have no Unicode arrow glyph (it showed as a box)
+local ARROW = CreateAtlasMarkup("common-icon-forwardarrow", 10, 10)
+
 local function ShowPointTooltip(g, i)
     local p = g.pts[i]
     local m = p.match
@@ -1040,12 +1164,20 @@ local function ShowPointTooltip(g, i)
     end
 
     local before = m.rating or 0
-    GameTooltip:AddDoubleLine("CR", string.format("%d  →  %s%d|r%s", before,
+    GameTooltip:AddDoubleLine("CR", string.format("%d %s %s%d|r%s", before, ARROW,
         PVPHUB._GetRatingColor(math.max(p.cr, 1)), p.cr, change ~= 0 and PVPHUB.FormatRatingDelta(change) or ""),
         CR_COLOR[1], CR_COLOR[2], CR_COLOR[3], 1, 1, 1)
     if p.mmr then
-        local pre = (m.preMatchMMR or 0) > 0 and (m.preMatchMMR .. "  →  ") or ""
-        GameTooltip:AddDoubleLine("MMR", pre .. p.mmr, MMR_COLOR[1], MMR_COLOR[2], MMR_COLOR[3], 1, 1, 1)
+        -- "before -> after +change" like CR; just the value when the match
+        -- has no pre-match MMR
+        local text = tostring(p.mmr)
+        local pre = m.preMatchMMR or 0
+        if pre > 0 then
+            local mmrChange = p.mmr - pre
+            text = pre .. " " .. ARROW .. " " .. p.mmr
+                .. (mmrChange ~= 0 and PVPHUB.FormatRatingDelta(mmrChange) or "")
+        end
+        GameTooltip:AddDoubleLine("MMR", text, MMR_COLOR[1], MMR_COLOR[2], MMR_COLOR[3], 1, 1, 1)
     end
     GameTooltip:Show()
 end
@@ -1101,6 +1233,8 @@ local function CreateGraph(parent)
 
     g.empty = NewText(g, 11)
     g.empty:SetPoint("CENTER")
+    g.empty:SetJustifyH("CENTER")
+    g.empty:SetSpacing(4)
     g.empty:SetText("|cff777777No matches recorded this season|r")
 
     g:EnableMouse(true)
@@ -1223,7 +1357,7 @@ end
 
 local function PaintChip(chip, active)
     if active then
-        local ac = GetColors().ACCENT_LINE or { 0.8, 0.3, 0.5 }
+        local ac = ThemeColor()
         chip.bg:SetVertexColor(ac[1], ac[2], ac[3], 0.45)
         chip.text:SetTextColor(1, 1, 1, 1)
     else
@@ -1232,21 +1366,34 @@ local function PaintChip(chip, active)
     end
 end
 
--- Paints the graph section (chips + graph) for one character
-local function PaintHistory(panel, charKey, data, width)
-    local seriesList = CollectSeries(data)
-
-    -- The series the user picked for this character, else the one played last
-    local chosen
+-- The series the graph shows: the one the user picked for this character
+-- (a chip, a rating tile or a list row), else the one played last. A picked
+-- bracket with a rating but no recorded matches (played before PVPHUB was
+-- installed, or on another PC) returns nil plus its rating row, so the
+-- graph can say so instead of quietly showing another bracket.
+local function ChosenSeries(charKey, seriesList, ratingRows)
     local pick = Cards.graphChoice[charKey]
-    for _, s in ipairs(seriesList) do
-        if s.id == pick then chosen = s end
-    end
-    if not chosen then
+    if pick then
         for _, s in ipairs(seriesList) do
-            if not chosen or s.lastPlayed > chosen.lastPlayed then chosen = s end
+            if s.id == pick then return s end
+        end
+        for _, info in ipairs(ratingRows) do
+            if info.bracket.key .. ":" .. (info.specID or 0) == pick then return nil, info end
         end
     end
+    local chosen
+    for _, s in ipairs(seriesList) do
+        if not chosen or s.lastPlayed > chosen.lastPlayed then chosen = s end
+    end
+    return chosen
+end
+
+-- Paints the graph section (chips + graph) for one character
+local function PaintHistory(panel, charKey, width)
+    local data, season, archived = DetailData(charKey)
+    if not data then return end
+    local seriesList = CollectSeries(data, season)
+    local chosen, emptyPick = ChosenSeries(charKey, seriesList, CollectRatingRows(data, season))
 
     -- Series chips, left to right
     local x = 0
@@ -1254,12 +1401,9 @@ local function PaintHistory(panel, charKey, data, width)
         local chip = panel.seriesChips[i]
         if not chip then
             chip = CreateChip(panel.historyBody, function(self)
+                -- The whole panel, so the rating tiles show the pick too
                 Cards.graphChoice[self.charKey] = self.seriesID
-                local f = PVPHUB.window
-                local d = self.charKey and PVPHUB_DB[self.charKey]
-                if f and f.cardDetail and d then
-                    PaintHistory(f.cardDetail, self.charKey, d, Cards.historyWidth or width)
-                end
+                Cards.RefreshDetail()
             end)
             panel.seriesChips[i] = chip
         end
@@ -1282,11 +1426,306 @@ local function PaintHistory(panel, charKey, data, width)
 
     for _, chip in ipairs(panel.rangeChips) do
         PaintChip(chip, chip.range == Cards.graphRange)
-        chip:SetShown(#seriesList > 0)
+        chip:SetShown(#seriesList > 0 and not emptyPick)
     end
+
+    -- An empty graph says why: the picked bracket has no recorded matches
+    local empty = "|cff777777No matches recorded this season|r"
+    if emptyPick then
+        local name = emptyPick.bracket.label
+        local specInfo = emptyPick.specID and PVPHUB._GetCachedSpecInfo(emptyPick.specID)
+        if specInfo and specInfo.name then name = specInfo.name .. " " .. name end
+        empty = string.format("|cff999999No matches recorded for %s %s|r\n|cff666666Its rating comes from the game; matches show here once PVPHUB records them.|r",
+            name, archived and "in this season" or "this season yet")
+    end
+    panel.graph.empty:SetText(empty)
 
     panel.graph:SetWidth(width)
     DrawGraph(panel.graph, chosen and SeriesPoints(chosen, Cards.graphRange) or {}, width)
+end
+
+-- --------------------------------------------------------------------------
+-- Rating tiles (see CreateRatingTile)
+-- --------------------------------------------------------------------------
+
+-- "Shuffle  [icon] Mistweaver" (or just "2v2"), for list rows and menus
+local function BracketLabel(info)
+    local label = info.bracket.label
+    local specInfo = info.specID and PVPHUB._GetCachedSpecInfo(info.specID)
+    if specInfo then
+        label = label .. "  |cffaaaaaa" .. IconMarkup(specInfo.icon, 12) .. " " .. specInfo.name .. "|r"
+    end
+    return label
+end
+
+local function WinLossText(s)
+    local won, lost = s.won or 0, s.lost or 0
+    if won + lost == 0 then return "|cff555555—|r", "|cff555555—|r" end
+    local pct = math.floor(won / (won + lost) * 100 + 0.5)
+    return string.format("|cff40ff40%d|r|cff888888–|r|cffff5050%d|r", won, lost),
+        (pct >= 50 and "|cff40ff40" or "|cffff8040") .. pct .. "%|r"
+end
+
+-- What tiles and rows have in common. Everything they were painted with is
+-- kept, so dragging can paint an identical copy (Cards.BeginTileDrag).
+local function SetBracket(b, info, data, series, selected, width)
+    b.info = info
+    b.bracketKey = info.bracket.key
+    b.seriesID = series and series.id
+    b.selected = selected
+    b.data, b.series, b.width = data, series, width
+end
+
+-- info: a CollectRatingRows row; series: its graph series (nil without
+-- recorded matches); selected: the graph shows it
+local function PaintRatingTile(t, info, data, series, selected, width)
+    SetBracket(t, info, data, series, selected, width)
+    t:SetWidth(width)
+    Cards.PaintTileBackground(t)
+
+    -- The spec only as an icon in the corner: its name doesn't fit beside
+    -- the bracket's in a third of the panel
+    t.icon:SetTexture(info.bracket.icon)
+    t.label:SetText(info.bracket.label)
+    t.label:SetTextColor(selected and 1 or 0.9, selected and 0.82 or 0.9, selected and 0 or 0.9, 1)
+    local specInfo = info.specID and PVPHUB._GetCachedSpecInfo(info.specID)
+    t.specIcon:SetShown(specInfo ~= nil)
+    if specInfo then t.specIcon:SetTexture(specInfo.icon) end
+
+    -- W-L and win rate aren't on the tile: the hover tooltip and the list
+    -- rows show them
+    local s = info.stats
+    t.rating:SetText(ColoredRating(s.rating))
+    t.mmr:SetText("|cff8f8c99MMR|r " .. ColoredRating(GetMMR(data, info.bracket.key, info.specID)))
+    t.best:SetText("|cff8f8c99Best|r " .. ColoredRating(s.seasonBest))
+end
+
+local function PaintRatingRow(row, info, data, series, selected, width)
+    SetBracket(row, info, data, series, selected, width)
+    row:SetWidth(width)
+    row.icon:SetTexture(info.bracket.icon)
+    row.label:SetText(BracketLabel(info))
+    row.label:SetTextColor(selected and 1 or 0.9, selected and 0.82 or 0.9, selected and 0 or 0.9, 1)
+    local s = info.stats
+    local wl, win = WinLossText(s)
+    local values = {
+        rating = ColoredRating(s.rating),
+        best   = ColoredRating(s.seasonBest),
+        mmr    = ColoredRating(GetMMR(data, info.bracket.key, info.specID)),
+        wl     = wl,
+        win    = win,
+    }
+    for c, col in ipairs(LIST_COLUMNS) do
+        local cell = row.cells[c]
+        cell:ClearAllPoints()
+        cell:SetPoint("LEFT", row, "LEFT", math.floor(width * col.x), 0)
+        cell:SetText(values[col.key])
+    end
+end
+
+-- Which brackets get tiles, per character:
+-- PVPHUB_SETTINGS.mainWindow.ratingTiles[charKey] = { id, id, id }, ids as
+-- "bracketKey:specID" (0 without a spec). Without a choice, or for a slot
+-- whose bracket has no games this season, the highest ratings fill in.
+local function TileChoices()
+    PVPHUB_SETTINGS.mainWindow = PVPHUB_SETTINGS.mainWindow or {}
+    PVPHUB_SETTINGS.mainWindow.ratingTiles = PVPHUB_SETTINGS.mainWindow.ratingTiles or {}
+    return PVPHUB_SETTINGS.mainWindow.ratingTiles
+end
+
+-- Splits the rating rows into the tiles (up to TILE_COUNT, in slot order)
+-- and the rest (for the list, in the usual bracket order)
+local function SplitRatingRows(charKey, rows)
+    local byID = {}
+    for _, info in ipairs(rows) do
+        info.id = info.bracket.key .. ":" .. (info.specID or 0)
+        byID[info.id] = info
+    end
+    local tiles, used = {}, {}
+    for _, id in ipairs(TileChoices()[charKey] or {}) do
+        if byID[id] and not used[id] and #tiles < TILE_COUNT then
+            tiles[#tiles + 1] = byID[id]
+            used[id] = true
+        end
+    end
+    local ranked = {}
+    for _, info in ipairs(rows) do ranked[#ranked + 1] = info end
+    table.sort(ranked, function(a, b)
+        if (a.stats.rating or 0) ~= (b.stats.rating or 0) then return (a.stats.rating or 0) > (b.stats.rating or 0) end
+        return (a.stats.played or 0) > (b.stats.played or 0)
+    end)
+    for _, info in ipairs(ranked) do
+        if #tiles >= TILE_COUNT then break end
+        if not used[info.id] then
+            tiles[#tiles + 1] = info
+            used[info.id] = true
+        end
+    end
+    local rest = {}
+    for _, info in ipairs(rows) do
+        if not used[info.id] then rest[#rest + 1] = info end
+    end
+    return tiles, rest
+end
+
+-- Puts bracket id in tile slot (swapping places if it already has a tile)
+function Cards.SetTile(charKey, slot, id)
+    local shown = Cards.shownTiles or {}
+    local ids = {}
+    for i = 1, TILE_COUNT do ids[i] = shown[i] end
+    for i = 1, TILE_COUNT do
+        if ids[i] == id then ids[i] = ids[slot] end
+    end
+    ids[slot] = id
+    TileChoices()[charKey] = ids
+    Cards.RefreshDetail()
+end
+
+function Cards.ResetTiles(charKey)
+    TileChoices()[charKey] = nil
+    Cards.RefreshDetail()
+end
+
+-- Right-click on a tile: which list bracket to show there instead.
+-- Right-click on a list row: which tile it should replace.
+function Cards.OpenTileMenu(owner)
+    local charKey, info = owner.charKey, owner.info
+    if not charKey or not info or not MenuUtil then return end
+    local tiles, rest = Cards.shownTileInfos or {}, Cards.shownRestInfos or {}
+    MenuUtil.CreateContextMenu(owner, function(_, root)
+        if owner.slot then
+            root:CreateTitle("Show in this tile instead")
+            for _, other in ipairs(rest) do
+                root:CreateButton(BracketLabel(other), function() Cards.SetTile(charKey, owner.slot, other.id) end)
+            end
+            if #rest == 0 then root:CreateTitle("|cff888888No other brackets this season|r") end
+        else
+            root:CreateTitle("Show as a tile instead of")
+            for slot, tile in ipairs(tiles) do
+                root:CreateButton(BracketLabel(tile), function() Cards.SetTile(charKey, slot, info.id) end)
+            end
+        end
+        root:CreateDivider()
+        root:CreateButton("Reset to highest ratings", function() Cards.ResetTiles(charKey) end)
+    end)
+end
+
+-- Dragging: a tile onto another tile swaps the two; a list row onto a tile
+-- takes that tile's place (the tile's bracket goes to the list), and a tile
+-- onto a list row swaps with it. An exact copy of what's dragged follows the
+-- cursor, held where it was grabbed, while the original stays faded in its
+-- place; what it would land on lights up.
+local tileDrag = {}
+
+-- The copy: a tile or a row of its own, painted like the dragged one, on
+-- black (see PaintTileBackground; rows have no background in the panel).
+local function DragGhost(kind)
+    tileDrag.ghosts = tileDrag.ghosts or {}
+    local g = tileDrag.ghosts[kind]
+    if g then return g end
+    if kind == "tile" then
+        g = CreateRatingTile(UIParent)
+        g.isGhost = true
+    else
+        g = CreateRatingRow(UIParent)
+        local bg = g:CreateTexture(nil, "BACKGROUND", nil, -1)
+        bg:SetAllPoints()
+        bg:SetTexture(WHITE)
+        bg:SetVertexColor(0.03, 0.03, 0.04, 0.97)
+    end
+    g:SetFrameStrata("TOOLTIP")
+    g:EnableMouse(false)
+    g:Hide()
+    tileDrag.ghosts[kind] = g
+    return g
+end
+
+-- Where a drag would land: a tile, or for a dragged tile also a list row
+-- (the two swap either way)
+local function DropTargetUnderCursor(source)
+    local panel = PVPHUB.window and PVPHUB.window.cardDetail
+    if not panel then return nil end
+    for _, t in ipairs(panel.tiles) do
+        if t ~= source and t:IsShown() and t:IsMouseOver() then return t end
+    end
+    if source.slot then
+        for _, row in ipairs(panel.listRows) do
+            if row:IsShown() and row:IsMouseOver() then return row end
+        end
+    end
+end
+
+local function TileDragOnUpdate()
+    -- The window closed mid-drag: drop nothing, like the cards' drag
+    if not tileDrag.source:IsVisible() then
+        if tileDrag.target then
+            tileDrag.target.dropTarget = nil
+            tileDrag.target:PaintHover()
+            tileDrag.target = nil
+        end
+        Cards.EndTileDrag()
+        return
+    end
+    local g = tileDrag.ghost
+    local x, y = GetCursorPosition()
+    local scale = g:GetEffectiveScale()
+    g:ClearAllPoints()
+    g:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", x / scale - tileDrag.grabX, y / scale - tileDrag.grabY)
+    local target = DropTargetUnderCursor(tileDrag.source)
+    if target ~= tileDrag.target then
+        if tileDrag.target then
+            tileDrag.target.dropTarget = nil
+            tileDrag.target:PaintHover()
+        end
+        tileDrag.target = target
+        if target then
+            target.dropTarget = true
+            target:PaintHover()
+        end
+    end
+end
+
+function Cards.BeginTileDrag(source)
+    if not source.info or not source.charKey then return end
+    PVPHUB._CloseRatingTooltip()
+    tileDrag.source = source
+    source:SetAlpha(0.45)
+
+    local g = DragGhost(source.slot and "tile" or "row")
+    local paint = source.slot and PaintRatingTile or PaintRatingRow
+    paint(g, source.info, source.data, source.series, source.selected, source.width)
+    -- Same size on screen as the original, wherever the window is scaled
+    g:SetScale(source:GetEffectiveScale() / UIParent:GetEffectiveScale())
+    g:SetAlpha(0.9)
+    -- Keep the copy under the cursor where the original was grabbed
+    local x, y = GetCursorPosition()
+    local s = source:GetEffectiveScale()
+    tileDrag.grabX = x / s - source:GetLeft()
+    tileDrag.grabY = y / s - source:GetTop()
+    tileDrag.ghost = g
+    g:Show()
+    g:SetScript("OnUpdate", TileDragOnUpdate)
+    TileDragOnUpdate()
+end
+
+function Cards.EndTileDrag()
+    local source, target = tileDrag.source, tileDrag.target
+    if not source then return end
+    tileDrag.source, tileDrag.target = nil, nil
+    tileDrag.ghost:SetScript("OnUpdate", nil)
+    tileDrag.ghost:Hide()
+    source:SetAlpha(1)
+    Cards.dragEndedAt = GetTime()   -- so the release doesn't count as a click
+    if not target then return end
+    target.dropTarget = nil
+    target:PaintHover()
+    if target.slot then
+        -- Onto a tile: the dragged bracket goes there
+        Cards.SetTile(source.charKey, target.slot, source.info.id)
+    else
+        -- A tile onto a list row: the row's bracket takes the tile's place
+        Cards.SetTile(source.charKey, source.slot, target.info.id)
+    end
 end
 
 -- --------------------------------------------------------------------------
@@ -1547,19 +1986,42 @@ local function GetDetail(f)
     panel.note = NewText(content, 11)
     panel.note:SetWordWrap(true)
 
+    -- Season menu, top right: the current season or one from the season
+    -- archive. Shown once a character has an archived past season.
+    panel.seasonBtn = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
+    panel.seasonBtn:SetSize(170, 22)
+    panel.seasonBtn:SetPoint("TOPRIGHT", content, "TOPRIGHT", 0, -2)
+    panel.seasonBtn:SetScript("OnClick", function(self) Cards.OpenSeasonMenu(self) end)
+    if PVPHUB.UI then PVPHUB.UI.SkinButton(panel.seasonBtn) end
+
     -- Ratings
     panel.ratingsHeader = CreateSectionHeader(content, "Ratings", "ratings")
     panel.ratingsBody = CreateSectionBody(content)
-    panel.colTitles = {}
-    for i, col in ipairs(COLUMNS) do
+    panel.noRatings = NewText(panel.ratingsBody, 11)
+    panel.noRatings:SetText("|cff777777No rated games this season|r")
+    panel.tiles = {}
+    -- The list under the tiles: a gold separator that fades out to both
+    -- sides, column titles, rows
+    panel.listSep = CreateFrame("Frame", nil, panel.ratingsBody)
+    panel.listSep:SetHeight(1)
+    local sepLeft = panel.listSep:CreateTexture(nil, "ARTWORK")
+    sepLeft:SetTexture(WHITE)
+    sepLeft:SetPoint("TOPLEFT")
+    sepLeft:SetPoint("BOTTOMRIGHT", panel.listSep, "BOTTOM")
+    sepLeft:SetGradient("HORIZONTAL", CreateColor(1, 0.82, 0, 0), CreateColor(1, 0.82, 0, 0.6))
+    local sepRight = panel.listSep:CreateTexture(nil, "ARTWORK")
+    sepRight:SetTexture(WHITE)
+    sepRight:SetPoint("TOPLEFT", panel.listSep, "TOP")
+    sepRight:SetPoint("BOTTOMRIGHT")
+    sepRight:SetGradient("HORIZONTAL", CreateColor(1, 0.82, 0, 0.6), CreateColor(1, 0.82, 0, 0))
+    panel.listTitles = {}
+    for i, col in ipairs(LIST_COLUMNS) do
         local fs = NewText(panel.ratingsBody, 10)
         fs:SetText(col.title)
         fs:SetTextColor(0.6, 0.6, 0.6, 1)
-        panel.colTitles[i] = fs
+        panel.listTitles[i] = fs
     end
-    panel.noRatings = NewText(panel.ratingsBody, 11)
-    panel.noRatings:SetText("|cff777777No rated games this season|r")
-    panel.rows = {}
+    panel.listRows = {}
 
     -- Season titles
     panel.titlesHeader = CreateSectionHeader(content, "Season titles", "titles")
@@ -1589,8 +2051,7 @@ local function GetDetail(f)
     for i, range in ipairs(RANGES) do
         local chip = CreateChip(panel.legendRow, function(self)
             Cards.graphRange = self.range
-            local data = Cards.selected and PVPHUB_DB[Cards.selected]
-            if data then PaintHistory(panel, Cards.selected, data, Cards.historyWidth or 400) end
+            if Cards.selected then PaintHistory(panel, Cards.selected, Cards.historyWidth or 400) end
         end)
         chip.range = range.key
         chip.text:SetText(range.text)
@@ -1635,7 +2096,7 @@ end
 
 local function PaintDetail(f, charKey, width)
     local panel = GetDetail(f)
-    local data = charKey and PVPHUB_DB[charKey]
+    local data, season, archived = DetailData(charKey)
     local colors = GetColors()
     local base = colors.WINDOW_BG or { 0.08, 0.05, 0.05 }
     panel.bg:SetVertexColor(base[1] * 1.6, base[2] * 1.6, base[3] * 1.6, 0.55)
@@ -1679,10 +2140,17 @@ local function PaintDetail(f, charKey, width)
             line4 = line4 .. "   |cffaaaaaaGroup|r " .. group.name
         end
     end
-    if PVPHUB._IsCharacterStaleThisSeason(charKey) then
+    if archived then
+        line4 = line4 .. "   |cffffd100Showing " .. PVPHUB.Seasons.Name(season) .. " (archive)|r"
+    elseif PVPHUB._IsCharacterStaleThisSeason(charKey) then
         line4 = line4 .. "   |cff777777(last season's data)|r"
     end
     panel.line4:SetText(line4)
+
+    local past = PVPHUB.Seasons and PVPHUB.Seasons.List(charKey) or {}
+    panel.seasonBtn.charKey = charKey
+    panel.seasonBtn:SetText(archived and PVPHUB.Seasons.Name(season) or "Current season")
+    panel.seasonBtn:SetShown(#past > 0)
 
     local y = BIG_PORTRAIT + 14
 
@@ -1703,68 +2171,79 @@ local function PaintDetail(f, charKey, width)
     -- section's header bar, see SectionOrder).
     local paint = {}
 
-    -- Ratings table
+    -- Three rating tiles, the other brackets in a list under them
     paint.ratings = function(top)
         local at, open = Section(panel.ratingsHeader, panel.ratingsBody, top)
         if not open then return at end
-        for i, col in ipairs(COLUMNS) do
-            panel.colTitles[i]:ClearAllPoints()
-            panel.colTitles[i]:SetPoint("TOPLEFT", panel.content, "TOPLEFT", math.floor(contentW * col.x), -at)
-        end
-        at = at + 16
+        at = at + 4
 
-        local ratingRows = CollectRatingRows(data)
+        local ratingRows = CollectRatingRows(data, season)
+        panel.noRatings:SetText(archived and "|cff777777No rated games archived for this season|r"
+            or "|cff777777No rated games this season|r")
         panel.noRatings:SetShown(#ratingRows == 0)
         if #ratingRows == 0 then
             panel.noRatings:ClearAllPoints()
-            panel.noRatings:SetPoint("TOPLEFT", panel.content, "TOPLEFT", 4, -at - 4)
-            at = at + ROW_HEIGHT
+            panel.noRatings:SetPoint("TOPLEFT", panel.content, "TOPLEFT", 4, -at)
+            at = at + 22
         end
-        for i, info in ipairs(ratingRows) do
-            local row = panel.rows[i] or CreateRatingRow(panel.ratingsBody)
-            panel.rows[i] = row
-            row.charKey, row.bracketKey = charKey, info.bracket.key
+
+        -- Each tile's graph series, and the one the graph shows
+        local seriesList = CollectSeries(data, season)
+        local byID = {}
+        for _, s in ipairs(seriesList) do byID[s.id] = s end
+        local chosen, emptyPick = ChosenSeries(charKey, seriesList, ratingRows)
+        -- The bracket the graph shows, recorded matches or not
+        local function Shown(info, series)
+            return (series ~= nil and series == chosen) or info == emptyPick
+        end
+
+        local tileInfos, rest = SplitRatingRows(charKey, ratingRows)
+        -- For the right-click menu (Cards.OpenTileMenu, Cards.SetTile)
+        Cards.shownTileInfos, Cards.shownRestInfos, Cards.shownTiles = tileInfos, rest, {}
+
+        local tileW = math.floor((contentW - TILE_GAP * (TILE_COUNT - 1)) / TILE_COUNT)
+        for i, info in ipairs(tileInfos) do
+            local t = panel.tiles[i] or CreateRatingTile(panel.ratingsBody)
+            panel.tiles[i] = t
+            t.charKey, t.slot = charKey, i
+            Cards.shownTiles[i] = info.id
+            t:ClearAllPoints()
+            t:SetPoint("TOPLEFT", panel.content, "TOPLEFT", (i - 1) * (tileW + TILE_GAP), -at)
+            local series = byID[info.id]
+            PaintRatingTile(t, info, data, series, Shown(info, series), tileW)
+            t:Show()
+        end
+        for i = #tileInfos + 1, #panel.tiles do panel.tiles[i]:Hide() end
+        if #tileInfos > 0 then at = at + TILE_HEIGHT end
+
+        -- The rest as rows, like the old ratings table
+        local hasList = #rest > 0
+        panel.listSep:SetShown(hasList)
+        for _, fs in ipairs(panel.listTitles) do fs:SetShown(hasList) end
+        if hasList then
+            at = at + 14
+            panel.listSep:ClearAllPoints()
+            panel.listSep:SetPoint("TOPLEFT", panel.content, "TOPLEFT", 0, -at)
+            panel.listSep:SetWidth(contentW)
+            at = at + 12
+            for i, col in ipairs(LIST_COLUMNS) do
+                panel.listTitles[i]:ClearAllPoints()
+                panel.listTitles[i]:SetPoint("TOPLEFT", panel.content, "TOPLEFT", math.floor(contentW * col.x), -at)
+            end
+            at = at + 14
+        end
+        for i, info in ipairs(rest) do
+            local row = panel.listRows[i] or CreateRatingRow(panel.ratingsBody)
+            panel.listRows[i] = row
+            row.charKey, row.slot = charKey, nil
             row:ClearAllPoints()
             row:SetPoint("TOPLEFT", panel.content, "TOPLEFT", 0, -at)
-            row:SetWidth(contentW)
-
-            local s = info.stats
-            local rating = s.rating or 0
-            local r, g, b = HexToRGB(PVPHUB._GetRatingColor(math.max(rating, 1)))
-            PaintBand(row.band, r, g, b, (i % 2 == 1) and 0.10 or 0.05)
-
-            local label = info.bracket.label
-            local specInfo = info.specID and PVPHUB._GetCachedSpecInfo(info.specID)
-            if specInfo then
-                label = label .. "  |cffaaaaaa" .. IconMarkup(specInfo.icon, 12) .. " " .. specInfo.name .. "|r"
-            end
-            row.icon:SetTexture(info.bracket.icon)
-            row.label:SetText(label)
-
-            local won, lost = s.won or 0, s.lost or 0
-            local games = won + lost
-            local winText = "|cff555555—|r"
-            if games > 0 then
-                local pct = math.floor(won / games * 100 + 0.5)
-                winText = (pct >= 50 and "|cff40ff40" or "|cffff8040") .. pct .. "%|r"
-            end
-            local values = {
-                rating = ColoredRating(rating),
-                best   = ColoredRating(s.seasonBest),
-                mmr    = ColoredRating(GetMMR(data, info.bracket.key, info.specID)),
-                wl     = games > 0 and string.format("|cff40ff40%d|r|cff888888–|r|cffff5050%d|r", won, lost) or "|cff555555—|r",
-                win    = winText,
-            }
-            for c, col in ipairs(COLUMNS) do
-                local cell = row.cells[c]
-                cell:ClearAllPoints()
-                cell:SetPoint("LEFT", row, "LEFT", math.floor(contentW * col.x), 0)
-                cell:SetText(values[col.key])
-            end
+            local series = byID[info.id]
+            PaintRatingRow(row, info, data, series, Shown(info, series), contentW)
             row:Show()
-            at = at + ROW_HEIGHT
+            at = at + LIST_ROW_H
         end
-        for i = #ratingRows + 1, #panel.rows do panel.rows[i]:Hide() end
+        for i = #rest + 1, #panel.listRows do panel.listRows[i]:Hide() end
         return at
     end
 
@@ -1774,7 +2253,7 @@ local function PaintDetail(f, charKey, width)
         if not open then return at end
         local metas = PVPHUB._TITLE_META or {}
         if #metas == 0 then return at end
-        local stale = PVPHUB._IsCharacterStaleThisSeason(charKey)
+        local stale = not archived and PVPHUB._IsCharacterStaleThisSeason(charKey)
         local tileW = math.floor((contentW - TITLE_TILE_GAP * (#metas - 1)) / #metas)
         for i, meta in ipairs(metas) do
             local tile = panel.titleTiles[i]
@@ -1802,7 +2281,7 @@ local function PaintDetail(f, charKey, width)
         panel.legendRow:SetWidth(contentW)
         at = at + 22
         Cards.historyWidth = contentW
-        PaintHistory(panel, charKey, data, contentW)
+        PaintHistory(panel, charKey, contentW)
         return at
     end
 
@@ -1892,10 +2371,52 @@ function Cards.ToggleSection(key)
     local sections = PVPHUB_SETTINGS.mainWindow.cardSections or {}
     PVPHUB_SETTINGS.mainWindow.cardSections = sections
     sections[key] = not SectionOpen(key)
+    Cards.RefreshDetail()
+end
+
+-- Redraws the info panel where it is, without scrolling back to the top
+function Cards.RefreshDetail()
     local f = PVPHUB.window
     if f and f.cardDetail and Cards.selected then
         PaintDetail(f, Cards.selected, Cards.detailWidth or 400)
     end
+end
+
+-- Shows a character's current season (season = nil) or an archived one in
+-- the info panel, from the top
+function Cards.ShowSeason(charKey, season)
+    Cards.viewSeason[charKey] = season
+    local f = PVPHUB.window
+    if f and f.cardDetail and Cards.selected == charKey then
+        f.cardDetail.scroll:SetVerticalScroll(0)
+        PaintDetail(f, charKey, Cards.detailWidth or 400)
+    end
+end
+
+-- The season menu: the current season, then the character's archived ones,
+-- newest first, each with when it was last played
+function Cards.OpenSeasonMenu(owner)
+    local charKey = owner.charKey
+    if not charKey or not MenuUtil or not PVPHUB.Seasons then return end
+    MenuUtil.CreateContextMenu(owner, function(_, root)
+        root:CreateTitle("Show season")
+        local function Add(text, season)
+            root:CreateRadio(text,
+                function() return Cards.viewSeason[charKey] == season end,
+                function()
+                    Cards.ShowSeason(charKey, season)
+                    return MenuResponse and MenuResponse.Close
+                end)
+        end
+        Add("Current season", nil)
+        for _, s in ipairs(PVPHUB.Seasons.List(charKey)) do
+            local text = PVPHUB.Seasons.Name(s.season)
+            if s.lastPlayed > 0 then
+                text = text .. "  |cff888888last played " .. PVPHUB._FormatTimestamp(s.lastPlayed) .. "|r"
+            end
+            Add(text, s.season)
+        end
+    end)
 end
 
 -- Dragging a section's header bar moves the whole section. A gold line
@@ -1913,10 +2434,11 @@ local function SectionDragOnUpdate()
         return
     end
 
-    local uiScale = UIParent:GetEffectiveScale()
+    local ghost = sectionDrag.ghost
+    local gs = ghost:GetEffectiveScale()
     local cx, cy = GetCursorPosition()
-    drag.ghost:ClearAllPoints()
-    drag.ghost:SetPoint("CENTER", UIParent, "BOTTOMLEFT", cx / uiScale + 12, cy / uiScale - 10)
+    ghost:ClearAllPoints()
+    ghost:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", cx / gs - sectionDrag.grabX, cy / gs - sectionDrag.grabY)
 
     -- The cursor in the panel's own units
     local scale = panel.content:GetEffectiveScale()
@@ -1971,7 +2493,18 @@ function Cards.BeginSectionDrag(header)
     local f = PVPHUB.window
     local panel = f and f.cardDetail
     if sectionDrag.active or not panel or drag.active then return end
-    GetDragVisuals()
+    -- An exact copy of the header bar follows the cursor, like the cards'
+    if not sectionDrag.ghost then
+        local g = CreateSectionHeader(UIParent, "", nil)
+        g:SetFrameStrata("TOOLTIP")
+        g:EnableMouse(false)
+        local bg = g:CreateTexture(nil, "BACKGROUND")
+        bg:SetAllPoints()
+        bg:SetTexture(WHITE)
+        bg:SetVertexColor(0.03, 0.03, 0.04, 0.97)
+        g:Hide()
+        sectionDrag.ghost = g
+    end
     if not sectionDrag.marker then
         local marker = panel.content:CreateTexture(nil, "OVERLAY", nil, 7)
         marker:SetTexture(WHITE)
@@ -1981,8 +2514,17 @@ function Cards.BeginSectionDrag(header)
         sectionDrag.marker = marker
     end
     sectionDrag.active, sectionDrag.source, sectionDrag.key = true, header, header.key
-    drag.ghost.text:SetText("|cffffd100" .. (header.title:GetText() or "") .. "|r")
-    drag.ghost:Show()
+    local g = sectionDrag.ghost
+    g.title:SetText(header.title:GetText() or "")
+    g.toggle:SetText(header.toggle:GetText() or "")
+    g:SetSize(header:GetWidth(), header:GetHeight())
+    g:SetScale(header:GetEffectiveScale() / UIParent:GetEffectiveScale())
+    g:SetAlpha(0.9)
+    local cx, cy = GetCursorPosition()
+    local s = header:GetEffectiveScale()
+    sectionDrag.grabX = cx / s - header:GetLeft()
+    sectionDrag.grabY = cy / s - header:GetTop()
+    g:Show()
     header:SetAlpha(0.35)
     if not sectionDrag.driver then sectionDrag.driver = CreateFrame("Frame") end
     sectionDrag.driver:SetScript("OnUpdate", SectionDragOnUpdate)
@@ -1992,7 +2534,7 @@ function Cards.EndSectionDrag()
     if not sectionDrag.active then return end
     sectionDrag.active = false
     sectionDrag.driver:SetScript("OnUpdate", nil)
-    drag.ghost:Hide()
+    sectionDrag.ghost:Hide()
     sectionDrag.marker:Hide()
     sectionDrag.source:SetAlpha(1)
     Cards.dragEndedAt = GetTime()
@@ -2052,6 +2594,20 @@ local function GetContainer(f)
     return Cards.container
 end
 
+-- Turns character groups on or off (the card view's "Groups" switch) and
+-- redraws the list; the Settings switch picks it up when it's next shown
+function Cards.SetGroupsEnabled(on)
+    if not PVPHUB_SETTINGS.characterGroups then
+        PVPHUB_SETTINGS.characterGroups = {
+            groups = { { name = "No Group", characters = {}, collapsed = false, isDefault = true } },
+            enabled = false,
+        }
+    end
+    PVPHUB_SETTINGS.characterGroups.enabled = on
+    local f = PVPHUB.window
+    if f and f.UpdateContent then f:UpdateContent() end
+end
+
 -- Splits the area: the info panel on the left, the card list (the main
 -- scroll frame, narrowed) on the right.
 local function SetCardArea(f)
@@ -2085,13 +2641,40 @@ local function SetCardArea(f)
             GameTooltip:Show()
         end)
         b:SetScript("OnLeave", function() GameTooltip:Hide() end)
-        b:SetSize(listW - 2, NEW_GROUP_H)   -- before skinning: the corner radius follows the height
+        b:SetSize(listW - 2 - GROUPS_SWITCH_W, NEW_GROUP_H)   -- before skinning: the corner radius follows the height
         if PVPHUB.UI then PVPHUB.UI.SkinButton(b) end
         panel.newGroupButton = b
     end
     panel.newGroupButton:ClearAllPoints()
     panel.newGroupButton:SetPoint("TOPLEFT", f, "TOPLEFT", listX, AREA_TOP)
-    panel.newGroupButton:SetSize(listW - 2, NEW_GROUP_H)
+    panel.newGroupButton:SetSize(listW - 2 - GROUPS_SWITCH_W, NEW_GROUP_H)
+
+    -- "Groups" switch beside it: character groups on or off right here,
+    -- the same setting as Settings > Display > Enable Character Groups
+    if not panel.groupsSwitch then
+        local cb = CreateFrame("CheckButton", nil, panel, "UICheckButtonTemplate")
+        cb:SetSize(30, NEW_GROUP_H)
+        cb.Text = cb.Text or NewText(cb, 12)
+        cb.Text:SetText("Groups")
+        cb.Text:SetTextColor(0.9, 0.9, 0.9, 1)
+        cb:SetHitRectInsets(0, -44, 0, 0)   -- the label is clickable too
+        cb:SetScript("OnClick", function(self)
+            Cards.SetGroupsEnabled(self:GetChecked() and true or false)
+        end)
+        cb:SetScript("OnEnter", function(self)
+            GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
+            GameTooltip:SetText("Character groups", 1, 1, 1)
+            GameTooltip:AddLine("Show your characters in their groups, or as one list.", 0.7, 0.7, 0.7, true)
+            GameTooltip:Show()
+        end)
+        cb:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        if PVPHUB.UI then PVPHUB.UI.SkinSwitch(cb) end
+        panel.groupsSwitch = cb
+    end
+    panel.groupsSwitch:ClearAllPoints()
+    panel.groupsSwitch:SetPoint("LEFT", panel.newGroupButton, "RIGHT", 10, 0)
+    local groups = PVPHUB_SETTINGS.characterGroups
+    panel.groupsSwitch:SetChecked(groups and groups.enabled or false)
 
     -- Search under it: Blizzard's search box (magnifier, placeholder, clear
     -- button); filters the list as you type (Cards.SetSearch)
@@ -2185,6 +2768,14 @@ end
 -- starting point when a drag switches to Custom Order). Returns the card
 -- list's height.
 function Cards.Render(f, displayList, sorted)
+    -- Only on the Characters tab. The window keeps its tab when it's closed,
+    -- and the data refresh on opening it again redraws the list on any tab;
+    -- the info panel isn't inside the (hidden) scroll frame, so it would sit
+    -- on top of the Season or Settings tab. Switching back redraws it.
+    if f.currentTab ~= "characters" then
+        if f.cardDetail then f.cardDetail:Hide() end
+        return 0
+    end
     local listW, detailW = SetCardArea(f)
     Cards.detailWidth = detailW
     Cards.lastSorted = sorted
@@ -2300,7 +2891,7 @@ end
 -- --------------------------------------------------------------------------
 -- List/Cards switch
 -- --------------------------------------------------------------------------
--- A segmented control: a dark pill-shaped track with a highlight in the
+-- A segmented control: a faint pill-shaped track with a highlight in the
 -- theme's accent color that slides to the active side.
 
 local SWITCH_W, SWITCH_H = 132, 24
@@ -2322,12 +2913,10 @@ end
 -- Colors the switch and moves the highlight to the active view (instantly
 -- the first time, sliding afterwards)
 function Cards.PaintToggle(bar, instant)
-    local colors = GetColors()
-    local ac = colors.ACCENT_LINE or { 0.8, 0.3, 0.5 }
+    local ac = ThemeColor()
     local active = Cards.IsActive() and "cards" or "list"
 
-    bar.rim:SetVertexColor(0.32, 0.32, 0.38, 0.8)
-    bar.track:SetVertexColor(0, 0, 0, 0.5)
+    bar.track:SetVertexColor(1, 1, 1, 0.08)
     bar.thumb:SetGradient("VERTICAL",
         CreateColor(ac[1] * 0.55, ac[2] * 0.55, ac[3] * 0.55, 0.95),
         CreateColor(math.min(1, ac[1] * 0.9 + 0.1), math.min(1, ac[2] * 0.9 + 0.1), math.min(1, ac[3] * 0.9 + 0.1), 0.95))
@@ -2358,18 +2947,15 @@ function Cards.CreateToggle(f)
     bar:SetSize(SWITCH_W, SWITCH_H)
     bar:SetPoint("TOPRIGHT", f, "TOPRIGHT", -AREA_RIGHT, -60)
 
-    -- Track: a 1 px rim around a dark fill, both fully rounded
-    bar.rim = PVPHUB.CreateRoundedShape(bar, "BACKGROUND", 0, 0, SWITCH_H / 2)
-    bar.track = PVPHUB.CreateRoundedShape(bar, "BACKGROUND", 1, -1, SWITCH_H / 2 - 1)
-    bar.rim:SetRounded(true)
-    bar.track:SetRounded(true)
+    -- Track: a faint lighter pill, no outline. Track and highlight are
+    -- smooth textures (UI.CreatePill), not masked shapes, which left a thin
+    -- line at the left end.
+    bar.track = PVPHUB.UI.CreatePill(bar, "BACKGROUND", 0)
 
     -- The sliding highlight behind the active label
     bar.thumbFrame = CreateFrame("Frame", nil, bar)
     bar.thumbFrame:SetSize(SWITCH_W / 2 - SWITCH_INSET, SWITCH_H - SWITCH_INSET * 2)
-    local thumbR = (SWITCH_H - SWITCH_INSET * 2) / 2
-    bar.thumb = PVPHUB.CreateRoundedShape(bar.thumbFrame, "ARTWORK", 0, 0, thumbR)
-    bar.thumb:SetRounded(true)
+    bar.thumb = PVPHUB.UI.CreatePill(bar.thumbFrame, "ARTWORK", 0)
 
     bar.buttons = {}
     local modes = {
@@ -2407,6 +2993,15 @@ function Cards.CreateToggle(f)
             Cards.PaintToggle(bar)
         end)
         bar.buttons[i] = b
+    end
+
+    -- A "NEW" tag above "Cards" for all of 7.0 (gone with 7.1), so players
+    -- find the card view; it isn't tied to being seen or hovered
+    if PVPHUB.CreateNewBadge then
+        local badge = PVPHUB.CreateNewBadge(bar, {}, "7.0")
+        badge:SetPoint("BOTTOM", bar.buttons[2], "TOP", 0, 2)
+        badge:SetFrameLevel(bar.buttons[2]:GetFrameLevel() + 2)
+        bar.newBadge = badge
     end
 
     f.viewToggle = bar

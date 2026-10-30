@@ -76,8 +76,8 @@ local function ShowsBreathing()
     return indicator == "breathing" or indicator == "both"
 end
 
-local BREATH_HALF_SECONDS = 1.0   -- fade out, then back in: one breath every 2 s
-local BREATH_MIN_ALPHA    = 0.35  -- background alpha at the bottom of a breath
+local BREATH_HALF_SECONDS = 1.75  -- fade out, then back in: one breath every 3.5 s
+local BREATH_MIN_ALPHA    = 0.65  -- background alpha at the bottom of a breath
 
 -- Seconds left to accept a popped queue. Read from the client, which knows
 -- the real window for each queue type; the fixed 28 s countdown this used to
@@ -598,17 +598,36 @@ end
 -- around as the numbers in it change.
 local COMPACT_CARD_WIDTH = 200
 
+-- Width of a label's text in the card's own units, measured on an off-screen
+-- probe at the size the text is actually drawn at (font size x the card's
+-- Size scale). The label's own GetStringWidth() came out about 14% narrower
+-- than the drawn text with the Size slider at 155%, so the longest line,
+-- e.g. "Shuffle (1398 MMR)", touched the card's right edge. At 100% the
+-- probe measures the same as the label.
+local probe
+local function MeasureText(fs, scale)
+    if not probe then
+        local holder = CreateFrame("Frame", nil, UIParent)
+        holder:SetSize(1, 1)
+        holder:SetPoint("BOTTOMRIGHT", UIParent, "TOPLEFT", -100, 100)  -- off screen
+        probe = holder:CreateFontString(nil, "OVERLAY")
+        probe:SetWordWrap(false)
+    end
+    local path, size, flags = fs:GetFont()
+    if not path or not size then return fs:GetStringWidth() end
+    probe:SetFont(path, size * scale, flags)
+    probe:SetText(fs:GetText() or "")
+    return probe:GetStringWidth() / scale
+end
+
 local function ResizeToContent(f)
     local maxW = 150
-    -- GetStringWidth() is already in the card's own (unscaled) units. This
-    -- used to divide by the card's scale as well, which undersized the card
-    -- whenever the Queue Timer size slider was above 100% (the cramped look,
-    -- and why the Compact style had been given a fixed width). The small
-    -- margin absorbs OUTLINE glyph overflow and color-code drift.
+    local scale = f:GetScale()
+    -- The small margin absorbs OUTLINE glyph overflow and color-code drift.
     local function Measure(...)
         local total = 0
         for i = 1, select("#", ...) do
-            total = total + select(i, ...):GetStringWidth()
+            total = total + MeasureText(select(i, ...), scale)
         end
         return total * 1.06 + 2
     end

@@ -18,29 +18,31 @@ local _, PVPHUB = ...
 local UI = {}
 PVPHUB.UI = UI
 
+local MEDIA = "Interface\\AddOns\\PVPHUB\\media\\"
+
 local switches = {}   -- every skinned switch, for theme changes
 local buttons  = {}   -- every skinned button, likewise
-
-local function Accent()
-    local colors = PVPHUB.currentColors
-    return (colors and colors.ACCENT_LINE) or { 0.8, 0.3, 0.5 }
-end
 
 local function Lighten(c, k)
     return math.min(1, c * k + 0.08)
 end
 
--- The color of a switch that's on: the theme's accent, unless that's
--- (nearly) gray, like the Dark theme's; then PVPHUB gold, so on and off
--- don't differ by the knob's position alone.
-local GOLD = { 1, 0.74, 0.1 }
-local function OnColor()
-    local ac = Accent()
-    local hi = math.max(ac[1], ac[2], ac[3])
-    local lo = math.min(ac[1], ac[2], ac[3])
-    if hi - lo < 0.15 then return GOLD end
-    return ac
+-- The theme's highlight color, shared by every control here (switches that
+-- are on, slider fills, buttons, hover circles) and the card view's toggle
+-- and chips, so they all match the selected theme: its title color, the
+-- theme's signature color (blue, red, purple, ...). The Dark theme's is a
+-- near-white grey, so it gets a softer light grey that still stands apart
+-- from the dark "off" track.
+local NEUTRAL = { 0.78, 0.78, 0.8 }
+local function ThemeColor()
+    local colors = PVPHUB.currentColors
+    local c = (colors and (colors.TITLE_COLOR or colors.ACCENT_LINE)) or { 0.8, 0.3, 0.5 }
+    local hi = math.max(c[1], c[2], c[3])
+    local lo = math.min(c[1], c[2], c[3])
+    if hi - lo < 0.15 then return NEUTRAL end
+    return c
 end
+UI.ThemeColor = ThemeColor
 
 -- Hooks a script so the hook survives a later SetScript of the same script.
 -- SetScript drops earlier hooks, and callers often set OnEnter/OnLeave for
@@ -58,14 +60,102 @@ local function KeepHook(frame, script, fn)
 end
 
 -- --------------------------------------------------------------------------
+-- Pill shape
+-- --------------------------------------------------------------------------
+-- A fully rounded pill filling a frame (round ends of half its height),
+-- cut from the smooth switch_track texture in three slices so it stretches
+-- to any width. No masks, so no stray edge lines at any size (masked
+-- rounded shapes showed a thin line along their outer edge on small
+-- pills). Returns an object with SetVertexColor and SetGradient; set the
+-- frame's height before creating it.
+
+local PILL_L, PILL_R = 2 / 64, 62 / 64   -- the pill inside switch_track.tga
+local PILL_CAP = 16 / 64                 -- one round end is 16 of its 64 texels
+
+-- The slices of a pill or panel, colored and shown as one
+local Slices = {}
+Slices.__index = Slices
+function Slices:SetVertexColor(...)
+    for _, tex in ipairs(self) do tex:SetVertexColor(...) end
+end
+function Slices:SetGradient(...)
+    for _, tex in ipairs(self) do tex:SetGradient(...) end
+end
+function Slices:SetShown(shown)
+    for _, tex in ipairs(self) do tex:SetShown(shown) end
+end
+
+function UI.CreatePill(frame, layer, sublevel)
+    local function Slice(left, right)
+        local tex = frame:CreateTexture(nil, layer, nil, sublevel)
+        tex:SetTexture(MEDIA .. "switch_track")
+        tex:SetTexCoord(left, right, 0, 1)
+        return tex
+    end
+    local capW = frame:GetHeight() / 2
+    local l = Slice(PILL_L, PILL_L + PILL_CAP)
+    local m = Slice(PILL_L + PILL_CAP, PILL_R - PILL_CAP)
+    local r = Slice(PILL_R - PILL_CAP, PILL_R)
+    l:SetPoint("TOPLEFT"); l:SetPoint("BOTTOMLEFT"); l:SetWidth(capW)
+    r:SetPoint("TOPRIGHT"); r:SetPoint("BOTTOMRIGHT"); r:SetWidth(capW)
+    m:SetPoint("TOPLEFT", l, "TOPRIGHT")
+    m:SetPoint("BOTTOMRIGHT", r, "BOTTOMLEFT")
+    return setmetatable({ l, m, r }, Slices)
+end
+
+-- --------------------------------------------------------------------------
+-- Rounded panel
+-- --------------------------------------------------------------------------
+-- A rounded rectangle filling a frame, in nine slices of a 64x64 texture
+-- whose corners are 24 texels: the corners keep their size (corner units
+-- on screen), the edges and the middle stretch. kind "fill" is the solid
+-- shape, "ring" only its thin outline, so a border can sit on a see-through
+-- fill (a masked shape behind the fill would show through it). No masks,
+-- so no stray edge lines. See make_panel.js for the textures.
+
+local PANEL_CORNER = 24 / 64
+
+function UI.CreatePanel(frame, kind, layer, sublevel, corner)
+    local file = MEDIA .. (kind == "ring" and "panel_ring" or "panel_fill")
+    local a, z = PANEL_CORNER, 1 - PANEL_CORNER
+    local parts = {}
+    local function Part(left, right, top, bottom)
+        local tex = frame:CreateTexture(nil, layer, nil, sublevel)
+        tex:SetTexture(file)
+        tex:SetTexCoord(left, right, top, bottom)
+        parts[#parts + 1] = tex
+        return tex
+    end
+    local tl = Part(0, a, 0, a)
+    local tr = Part(z, 1, 0, a)
+    local bl = Part(0, a, z, 1)
+    local br = Part(z, 1, z, 1)
+    for point, tex in pairs({ TOPLEFT = tl, TOPRIGHT = tr, BOTTOMLEFT = bl, BOTTOMRIGHT = br }) do
+        tex:SetPoint(point)
+        tex:SetSize(corner, corner)
+    end
+    local function Between(tex, from, fromPoint, to, toPoint)
+        tex:SetPoint("TOPLEFT", from, fromPoint)
+        tex:SetPoint("BOTTOMRIGHT", to, toPoint)
+    end
+    Between(Part(a, z, 0, a), tl, "TOPRIGHT", tr, "BOTTOMLEFT")      -- top edge
+    Between(Part(a, z, z, 1), bl, "TOPRIGHT", br, "BOTTOMLEFT")      -- bottom edge
+    Between(Part(0, a, a, z), tl, "BOTTOMLEFT", bl, "TOPRIGHT")      -- left edge
+    Between(Part(z, 1, a, z), tr, "BOTTOMLEFT", br, "TOPRIGHT")      -- right edge
+    if kind ~= "ring" then
+        Between(Part(a, z, a, z), tl, "BOTTOMRIGHT", br, "TOPLEFT")  -- middle
+    end
+    return setmetatable(parts, Slices)
+end
+
+-- --------------------------------------------------------------------------
 -- Pill switch
 -- --------------------------------------------------------------------------
 -- A rounded track with a round knob that slides right when on. The track
--- fills with the "on" color (see OnColor) when on. The check button keeps its size,
+-- fills with the "on" color (see ThemeColor) when on. The check button keeps its size,
 -- so nothing around it moves; its label sits right of the switch.
 
 local SWITCH_W, SWITCH_H, KNOB = 30, 16, 12
-local MEDIA = "Interface\\AddOns\\PVPHUB\\media\\"
 
 local function KnobX(on)
     return on and (SWITCH_W - KNOB - 2) or 2
@@ -87,7 +177,7 @@ local function PaintSwitch(cb, instant)
     local sw = cb.pvpSwitch
     local on = cb:GetChecked() and true or false
     local enabled = cb:IsEnabled()
-    local ac = OnColor()
+    local ac = ThemeColor()
 
     if on then
         sw.track:SetGradient("VERTICAL",
@@ -184,7 +274,7 @@ end
 
 local function PaintSlider(sl)
     local p = sl.pvpSlider
-    local ac = OnColor()
+    local ac = ThemeColor()
     for _, tex in ipairs(p.back) do
         tex:SetVertexColor(0.2, 0.2, 0.24, 1)
     end
@@ -271,7 +361,7 @@ end
 -- --------------------------------------------------------------------------
 -- Rounded button
 -- --------------------------------------------------------------------------
--- Replaces the red Blizzard button art with a rounded button in the accent
+-- Replaces the red Blizzard button art with a rounded button in the theme
 -- color: lighter on hover, darker while pressed, gray when disabled.
 -- variant "danger" is red, for things like Reset All Data.
 
@@ -297,7 +387,7 @@ local function PaintButton(btn)
     if btn.pvpVariant == "danger" then
         base = { 0.72, 0.16, 0.14 }
     else
-        base = Accent()
+        base = ThemeColor()
     end
 
     local k = 0.55                          -- normal
@@ -320,14 +410,17 @@ function UI.SkinButton(btn, variant)
     if not btn or btn.pvpRim then return end
     btn.pvpVariant = variant
 
-    -- Hide the Blizzard art (the template swaps its pieces on press and
-    -- disable, so they stay transparent instead of being removed)
-    for _, key in ipairs({ "Left", "Middle", "Right" }) do
-        if btn[key] then btn[key]:SetAlpha(0) end
-    end
-    for _, tex in ipairs({ btn:GetNormalTexture(), btn:GetPushedTexture(),
-                           btn:GetDisabledTexture(), btn:GetHighlightTexture() }) do
-        if tex then tex:SetAlpha(0) end
+    -- Hide the Blizzard art: every texture the button has so far (its
+    -- Left/Middle/Right pieces, the red hover highlight, pushed and disabled
+    -- art). The template swaps them on press, hover and disable, so they're
+    -- made transparent rather than removed (see SkinSwitch). This used to
+    -- go through GetNormalTexture() & co. in one list; these buttons have
+    -- no normal texture, so the list started with nil, the loop stopped at
+    -- once and the red hover highlight stayed.
+    for _, region in ipairs({ btn:GetRegions() }) do
+        if region:GetObjectType() == "Texture" then
+            region:SetAlpha(0)
+        end
     end
 
     local radius = math.min(5, math.floor(btn:GetHeight() / 2))
@@ -379,7 +472,7 @@ end
 
 local function PaintClose(btn)
     local p = btn.pvpClose
-    local ac = OnColor()
+    local ac = ThemeColor()
     local hover = p.hover and btn:IsEnabled()
     local c = hover and 1 or 0.72
     for _, line in ipairs(p.lines) do

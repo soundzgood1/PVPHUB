@@ -195,6 +195,288 @@ local function SafeSetFont(fontString, path, size, flags)
     pcall(function() fontString:SetFont(path, size, flags) end)
 end
 
+-- --------------------------------------------------------------------------
+-- Skins (7.0)
+-- --------------------------------------------------------------------------
+-- The overlay's look, chosen in its settings (Display Options): a rounded
+-- panel in the background color, see-through with a light border, with a
+-- border in the theme's color, or no background at all (outlined text
+-- straight on the game, e.g. for capture setups). compactMode.hideBackground
+-- stays in step with "none", so 6.x shows the overlay the same way and a
+-- change made there carries over.
+local SKINS = {
+    { key = "solid", label = "Solid", tip = "A rounded panel in your background color." },
+    { key = "glass", label = "Glass", tip = "A see-through panel with a light border." },
+    { key = "theme", label = "Theme", tip = "A rounded panel with a border in your theme's color." },
+    { key = "none",  label = "None",  tip = "No background: outlined text straight on the game." },
+    { key = "minimal", label = "Minimal", tip = "One pill per spec, stacked: its best Solo Shuffle or Blitz rating and ladder rank, no names." },
+}
+local PANEL_CORNER = 8
+
+local function CompactSkin()
+    local cm = PVPHUB_SETTINGS.compactMode
+    if cm.hideBackground then
+        cm.skin = "none"
+    elseif cm.skin == nil or cm.skin == "none" then
+        cm.skin = "solid"
+    end
+    return cm.skin
+end
+
+local function SetCompactSkin(skin)
+    local cm = PVPHUB_SETTINGS.compactMode
+    cm.skin = skin
+    cm.hideBackground = (skin == "none")
+end
+
+-- Colors a panel and its outline (UI.CreatePanel "fill" and "ring") for
+-- the skin: the overlay's own, and the settings' live preview of it
+local function PaintSkinPanel(fill, ring)
+    local skin = CompactSkin()
+    local c = PVPHUB_SETTINGS.compactMode.backgroundColor or UI_CONSTANTS.COLORS.COMPACT_BG
+    local alpha = c[4] or 0.8
+    -- Minimal has no panel: each of its pills has its own (PaintSpecPill)
+    fill:SetShown(skin ~= "none" and skin ~= "minimal")
+    fill:SetVertexColor(c[1], c[2], c[3], skin == "glass" and alpha * 0.55 or alpha)
+    ring:SetShown(skin == "glass" or skin == "theme")
+    if skin == "theme" then
+        local t = PVPHUB.UI.ThemeColor()
+        ring:SetVertexColor(t[1], t[2], t[3], 0.7)
+    else
+        ring:SetVertexColor(1, 1, 1, 0.18)
+    end
+end
+
+-- Builds the overlay's panel on first use and colors it for the skin
+local function PaintCompactShell()
+    local cw = PVPHUB.compactWindow
+    if not cw then return end
+    if not cw.shellFill then
+        cw:SetBackdrop(nil)
+        cw.shellFill = PVPHUB.UI.CreatePanel(cw, "fill", "BACKGROUND", -1, PANEL_CORNER)
+        cw.shellRing = PVPHUB.UI.CreatePanel(cw, "ring", "BORDER", 0, PANEL_CORNER)
+    end
+    PaintSkinPanel(cw.shellFill, cw.shellRing)
+end
+
+-- The overlay's text: outlined without a background, a soft shadow on one
+local function StyleCompactText(fs, size)
+    local bare = CompactSkin() == "none"
+    SafeSetFont(fs, PVPHUB.compactCurrentFontPath, size, bare and "OUTLINE" or "")
+    fs:SetShadowOffset(1, -1)
+    fs:SetShadowColor(0, 0, 0, bare and 1 or 0.7)
+end
+
+-- --------------------------------------------------------------------------
+-- Minimal skin
+-- --------------------------------------------------------------------------
+-- One pill per spec on the overlay, stacked: the spec's icon and its
+-- highest rating in Solo Shuffle or Blitz (the brackets rated per spec),
+-- with its ladder rank when the game reported one ("#207 - 2536"), the
+-- border in the rating's color. No names. Uses the Shuffle/Blitz columns
+-- that are switched on, both when neither is.
+local SPEC_PILL_H, SPEC_PILL_GAP, SPEC_PILL_ICON = 34, 6, 24
+local PORTRAIT_MASK = "Interface\\CharacterFrame\\TempPortraitAlphaMask"
+
+local function RatingRGB(rating)
+    local r, g, b = GetRatingColor(rating):match("|c%x%x(%x%x)(%x%x)(%x%x)")
+    if not r then return 1, 1, 1 end
+    return tonumber(r, 16) / 255, tonumber(g, 16) / 255, tonumber(b, 16) / 255
+end
+
+-- One item per spec row of the overlay (entries: { char, data,
+-- pinnedSpecID }) that has a rating, best first
+local function SpecPillItems(entries)
+    local showRatings = PVPHUB_SETTINGS.compactMode.showRatings
+    local brackets = {}
+    for _, key in ipairs({ "ratingShuffle", "ratingBlitz" }) do
+        if showRatings[key] then brackets[#brackets + 1] = key end
+    end
+    if #brackets == 0 then brackets = { "ratingShuffle", "ratingBlitz" } end
+
+    local items = {}
+    for _, entry in ipairs(entries) do
+        local data = entry.data
+        local specID = entry.pinnedSpecID or data.specID or data.lastActiveSpecID
+        local current = not PVPHUB._IsSeasonDataCurrent or PVPHUB._IsSeasonDataCurrent(data)
+        local best, bestKey = 0, nil
+        for _, key in ipairs(brackets) do
+            local ratings = data[key]
+            local rating = current and specID and type(ratings) == "table" and ratings[specID] or 0
+            if rating > best then best, bestKey = rating, key end
+        end
+        if best > 0 then
+            items[#items + 1] = { charKey = entry.char, data = data, specID = specID, rating = best, bracketKey = bestKey }
+        end
+    end
+    table.sort(items, function(a, b) return a.rating > b.rating end)
+    return items
+end
+
+local function CreateSpecPill(parent)
+    local UI = PVPHUB.UI
+    local p = CreateFrame("Button", nil, parent)
+    p:SetHeight(SPEC_PILL_H)
+    p.fill = UI.CreatePanel(p, "fill", "BACKGROUND", 0, SPEC_PILL_H / 2)
+    p.ring = UI.CreatePanel(p, "ring", "BORDER", 0, SPEC_PILL_H / 2)
+    p.icon = p:CreateTexture(nil, "ARTWORK")
+    p.icon:SetSize(SPEC_PILL_ICON, SPEC_PILL_ICON)
+    p.icon:SetPoint("LEFT", p, "LEFT", 6, 0)
+    local mask = p:CreateMaskTexture()
+    mask:SetTexture(PORTRAIT_MASK, "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
+    mask:SetAllPoints(p.icon)
+    p.icon:AddMaskTexture(mask)
+    p.text = p:CreateFontString(nil, "OVERLAY")
+    p.text:SetFont(FALLBACK_FONT, 14, "")
+    p.text:SetPoint("LEFT", p.icon, "RIGHT", 8, 0)
+    return p
+end
+
+-- Paints a pill for one item; returns the width its text needs
+local function PaintSpecPill(p, item)
+    local c = PVPHUB_SETTINGS.compactMode.backgroundColor or UI_CONSTANTS.COLORS.COMPACT_BG
+    p.fill:SetVertexColor(c[1], c[2], c[3], c[4] or 0.8)
+    local r, g, b = RatingRGB(item.rating)
+    p.ring:SetVertexColor(r, g, b, 1)
+    local info = GetCachedSpecInfo(item.specID)
+    p.icon:SetTexture(info and info.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
+    StyleCompactText(p.text, 14)
+    local rank = PVPHUB.GetLadderRank and PVPHUB.GetLadderRank(item.charKey, item.bracketKey, item.specID)
+    p.text:SetText(rank and string.format("#%s - %d", BreakUpLargeNumbers(rank), item.rating) or tostring(item.rating))
+    p.text:SetTextColor(r, g, b)
+    p.charKey, p.bracketKey, p.data = item.charKey, item.bracketKey, item.data
+    return p.text:GetStringWidth()
+end
+
+-- Stacks a pill per item down from parent's top left, all as wide as the
+-- widest; returns the stack's width and height
+local function LayoutSpecPills(parent, pool, items)
+    local textW = 0
+    for i, item in ipairs(items) do
+        pool[i] = pool[i] or CreateSpecPill(parent)
+        textW = math.max(textW, PaintSpecPill(pool[i], item))
+    end
+    -- GetStringWidth comes out a little short on scaled frames: some slack
+    local width = 6 + SPEC_PILL_ICON + 8 + math.ceil(textW * 1.1) + 14
+    for i, p in ipairs(pool) do
+        p:SetShown(items[i] ~= nil)
+        if items[i] then
+            p:ClearAllPoints()
+            p:SetPoint("TOPLEFT", parent, "TOPLEFT", 0, -(i - 1) * (SPEC_PILL_H + SPEC_PILL_GAP))
+            p:SetWidth(width)
+        end
+    end
+    return width, math.max(0, #items * (SPEC_PILL_H + SPEC_PILL_GAP) - SPEC_PILL_GAP)
+end
+
+-- Keeps the floating toolbar on screen: under the overlay's left edge, or
+-- its right edge when it would run off the right side of the screen (it's
+-- wider than the Minimal skin's overlay), and above the overlay when
+-- there's no room below. The overlay itself is clamped to the screen.
+local TOOLBAR_GAP = 4
+
+local function PlaceToolbar()
+    local cw = PVPHUB.compactWindow
+    local tb = cw and cw.toolbar
+    local left, bottom = cw and cw:GetLeft(), cw and cw:GetBottom()
+    if not (tb and left and bottom) then return end
+    -- The screen's width in the overlay's own (scaled) units
+    local screenW = UIParent:GetWidth() * UIParent:GetEffectiveScale() / cw:GetEffectiveScale()
+    local side = (left + tb:GetWidth() > screenW) and "RIGHT" or "LEFT"
+    tb:ClearAllPoints()
+    if bottom - TOOLBAR_GAP - tb:GetHeight() >= 0 then
+        tb:SetPoint("TOP" .. side, cw, "BOTTOM" .. side, 0, -TOOLBAR_GAP)
+    else
+        tb:SetPoint("BOTTOM" .. side, cw, "TOP" .. side, 0, TOOLBAR_GAP)
+    end
+end
+
+-- On the overlay, a pill shows the rating tooltip (with the ranks) and
+-- moves the window when dragged, like the rest of the overlay
+local function HookOverlayPill(p)
+    if p.overlayHooked then return end
+    p.overlayHooked = true
+    local cw = PVPHUB.compactWindow
+    p:RegisterForDrag("LeftButton")
+    p:SetScript("OnDragStart", function()
+        local start = cw:GetScript("OnDragStart")
+        if start then start(cw) end
+    end)
+    p:SetScript("OnDragStop", function()
+        local stop = cw:GetScript("OnDragStop")
+        if stop then stop(cw) end
+    end)
+    p:SetScript("OnEnter", function(self)
+        local enter = cw:GetScript("OnEnter")   -- keeps the toolbar up
+        if enter then enter(cw) end
+        if self.charKey then
+            ShowPVPHUBRatingTooltip(self, self.charKey, self.bracketKey, self.data and self.data[self.bracketKey])
+        end
+    end)
+    p:SetScript("OnLeave", function()
+        ClosePVPHUBRatingTooltip()
+        local leave = cw:GetScript("OnLeave")
+        if leave then leave(cw) end
+    end)
+end
+
+-- The Skin choice in the settings: the skins side by side, the chosen one
+-- on a pill in the theme's color. picker.onChange runs after a change.
+local SKIN_BUTTON_W, SKIN_BUTTON_H = 76, 24
+
+local function CreateSkinPicker(parent)
+    local UI = PVPHUB.UI
+    local picker = CreateFrame("Frame", nil, parent)
+    picker:SetSize(SKIN_BUTTON_W * #SKINS + 4, SKIN_BUTTON_H + 4)
+    picker.track = UI.CreatePill(picker, "BACKGROUND")
+    picker.track:SetVertexColor(1, 1, 1, 0.06)
+    picker.buttons = {}
+
+    function picker.Paint()
+        local skin = CompactSkin()
+        local t = UI.ThemeColor()
+        -- Dark text on a light theme color (the grey of the Dark theme)
+        local onText = (t[1] * 0.3 + t[2] * 0.59 + t[3] * 0.11) > 0.6 and 0.08 or 1
+        for _, b in ipairs(picker.buttons) do
+            local on = b.key == skin
+            b.fill:SetVertexColor(t[1], t[2], t[3], on and 0.9 or 0)
+            local c = on and onText or (b:IsMouseOver() and 1 or 0.7)
+            b.label:SetTextColor(c, c, c)
+        end
+    end
+
+    for i, s in ipairs(SKINS) do
+        local b = CreateFrame("Button", nil, picker)
+        b:SetSize(SKIN_BUTTON_W, SKIN_BUTTON_H)
+        b:SetPoint("LEFT", picker, "LEFT", 2 + (i - 1) * SKIN_BUTTON_W, 0)
+        b.key = s.key
+        b.fill = UI.CreatePill(b, "ARTWORK")
+        b.label = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        b.label:SetPoint("CENTER")
+        b.label:SetText(s.label)
+        b:SetScript("OnClick", function()
+            SetCompactSkin(s.key)
+            picker.Paint()
+            if PVPHUB.compactWindow then PVPHUB:UpdateCompactWindow() end
+            if picker.onChange then picker.onChange() end
+        end)
+        b:SetScript("OnEnter", function(self)
+            picker.Paint()
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:SetText(s.label, 1, 1, 1)
+            GameTooltip:AddLine(s.tip, 0.7, 0.7, 0.7, true)
+            GameTooltip:Show()
+        end)
+        b:SetScript("OnLeave", function()
+            GameTooltip:Hide()
+            picker.Paint()
+        end)
+        picker.buttons[i] = b
+    end
+    picker.Paint()
+    return picker
+end
+
 function PVPHUB:CreateCompactWindow()
     PVPHUB:EnsureCompactModeDefaults()
     
@@ -249,27 +531,16 @@ function PVPHUB:CreateCompactWindow()
         }
         PVPHUB_SETTINGS.compactSortKey = PVPHUB_SETTINGS.compactSortKey or "highestRating"
         
-        -- Toolbar sits BELOW the content window; dragging the parent moves both.
-        -- Controls fade in on hover and fade out after 3 s of inactivity.
-        -- Flush against the window (no gap) and matching its 1px backdrop
-        -- inset, so the visible background reads as one continuous panel
-        -- instead of a separate, differently-sized bar. Its color is set (and
-        -- kept in sync with the window's) in UpdateCompactWindow — not here —
-        -- since it must track theme changes and the custom background color
-        -- setting exactly like the window above it does.
-        local toolbarHeight = 20
-        local toolbar = CreateFrame("Frame", nil, PVPHUB.compactWindow, "BackdropTemplate")
-        toolbar:SetPoint("TOPLEFT",  PVPHUB.compactWindow, "BOTTOMLEFT",  0, 0)
-        toolbar:SetPoint("TOPRIGHT", PVPHUB.compactWindow, "BOTTOMRIGHT", 0, 0)
-        toolbar:SetHeight(toolbarHeight)
+        -- Toolbar: a dark pill floating under the content window, whatever
+        -- its skin (PlaceToolbar keeps it on screen); dragging the parent
+        -- moves both. Controls fade in on hover and fade out after 3 s of
+        -- inactivity, so on stream only the overlay itself shows.
+        local toolbar = CreateFrame("Frame", nil, PVPHUB.compactWindow)
+        toolbar:SetPoint("TOPLEFT", PVPHUB.compactWindow, "BOTTOMLEFT", 0, -TOOLBAR_GAP)
+        toolbar:SetSize(250, 22)
         toolbar:SetFrameLevel(PVPHUB.compactWindow:GetFrameLevel() + 1)
-        toolbar:SetBackdrop({
-            bgFile   = "Interface\\Buttons\\WHITE8x8",
-            edgeFile = "Interface\\Buttons\\WHITE8x8",
-            tile = false,
-            edgeSize = 1,
-            insets = { left = 1, right = 1, top = 0, bottom = 1 }
-        })
+        toolbar.bg = PVPHUB.UI.CreatePill(toolbar, "BACKGROUND")
+        toolbar.bg:SetVertexColor(0.05, 0.055, 0.08, 0.92)
 
         PVPHUB.compactWindow.toolbar = toolbar
 
@@ -292,7 +563,7 @@ function PVPHUB:CreateCompactWindow()
         -- Dropdown button — no background, blends into the toolbar.
         -- Only a right-side separator line marks it as a button.
         local sortDropBtn = CreateFrame("Button", nil, toolbar)
-        sortDropBtn:SetPoint("LEFT", toolbar, "LEFT", 4, 0)
+        sortDropBtn:SetPoint("LEFT", toolbar, "LEFT", 8, 0)
         sortDropBtn:SetSize(ddW, ddH)
         sortDropBtn:SetFrameLevel(toolbar:GetFrameLevel() + 1)
 
@@ -348,6 +619,8 @@ function PVPHUB:CreateCompactWindow()
         ddCatcher:SetFrameStrata("FULLSCREEN_DIALOG"); ddCatcher:SetFrameLevel(199); ddCatcher:Hide()
         ddCatcher:SetScript("OnMouseDown", function() ddPopup:Hide() end)
         ddPopup:SetScript("OnHide", function() ddCatcher:Hide() end)
+        -- Closes with the compact window (Escape, the toggle) while open
+        sortDropBtn:HookScript("OnHide", function() ddPopup:Hide() end)
 
         -- Popup rows
         local function refreshHighlight()
@@ -382,10 +655,19 @@ function PVPHUB:CreateCompactWindow()
             table.insert(ddPopup.rows, row)
         end
 
+        ddPopup:SetClampedToScreen(true)   -- never past the screen's sides
         ddPopup:SetScript("OnShow", function()
-            -- anchor popup just below the toolbar (opens downward)
+            -- Opens below the sort button, or above it when there's no
+            -- room below (the toolbar can sit at the bottom of the screen).
+            -- Compared in screen pixels: the button is in the scaled
+            -- overlay, the list isn't.
             ddPopup:ClearAllPoints()
-            ddPopup:SetPoint("TOPLEFT", sortDropBtn, "BOTTOMLEFT", 0, -2)
+            local below = (sortDropBtn:GetBottom() or 0) * sortDropBtn:GetEffectiveScale()
+            if below - (ddPopup:GetHeight() + 2) * ddPopup:GetEffectiveScale() >= 0 then
+                ddPopup:SetPoint("TOPLEFT", sortDropBtn, "BOTTOMLEFT", 0, -2)
+            else
+                ddPopup:SetPoint("BOTTOMLEFT", sortDropBtn, "TOPLEFT", 0, 2)
+            end
             refreshHighlight()
             ddCatcher:Show()
         end)
@@ -414,29 +696,24 @@ function PVPHUB:CreateCompactWindow()
         PVPHUB.compactWindow:EnableMouse(true)
         PVPHUB.compactWindow:RegisterForDrag("LeftButton")
         PVPHUB.compactWindow:SetClampedToScreen(true)
-        -- Reserve space below the window equal to the toolbar height so the
-        -- toolbar (anchored below the content frame) is never pushed off-screen.
-        PVPHUB.compactWindow:SetClampRectInsets(0, 0, 0, toolbarHeight)
-        PVPHUB.compactWindow:SetScript("OnDragStart", PVPHUB.compactWindow.StartMoving)
+        -- The toolbar follows along while dragging, so it stays on screen
+        -- at every edge (PlaceToolbar)
+        local toolbarFollow = CreateFrame("Frame", nil, PVPHUB.compactWindow)
+        PVPHUB.compactWindow:SetScript("OnDragStart", function(self)
+            self:StartMoving()
+            toolbarFollow:SetScript("OnUpdate", PlaceToolbar)
+        end)
         PVPHUB.compactWindow:SetScript("OnDragStop", function(self)
             self:StopMovingOrSizing()
+            toolbarFollow:SetScript("OnUpdate", nil)
+            PlaceToolbar()
             if not PVPHUB_SETTINGS.compactWindowPos then PVPHUB_SETTINGS.compactWindowPos = {} end
             local point, relativeTo, relativePoint, xOfs, yOfs = self:GetPoint()
             PVPHUB_SETTINGS.compactWindowPos = {point=point, relativePoint=relativePoint, x=xOfs, y=yOfs}
         end)
         
-        -- Respect hideBackground setting
-        if not PVPHUB_SETTINGS.compactMode.hideBackground then
-            PVPHUB.compactWindow:SetBackdrop({
-                bgFile = "Interface\\Buttons\\WHITE8x8",
-                tile = false,
-                insets = { left = 0, right = 0, top = 0, bottom = 0 }
-            })
-            local color = PVPHUB_SETTINGS.compactMode.backgroundColor or {unpack(UI_CONSTANTS.COLORS.COMPACT_BG)}
-            PVPHUB.compactWindow:SetBackdropColor(color[1], color[2], color[3], color[4] or 0.8)
-        else
-            PVPHUB.compactWindow:SetBackdrop(nil)
-        end
+        -- The rounded panel of the chosen skin
+        PaintCompactShell()
 
         -- Character rows container — fills the full window; the overlay drifts on top at the bottom.
         PVPHUB.compactWindow.content = CreateFrame("Frame", nil, PVPHUB.compactWindow)
@@ -445,7 +722,7 @@ function PVPHUB:CreateCompactWindow()
         
         -- Close button — same desaturated-silver style as the main window
         PVPHUB.compactWindow.closeBtn = CreateFrame("Button", nil, toolbar, "UIPanelCloseButton")
-        PVPHUB.compactWindow.closeBtn:SetPoint("RIGHT", toolbar, "RIGHT", -3, 0)
+        PVPHUB.compactWindow.closeBtn:SetPoint("RIGHT", toolbar, "RIGHT", -6, 0)
         PVPHUB.compactWindow.closeBtn:SetSize(18, 18)
         do
             local _nt = PVPHUB.compactWindow.closeBtn:GetNormalTexture()
@@ -492,7 +769,7 @@ function PVPHUB:CreateCompactWindow()
         
         -- Create scale slider (positioned in bottom toolbar, right side with more spacing from buttons)
         local scaleSlider = CreateFrame("Slider", nil, toolbar, "MinimalSliderTemplate")
-        scaleSlider:SetPoint("RIGHT", toolbar, "RIGHT", -40, 0)
+        scaleSlider:SetPoint("RIGHT", toolbar, "RIGHT", -44, 0)
         scaleSlider:SetSize(60, 10)
         scaleSlider:SetMinMaxValues(1.0, 2.0)
         scaleSlider:SetValue(PVPHUB.compactWindow.currentScale)
@@ -536,6 +813,7 @@ function PVPHUB:CreateCompactWindow()
                 -- Re-enable window dragging and apply the new scale.
                 PVPHUB.compactWindow:SetMovable(true)
                 PVPHUB.compactWindow:SetScale(PVPHUB_SETTINGS.compactWindowScale)
+                PlaceToolbar()
             end
         end)
         
@@ -610,6 +888,24 @@ function PVPHUB:CreateCompactWindow()
         
         -- Start the initial fade timer
         startFadeTimer()
+
+        -- 7.0: ladder ranks move while others play, and the game only
+        -- reports the logged-in character's when asked. Ask every 5
+        -- minutes while the overlay is up, out of combat and matches; the
+        -- answer (PVP_RATED_STATS_UPDATE) saves it with the rating
+        -- (pvp_tracking.lua), then the overlay redraws (a new rank alone
+        -- doesn't change what PVPHUB_RefreshUI compares).
+        PVPHUB.compactWindow.rankTicker = C_Timer.NewTicker(300, function()
+            local cw = PVPHUB.compactWindow
+            if not (cw:IsShown() and RequestRatedInfo) or InCombatLockdown() or IsInActivePvP() then return end
+            RequestRatedInfo()
+            C_Timer.After(3, function()
+                if cw:IsShown() then PVPHUB:UpdateCompactWindow() end
+            end)
+        end)
+
+        -- The toolbar's place once the window's position is known
+        PVPHUB.compactWindow:HookScript("OnShow", function() C_Timer.After(0, PlaceToolbar) end)
     end
     
     PVPHUB:UpdateCompactWindow()
@@ -626,6 +922,14 @@ end
 
 -- True when a stored rating (flat number or per-spec table) has anything
 -- above 0 for the rating tooltip to show.
+-- Row layout (7.0). In each rating column the rating ends NUMBER_W into
+-- the column, right-aligned so the digits line up, and a recent change
+-- sits after it as a small green or red pill.
+local NUMBER_W     = 42
+local HEADER_TEXT  = { 0.56, 0.55, 0.62 }
+local DELTA_UP     = { 0.29, 0.87, 0.50 }
+local DELTA_DOWN   = { 0.97, 0.44, 0.44 }
+
 local function HasRatingToShow(value)
     if type(value) == "number" then return value > 0 end
     if type(value) == "table" then
@@ -643,20 +947,23 @@ local function GetCompactHeaderRow()
     local headerRow = CreateFrame("Frame", nil, cw.content)
 
     local charHeader = headerRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    charHeader:SetPoint("LEFT", 8, 0)
+    charHeader:SetPoint("LEFT", 5, 0)   -- in line with the names
     charHeader:SetJustifyH("LEFT")
     charHeader:SetWordWrap(false) -- Prevent text wrapping
     charHeader:SetNonSpaceWrap(false) -- Prevent wrapping on non-space characters
     charHeader:SetMaxLines(1) -- Force single line display
-    charHeader:SetText("|cffFFD700Character|r")
+    charHeader:SetText("Character")
+    charHeader:SetTextColor(unpack(HEADER_TEXT))
     headerRow.charHeader = charHeader
 
-    -- One label per bracket in display order; hidden while its column is off.
+    -- One label per bracket in display order; hidden while its column is
+    -- off. Right-aligned like the ratings under it.
     headerRow.columns = {}
     for i, header in ipairs(COMPACT_BRACKET_ORDER) do
         local headerText = headerRow:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        headerText:SetJustifyH("CENTER") -- Center the header text
-        headerText:SetText("|cffFFD700" .. header.icon .. " " .. header.name .. "|r")
+        headerText:SetJustifyH("RIGHT")
+        headerText:SetText(header.name)
+        headerText:SetTextColor(unpack(HEADER_TEXT))
         headerRow.columns[i] = headerText
     end
 
@@ -707,9 +1014,6 @@ local function AcquireCompactRow(index)
     nameText:SetWordWrap(false) -- Prevent text wrapping
     nameText:SetNonSpaceWrap(false) -- Prevent wrapping on non-space characters
     nameText:SetMaxLines(1) -- Force single line display
-    -- Add backdrop shadow for better readability
-    nameText:SetShadowOffset(2, -2)
-    nameText:SetShadowColor(0, 0, 0, 1)
     row.nameText = nameText
 
     -- Character tooltip over the name area
@@ -724,23 +1028,28 @@ local function AcquireCompactRow(index)
     end)
     row.nameTooltipBtn = nameTooltipBtn
 
-    -- One rating cell per bracket in display order: the value, the multi-spec
-    -- star and an invisible button for the rating tooltip.
+    -- One rating cell per bracket in display order: the value, the recent
+    -- change pill, the multi-spec star and an invisible button for the
+    -- rating tooltip.
     row.slots = {}
     for i, bracket in ipairs(COMPACT_BRACKET_ORDER) do
         local slot = {}
 
         local text = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        text:SetWidth(C.COLUMN_WIDTH - 10) -- Set width for centering
-        text:SetJustifyH("CENTER") -- Center the text
-        text:SetShadowOffset(2, -2)
-        text:SetShadowColor(0, 0, 0, 1)
+        text:SetWidth(NUMBER_W)
+        text:SetJustifyH("RIGHT")
         slot.text = text
+
+        local pill = CreateFrame("Frame", nil, row)
+        pill:SetSize(26, 14)   -- height before the pill shape, which reads it
+        pill.bg = PVPHUB.UI.CreatePill(pill, "BACKGROUND")
+        pill.text = pill:CreateFontString(nil, "OVERLAY")
+        pill.text:SetPoint("CENTER", 0, 0)
+        pill:Hide()
+        slot.pill = pill
 
         local star = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
         star:SetText("|TInterface\\Common\\FavoritesIcon:12|t")
-        star:SetShadowOffset(2, -2)
-        star:SetShadowColor(0, 0, 0, 1)
         slot.star = star
 
         local hoverBtn = CreateFrame("Button", nil, row)
@@ -782,7 +1091,6 @@ end
 -- itself rather than visually latching onto whatever happens to be above it.
 local function ConfigureCompactRow(row, charKey, data, yOffset, windowWidth, pinnedSpecID, isSubRow)
     local C = PVPHUB_CONSTANTS.COMPACT_WINDOW
-    local fontPath = PVPHUB.compactCurrentFontPath
     row.charKey = charKey
     row.data = data
 
@@ -801,9 +1109,10 @@ local function ConfigureCompactRow(row, charKey, data, yOffset, windowWidth, pin
     row.connectorV:SetShown(isSubRow == true)
     row.connectorH:SetShown(isSubRow == true)
 
-    -- Character name (truncated if too long). On a pinned-spec row, show that
-    -- spec's icon instead of the character's currently-active one, so the
-    -- duplicated rows for one character are visually distinguishable.
+    -- Character name in its class color (truncated if too long), with the
+    -- green dot for the logged-in character. On a pinned-spec row, show
+    -- that spec's icon instead of the character's currently-active one, so
+    -- the duplicated rows for one character are visually distinguishable.
     local nameText = row.nameText
     nameText:ClearAllPoints()
     nameText:SetPoint("LEFT", nameIndent, 0)
@@ -824,8 +1133,7 @@ local function ConfigureCompactRow(row, charKey, data, yOffset, windowWidth, pin
     end
     -- Slightly dimmed to read as a sub-row of the row above
     nameText:SetAlpha((pinnedSpecID and isSubRow) and 0.85 or 1)
-    -- Use compact-specific font
-    SafeSetFont(nameText, fontPath, 11)
+    StyleCompactText(nameText, 11)
 
     row.nameTooltipBtn:ClearAllPoints()
     row.nameTooltipBtn:SetPoint("LEFT", nameIndent, 0)
@@ -861,36 +1169,50 @@ local function ConfigureCompactRow(row, charKey, data, yOffset, windowWidth, pin
             local isCharacterWideBracket = bracket.key == "rating2v2" or bracket.key == "rating3v3" or bracket.key == "ratingRBG"
             local showAsDitto = isSubRow and isCharacterWideBracket and currentRating > 0
 
-            local display, changeAge, changeAt
+            local display, delta, changeAge, changeAt
             if showAsDitto then
                 display = "|cff666666^|r"
             else
                 display = GetRatingColor(currentRating) .. (currentRating > 0 and currentRating or "-") .. "|r"
-                -- Recent change after a match, e.g. "1843 +18"
-                local delta
+                -- Recent change after a match, shown as a pill: "1843 (+18)"
                 delta, changeAge, changeAt = PVPHUB.GetRecentRatingChange(charKey, bracket.key, shownSpecID)
-                if delta then
-                    display = display .. PVPHUB.FormatRatingDelta(delta)
-                end
             end
 
             local xPos = C.BASE_WIDTH + (columnIndex * C.COLUMN_WIDTH) - 5
             slot.text:ClearAllPoints()
             slot.text:SetPoint("LEFT", xPos, 0)
             slot.text:SetText(display)
-            SafeSetFont(slot.text, fontPath, 11)
+            StyleCompactText(slot.text, 11)
             slot.text:Show()
+
+            local pill = slot.pill
+            local afterX = xPos + NUMBER_W + 4
+            if delta then
+                local c = delta > 0 and DELTA_UP or DELTA_DOWN
+                StyleCompactText(pill.text, 10)
+                pill.text:SetText(string.format("%+d", delta))
+                pill.text:SetTextColor(c[1], c[2], c[3])
+                pill.bg:SetVertexColor(c[1], c[2], c[3], 0.16)
+                pill:SetWidth(math.ceil(pill.text:GetStringWidth()) + 10)
+                pill:ClearAllPoints()
+                pill:SetPoint("LEFT", row, "LEFT", afterX, 0)
+                pill:Show()
+                afterX = afterX + pill:GetWidth() + 2
+            else
+                pill:Hide()
+            end
             -- Blink once when a fresh change first shows up in this cell
             if PVPHUB.IsRatingChangeFresh(changeAge) and slot.flashedChangeAt ~= changeAt then
                 slot.flashedChangeAt = changeAt
                 PVPHUB.FlashRegion(slot.text)
+                PVPHUB.FlashRegion(pill)
             end
 
-            -- Star icon for multi-spec ratings, to the right of the centered rating
+            -- Star icon for multi-spec ratings, after the rating (and its change)
             if isMultiSpec then
                 slot.star:ClearAllPoints()
-                slot.star:SetPoint("LEFT", xPos + (C.COLUMN_WIDTH / 2) + 15, 0)
-                SafeSetFont(slot.star, fontPath, 11)
+                slot.star:SetPoint("LEFT", afterX, 0)
+                StyleCompactText(slot.star, 11)
                 slot.star:Show()
             else
                 slot.star:Hide()
@@ -903,6 +1225,7 @@ local function ConfigureCompactRow(row, charKey, data, yOffset, windowWidth, pin
             columnIndex = columnIndex + 1
         else
             slot.text:Hide()
+            slot.pill:Hide()
             slot.star:Hide()
             slot.hoverBtn:Hide()
         end
@@ -943,35 +1266,8 @@ local function UpdateCompactWindowImpl()
     end
     PVPHUB_SETTINGS.compactMode.pinnedSpecs = PVPHUB_SETTINGS.compactMode.pinnedSpecs or {}
     
-    -- Respect hideBackground setting (refresh on every update)
-    if PVPHUB_SETTINGS.compactMode.hideBackground then
-        PVPHUB.compactWindow:SetBackdrop(nil)
-    else
-        PVPHUB.compactWindow:SetBackdrop({
-            bgFile = "Interface\\Buttons\\WHITE8x8",
-            edgeFile = "Interface\\Buttons\\WHITE8x8",
-            tile = false,
-            edgeSize = 1,
-            insets = { left = 1, right = 1, top = 1, bottom = 1 }
-        })
-        local color = PVPHUB_SETTINGS.compactMode.backgroundColor or {unpack(UI_CONSTANTS.COLORS.COMPACT_BG)}
-        PVPHUB.compactWindow:SetBackdropColor(color[1], color[2], color[3], color[4] or 0.8)
-        PVPHUB.compactWindow:SetBackdropBorderColor(0, 0, 0, 0)
-    end
-
-    -- Keep the toolbar's background matched to the window above it — same
-    -- color source (theme default or the custom background color), same
-    -- hideBackground behavior — so it reads as one continuous panel rather
-    -- than a mismatched bar bolted on underneath.
-    if PVPHUB.compactWindow.toolbar then
-        if PVPHUB_SETTINGS.compactMode.hideBackground then
-            PVPHUB.compactWindow.toolbar:SetBackdropColor(0, 0, 0, 0)
-        else
-            local tbColor = PVPHUB_SETTINGS.compactMode.backgroundColor or {unpack(UI_CONSTANTS.COLORS.COMPACT_BG)}
-            PVPHUB.compactWindow.toolbar:SetBackdropColor(tbColor[1], tbColor[2], tbColor[3], tbColor[4] or 0.8)
-        end
-        PVPHUB.compactWindow.toolbar:SetBackdropBorderColor(0, 0, 0, 0)
-    end
+    -- The skin's panel (refreshed on every update: theme, color, skin)
+    PaintCompactShell()
 
     -- If nothing is selected AND nothing is pinned, add current character by
     -- default. Checking pinnedSpecs too matters because graduating to
@@ -1025,7 +1321,7 @@ local function UpdateCompactWindowImpl()
     headerRow:ClearAllPoints()
     headerRow:SetPoint("TOPLEFT", 0, -yOffset - 3) -- Add 3px top padding
     headerRow.charHeader:SetWidth(PVPHUB_CONSTANTS.COMPACT_WINDOW.BASE_WIDTH - 15) -- Leave some padding
-    SafeSetFont(headerRow.charHeader, PVPHUB.compactCurrentFontPath, 10, "OUTLINE")
+    StyleCompactText(headerRow.charHeader, 10)
 
     -- Rating headers with dynamic positioning
     local columnIndex = 0
@@ -1035,8 +1331,8 @@ local function UpdateCompactWindowImpl()
             local xPos = PVPHUB_CONSTANTS.COMPACT_WINDOW.BASE_WIDTH + (columnIndex * PVPHUB_CONSTANTS.COMPACT_WINDOW.COLUMN_WIDTH) - 5
             headerText:ClearAllPoints()
             headerText:SetPoint("LEFT", xPos, 0)
-            headerText:SetWidth(PVPHUB_CONSTANTS.COMPACT_WINDOW.COLUMN_WIDTH - 10) -- Set width for centering
-            SafeSetFont(headerText, PVPHUB.compactCurrentFontPath, 9, "OUTLINE")
+            headerText:SetWidth(NUMBER_W)   -- right-aligned over the ratings
+            StyleCompactText(headerText, 10)
             headerText:Show()
             columnIndex = columnIndex + 1
         else
@@ -1255,6 +1551,35 @@ local function UpdateCompactWindowImpl()
         end
     end
 
+    -- Minimal skin: a pill per spec instead of the table
+    local cw = PVPHUB.compactWindow
+    local minimal = CompactSkin() == "minimal"
+    cw.pillPool = cw.pillPool or {}
+    headerRow:SetShown(not minimal)
+    if minimal then
+        for _, row in ipairs(cw.rowPool or {}) do row:Hide() end
+        local items = SpecPillItems(selected)
+        local width, height = LayoutSpecPills(cw.content, cw.pillPool, items)
+        for _, p in ipairs(cw.pillPool) do HookOverlayPill(p) end
+        if not cw.pillEmpty then
+            cw.pillEmpty = cw.content:CreateFontString(nil, "OVERLAY")
+            cw.pillEmpty:SetFont(FALLBACK_FONT, 11, "")
+            cw.pillEmpty:SetPoint("TOPLEFT", cw.content, "TOPLEFT", 2, -4)
+        end
+        cw.pillEmpty:SetShown(#items == 0)
+        if #items == 0 then
+            StyleCompactText(cw.pillEmpty, 11)
+            cw.pillEmpty:SetText("No rated specs on the overlay yet")
+            cw.pillEmpty:SetTextColor(unpack(HEADER_TEXT))
+            width, height = cw.pillEmpty:GetStringWidth() + 8, 20
+        end
+        cw:SetSize(width + 16, height + 10)
+        PlaceToolbar()
+        return
+    end
+    for _, p in ipairs(cw.pillPool) do p:Hide() end
+    if cw.pillEmpty then cw.pillEmpty:Hide() end
+
     local visibleCharCount = 0
     PVPHUB.compactWindow.rows = {}
     for i, entry in ipairs(selected) do
@@ -1283,6 +1608,7 @@ local function UpdateCompactWindowImpl()
     -- Update window height dynamically
     PVPHUB.compactWindow:SetHeight(dynamicHeight)
     PVPHUB.compactWindow.content:SetSize(dynamicWidth - 16, yOffset)
+    PlaceToolbar()
 end
 
 function PVPHUB:UpdateCompactWindow()
@@ -1298,748 +1624,969 @@ function PVPHUB:UpdateCompactWindow()
     end
 end
 
-function PVPHUB:ShowCompactSettings()
-    PVPHUB:EnsureCompactModeDefaults()
-    if PVPHUB.compactSettingsWindow and PVPHUB.compactSettingsWindow:IsShown() then
-        PVPHUB.compactSettingsWindow:Hide()
+-- --------------------------------------------------------------------------
+-- Settings window (7.0)
+-- --------------------------------------------------------------------------
+-- Streamer Mode's settings: a header with the overlay's on/off switch, a
+-- sidebar with four pages (Appearance with a live preview of the overlay,
+-- Characters, Brackets, Behavior) and the chosen page beside it. The last
+-- page opened is remembered (PVPHUB_SETTINGS.compactSettingsPage).
+
+local SET_W, SET_H   = 640, 480
+local SET_HEADER_H   = 52
+local SET_SIDEBAR_W  = 164
+local SET_PAD        = 20
+local SET_FONT       = "Fonts\\FRIZQT__.TTF"
+local SET_TEXT       = { 0.93, 0.92, 0.95 }
+local SET_MUTED      = { 0.62, 0.61, 0.68 }
+local CHAR_ROW_H, SPEC_ROW_H = 34, 28
+
+local SETTINGS_PAGES = {
+    { key = "appearance", label = "Appearance", icon = "Interface\\Icons\\Ability_Hunter_EagleEye" },
+    { key = "characters", label = "Characters", icon = "Interface\\Icons\\INV_Misc_GroupLooking" },
+    { key = "brackets",   label = "Brackets",   icon = "Interface\\Icons\\achievement_pvp_a_15" },
+    { key = "behavior",   label = "Behavior",   icon = "Interface\\Icons\\Trade_Engineering" },
+}
+
+local BRACKET_TILES = {
+    { key = "rating2v2",     name = "2v2 Arena",    icon = "Interface\\Icons\\achievement_arena_2v2_1" },
+    { key = "rating3v3",     name = "3v3 Arena",    icon = "Interface\\Icons\\achievement_arena_3v3_1" },
+    { key = "ratingShuffle", name = "Solo Shuffle", icon = "Interface\\Icons\\ability_dualwield" },
+    { key = "ratingBlitz",   name = "Blitz",        icon = "Interface\\Icons\\achievement_bg_killxenemies_generalsroom" },
+    { key = "ratingRBG",     name = "Rated BG",     icon = "Interface\\Icons\\achievement_pvp_a_15" },
+}
+
+-- The overlay's font choices: the game's own fonts, then LibSharedMedia's.
+-- Looked up through LSM's raw path table rather than LSM:Fetch, so font
+-- manager addons (e.g. Fontmancer) can't hand back a different font.
+local BUILTIN_FONTS = {
+    ["Friz Quadrata TT"] = "Fonts\\FRIZQT__.TTF",
+    ["Arial Narrow"]     = "Fonts\\ARIALN.TTF",
+    ["Morpheus"]         = "Fonts\\MORPHEUS.TTF",
+    ["Skurri"]           = "Fonts\\skurri.ttf",
+}
+
+local function ResolveCompactFont(name)
+    local path = BUILTIN_FONTS[name]
+    if not path and LibStub then
+        local LSM = LibStub("LibSharedMedia-3.0", true)
+        if LSM and LSM.HashTable then
+            local fontTable = LSM:HashTable("font")
+            if fontTable then path = fontTable[name] end
+        end
+    end
+    return path
+end
+
+local function CompactFontList()
+    local list, seen = {}, {}
+    for name in pairs(BUILTIN_FONTS) do
+        list[#list + 1] = name
+        seen[name] = true
+    end
+    if LibStub then
+        local LSM = LibStub("LibSharedMedia-3.0", true)
+        if LSM then
+            for _, name in ipairs(LSM:List("font") or {}) do
+                if not seen[name] and ResolveCompactFont(name) then
+                    seen[name] = true
+                    list[#list + 1] = name
+                end
+            end
+        end
+    end
+    table.sort(list)
+    return list
+end
+
+-- A character's best current-season rating in any bracket
+local function BestRating(data)
+    if not data or (PVPHUB._IsSeasonDataCurrent and not PVPHUB._IsSeasonDataCurrent(data)) then
+        return 0
+    end
+    local best = 0
+    for _, bracket in ipairs(COMPACT_BRACKET_ORDER) do
+        local value = data[bracket.key]
+        if type(value) == "number" then
+            best = math.max(best, value)
+        elseif type(value) == "table" then
+            for _, v in pairs(value) do
+                if type(v) == "number" then best = math.max(best, v) end
+            end
+        end
+    end
+    return best
+end
+
+local function RatingText(rating)
+    if rating and rating > 0 then return GetRatingColor(rating) .. rating .. "|r" end
+    return "|cff555555-|r"
+end
+
+-- On the overlay: picked (no rated spec yet) or with a pinned spec
+local function IsOnOverlay(charKey)
+    local cm = PVPHUB_SETTINGS.compactMode
+    local pins = cm.pinnedSpecs and cm.pinnedSpecs[charKey]
+    if pins and next(pins) then return true end
+    for _, key in ipairs(cm.selectedChars) do
+        if key == charKey then return true end
+    end
+    return false
+end
+
+local function SettingsText(parent, size, color)
+    local fs = parent:CreateFontString(nil, "OVERLAY")
+    fs:SetFont(SET_FONT, size, "")
+    fs:SetJustifyH("LEFT")
+    fs:SetWordWrap(false)
+    local c = color or SET_TEXT
+    fs:SetTextColor(c[1], c[2], c[3])
+    return fs
+end
+
+-- A pill switch (UI kit); onChange gets the new state
+local function SettingsSwitch(parent, onChange)
+    local cb = CreateFrame("CheckButton", nil, parent, "UICheckButtonTemplate")
+    cb:SetSize(30, 20)
+    PVPHUB.UI.SkinSwitch(cb)
+    cb:SetScript("OnClick", function(self) onChange(self:GetChecked() and true or false) end)
+    return cb
+end
+
+-- A setting as a row: its name and a line of explanation on the left, its
+-- switch on the right. Clicking anywhere on the row flips the switch.
+local function OptionRow(parent, width, title, desc, onChange)
+    local row = CreateFrame("Button", nil, parent)
+    row:SetSize(width, desc and 52 or 38)
+    row.title = SettingsText(row, 13)
+    row.title:SetText(title)
+    if desc then
+        row.title:SetPoint("TOPLEFT", row, "TOPLEFT", 0, -10)
+        row.desc = SettingsText(row, 11, SET_MUTED)
+        row.desc:SetPoint("TOPLEFT", row.title, "BOTTOMLEFT", 0, -5)
+        row.desc:SetText(desc)
+    else
+        row.title:SetPoint("LEFT", row, "LEFT", 0, 0)
+    end
+    row.switch = SettingsSwitch(row, onChange)
+    row.switch:SetPoint("RIGHT", row, "RIGHT", -2, 0)
+    row:SetScript("OnClick", function() row.switch:Click() end)
+    local line = row:CreateTexture(nil, "BACKGROUND")
+    line:SetColorTexture(1, 1, 1, 0.06)
+    line:SetHeight(1)
+    line:SetPoint("BOTTOMLEFT")
+    line:SetPoint("BOTTOMRIGHT")
+    return row
+end
+
+-- Sidebar entries: the open page on the theme color, the others light up
+-- on hover
+local function PaintNavButton(b)
+    local hover = b:IsMouseOver()
+    if b.selected then
+        local t = PVPHUB.UI.ThemeColor()
+        b.fill:SetVertexColor(t[1], t[2], t[3], 0.22)
+    else
+        b.fill:SetVertexColor(1, 1, 1, hover and 0.05 or 0)
+    end
+    local lit = b.selected or hover
+    local c = lit and 1 or 0.72
+    b.label:SetTextColor(c, c, c)
+    b.icon:SetAlpha(lit and 1 or 0.7)
+end
+
+local function NavButton(parent, label, icon)
+    local b = CreateFrame("Button", nil, parent)
+    b:SetSize(SET_SIDEBAR_W - 24, 34)
+    b.fill = PVPHUB.UI.CreatePanel(b, "fill", "BACKGROUND", 0, 7)
+    b.icon = b:CreateTexture(nil, "ARTWORK")
+    b.icon:SetSize(18, 18)
+    b.icon:SetPoint("LEFT", b, "LEFT", 10, 0)
+    b.icon:SetTexture(icon)
+    b.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    b.label = SettingsText(b, 13)
+    b.label:SetPoint("LEFT", b.icon, "RIGHT", 10, 0)
+    b.label:SetText(label)
+    b:SetScript("OnEnter", PaintNavButton)
+    b:SetScript("OnLeave", PaintNavButton)
+    PaintNavButton(b)
+    return b
+end
+
+-- --------------------------------------------------------------------------
+-- Appearance page
+-- --------------------------------------------------------------------------
+-- A live preview of the overlay on top: its header and two of its
+-- characters (the logged-in one first) with up to three rating columns,
+-- drawn with the overlay's own skin, panel and text styling.
+
+local PREVIEW_NAME_W, PREVIEW_COL_W, PREVIEW_ROW_H = 112, 52, 20
+
+local function PreviewCharacters()
+    local cm = PVPHUB_SETTINGS.compactMode
+    local list = {}
+    local function add(key)
+        local data = PVPHUB_DB[key]
+        if data and not IsCharacterHidden(key) then
+            list[#list + 1] = { key = key, data = data }
+        end
+    end
+    for _, key in ipairs(cm.selectedChars) do add(key) end
+    for key, pins in pairs(cm.pinnedSpecs or {}) do
+        if next(pins) then add(key) end
+    end
+    local current = GetFullName()
+    if #list == 0 and current then add(current) end
+    table.sort(list, function(a, b)
+        if (a.key == current) ~= (b.key == current) then return a.key == current end
+        local ra, rb = BestRating(a.data), BestRating(b.data)
+        if ra ~= rb then return ra > rb end
+        return a.key < b.key
+    end)
+    while #list > 2 do table.remove(list) end
+    return list
+end
+
+local function CreatePreview(parent)
+    local p = CreateFrame("Frame", nil, parent)
+    p.fill = PVPHUB.UI.CreatePanel(p, "fill", "BACKGROUND", 0, PANEL_CORNER)
+    p.ring = PVPHUB.UI.CreatePanel(p, "ring", "BORDER", 0, PANEL_CORNER)
+    local function Text()
+        local fs = p:CreateFontString(nil, "OVERLAY")
+        fs:SetFont(SET_FONT, 11, "")   -- until StyleCompactText sets the overlay's
+        fs:SetWordWrap(false)
+        return fs
+    end
+    p.headName = Text()
+    p.headCols = { Text(), Text(), Text() }
+    p.rows = {}
+    for r = 1, 2 do
+        local row = { cells = { Text(), Text(), Text() } }
+        row.name = Text()
+        p.rows[r] = row
+    end
+    return p
+end
+
+-- The overlay's rows as SpecPillItems takes them: each picked character
+-- (its current spec) and each pinned spec
+local function OverlayEntries()
+    local cm = PVPHUB_SETTINGS.compactMode
+    local entries = {}
+    for _, key in ipairs(cm.selectedChars) do
+        if PVPHUB_DB[key] and not IsCharacterHidden(key) then
+            entries[#entries + 1] = { char = key, data = PVPHUB_DB[key] }
+        end
+    end
+    for key, pins in pairs(cm.pinnedSpecs or {}) do
+        if PVPHUB_DB[key] and not IsCharacterHidden(key) then
+            for specID in pairs(pins) do
+                entries[#entries + 1] = { char = key, data = PVPHUB_DB[key], pinnedSpecID = specID }
+            end
+        end
+    end
+    return entries
+end
+
+-- The Minimal skin's preview: its top two pills
+local function PaintPillPreview(p)
+    p.headName:Hide()
+    for _, fs in ipairs(p.headCols) do fs:Hide() end
+    for _, row in ipairs(p.rows) do
+        row.name:Hide()
+        for _, fs in ipairs(row.cells) do fs:Hide() end
+    end
+    PaintSkinPanel(p.fill, p.ring)   -- hides the panel
+
+    local items = SpecPillItems(OverlayEntries())
+    while #items > 2 do table.remove(items) end
+    local width, height = LayoutSpecPills(p, p.pills, items)
+    if #items == 0 then
+        StyleCompactText(p.headName, 11)
+        p.headName:ClearAllPoints()
+        p.headName:SetPoint("CENTER")
+        p.headName:SetWidth(0)
+        p.headName:SetText("No rated specs on the overlay yet")
+        p.headName:SetTextColor(unpack(HEADER_TEXT))
+        p.headName:Show()
+        width, height = 200, 20
+    end
+    p:SetSize(width, height)
+end
+
+local function PaintPreview(p)
+    p.pills = p.pills or {}
+    if CompactSkin() == "minimal" then
+        PaintPillPreview(p)
         return
     end
+    for _, pill in ipairs(p.pills) do pill:Hide() end
 
-    if not PVPHUB.compactSettingsWindow then
-        local colors = UI_CONSTANTS.COLORS
+    local cols = {}
+    local showRatings = PVPHUB_SETTINGS.compactMode.showRatings
+    for _, bracket in ipairs(COMPACT_BRACKET_ORDER) do
+        if showRatings[bracket.key] and #cols < 3 then cols[#cols + 1] = bracket end
+    end
+    local chars = PreviewCharacters()
+    local width = 10 + PREVIEW_NAME_W + #cols * PREVIEW_COL_W + 10
+    p:SetSize(width, 12 + PREVIEW_ROW_H * (1 + #chars))
+    PaintSkinPanel(p.fill, p.ring)
 
-        -- ── Low-level helpers (theme-aware) ─────────────────────────────────
-        local function SK_Border(frame, c)
-            c = c or colors.SETTINGS_BORDER
-            local r, g, b, a = c[1], c[2], c[3], c[4] or 1
-            local t = frame:CreateTexture(nil,"BORDER"); t:SetColorTexture(r,g,b,a)
-            t:SetPoint("TOPLEFT"); t:SetPoint("TOPRIGHT"); t:SetHeight(1)
-            local bot = frame:CreateTexture(nil,"BORDER"); bot:SetColorTexture(r,g,b,a)
-            bot:SetPoint("BOTTOMLEFT"); bot:SetPoint("BOTTOMRIGHT"); bot:SetHeight(1)
-            local l = frame:CreateTexture(nil,"BORDER"); l:SetColorTexture(r,g,b,a)
-            l:SetPoint("TOPLEFT",0,-1); l:SetPoint("BOTTOMLEFT",0,1); l:SetWidth(1)
-            local rr = frame:CreateTexture(nil,"BORDER"); rr:SetColorTexture(r,g,b,a)
-            rr:SetPoint("TOPRIGHT",0,-1); rr:SetPoint("BOTTOMRIGHT",0,1); rr:SetWidth(1)
-        end
+    local function Line(fs, size, x, rowIndex, w, justify)
+        StyleCompactText(fs, size)
+        fs:ClearAllPoints()
+        fs:SetPoint("LEFT", p, "TOPLEFT", x, -6 - PREVIEW_ROW_H * rowIndex - PREVIEW_ROW_H / 2)
+        fs:SetWidth(w)
+        fs:SetJustifyH(justify)
+        fs:Show()
+    end
+    local function ColumnX(i) return 10 + PREVIEW_NAME_W + (i - 1) * PREVIEW_COL_W end
 
-        local function SK_Btn(parent, text, w, h)
-            local b = CreateFrame("Button", nil, parent)
-            b:SetSize(w or 100, h or 24)
-            local bg = b:CreateTexture(nil,"BACKGROUND"); bg:SetAllPoints()
-            local btnColor = colors.SCALE_BUTTON_BG
-            bg:SetColorTexture(btnColor[1],btnColor[2],btnColor[3],1)
-            local hl = b:CreateTexture(nil,"HIGHLIGHT"); hl:SetAllPoints()
-            local accent = colors.ACCENT_LINE
-            hl:SetColorTexture(accent[1],accent[2],accent[3],0.15)
-            local lbl = b:CreateFontString(nil,"OVERLAY","GameFontHighlightSmall")
-            lbl:SetAllPoints(); lbl:SetJustifyH("CENTER"); lbl:SetText(text)
-            local pressColor = colors.WINDOW_BG
-            b:SetScript("OnMouseDown", function() bg:SetColorTexture(pressColor[1],pressColor[2],pressColor[3],1) end)
-            b:SetScript("OnMouseUp",   function() bg:SetColorTexture(btnColor[1],btnColor[2],btnColor[3],1) end)
-            b:SetScript("OnLeave",     function() bg:SetColorTexture(btnColor[1],btnColor[2],btnColor[3],1) end)
-            SK_Border(b)
-            if PVPHUB.UI then
-                -- 7.0: rounded UI kit button; the flat art above stays hidden
-                for _, region in ipairs({ b:GetRegions() }) do
-                    if region:GetObjectType() == "Texture" then region:SetAlpha(0) end
-                end
-                PVPHUB.UI.SkinButton(b)
-            end
-            return b, lbl
-        end
-
-        local function SK_Check(parent, yAbs, text, onChange)
-            local cb = CreateFrame("CheckButton", nil, parent)
-            cb:SetSize(20, 20)
-            cb:SetNormalTexture("Interface\\Buttons\\UI-CheckBox-Up")
-            cb:SetPushedTexture("Interface\\Buttons\\UI-CheckBox-Down")
-            cb:SetHighlightTexture("Interface\\Buttons\\UI-CheckBox-Highlight","ADD")
-            cb:SetCheckedTexture("Interface\\Buttons\\UI-CheckBox-Check")
-            cb:SetDisabledCheckedTexture("Interface\\Buttons\\UI-CheckBox-Check-Disabled")
-            cb:SetPoint("TOPLEFT", parent, "TOPLEFT", 20, yAbs)
-            cb:SetScript("OnClick", function(self) onChange(self:GetChecked() and true or false) end)
-            local lbl = parent:CreateFontString(nil,"OVERLAY","GameFontHighlight")
-            lbl:SetPoint("LEFT", cb, "RIGHT", 4, 0)
-            lbl:SetText(text)
-            cb.lbl = lbl
-            if PVPHUB.UI then
-                -- 7.0: pill switch. The label follows the switch, not the
-                -- check button, since callers resize the button afterwards.
-                PVPHUB.UI.SkinSwitch(cb)
-                lbl:ClearAllPoints()
-                lbl:SetPoint("LEFT", cb.pvpSwitch, "RIGHT", 8, 0)
-                cb:SetHitRectInsets(0, -12, 0, 0)   -- the switch is wider than the button
-            end
-            return cb
-        end
-
-        -- ── Main window ─────────────────────────────────────────────────────
-        -- Named uniquely per build (not a fixed "PVPHUBCompactSettings") so a
-        -- theme change can safely tear down and rebuild this window — reusing
-        -- the same global frame name on a second CreateFrame call is unreliable.
-        PVPHUB._compactSettingsSeq = (PVPHUB._compactSettingsSeq or 0) + 1
-        local frameName = "PVPHUBCompactSettings" .. PVPHUB._compactSettingsSeq
-        local f = CreateFrame("Frame", frameName, UIParent)
-        f:SetFrameStrata("DIALOG")
-        f:SetSize(460, 560)
-        f:SetPoint("CENTER")
-        f:SetMovable(true)
-        f:EnableMouse(true)
-        f:RegisterForDrag("LeftButton")
-        f:SetClampedToScreen(true)
-        f:SetScript("OnDragStart", f.StartMoving)
-        f:SetScript("OnDragStop",  f.StopMovingOrSizing)
-        table.insert(UISpecialFrames, frameName)
-
-        if PVPHUB.UI then
-            -- 7.0: rounded shell like PVPHUB's other small windows (no square
-            -- title bar or accent stripe, which would stick out of its corners)
-            PVPHUB.UI.SkinWindow(f)
+    Line(p.headName, 10, 13, 0, PREVIEW_NAME_W - 8, "LEFT")
+    p.headName:SetText("Character")
+    p.headName:SetTextColor(unpack(HEADER_TEXT))
+    for i, fs in ipairs(p.headCols) do
+        local bracket = cols[i]
+        if bracket then
+            Line(fs, 10, ColumnX(i), 0, PREVIEW_COL_W - 8, "RIGHT")
+            fs:SetText(bracket.name)
+            fs:SetTextColor(unpack(HEADER_TEXT))
         else
-        -- Theme-matched background/border
-        local winBg = f:CreateTexture(nil,"BACKGROUND",nil,-1)
-        winBg:SetAllPoints()
-        local bgC = colors.SETTINGS_BG
-        winBg:SetColorTexture(bgC[1], bgC[2], bgC[3], bgC[4] or 0.95)
-        SK_Border(f)
-
-        -- Accent stripe (3px) at the very top, themed
-        local accentC = colors.ACCENT_LINE
-        local accentTop = f:CreateTexture(nil,"BORDER",nil,1)
-        accentTop:SetColorTexture(accentC[1], accentC[2], accentC[3], 1)
-        accentTop:SetHeight(3); accentTop:SetPoint("TOPLEFT"); accentTop:SetPoint("TOPRIGHT")
-
-        -- Title bar background (36 px) — slightly darker than the body
-        local titleBg = f:CreateTexture(nil,"BACKGROUND",nil,0)
-        titleBg:SetColorTexture(bgC[1]*0.75, bgC[2]*0.75, bgC[3]*0.75, 1)
-        titleBg:SetHeight(36); titleBg:SetPoint("TOPLEFT"); titleBg:SetPoint("TOPRIGHT")
+            fs:Hide()
         end
+    end
 
-        -- Separator under title bar
-        local borderC = colors.SETTINGS_BORDER
-        local titleSep = f:CreateTexture(nil,"ARTWORK")
-        titleSep:SetColorTexture(borderC[1], borderC[2], borderC[3], 1); titleSep:SetHeight(1)
-        titleSep:SetPoint("TOPLEFT",f,"TOPLEFT",0,-36)
-        titleSep:SetPoint("TOPRIGHT",f,"TOPRIGHT",0,-36)
-
-        -- Icon + title text
-        local titleIcon = f:CreateTexture(nil,"OVERLAY")
-        titleIcon:SetTexture("Interface\\Icons\\Inv_misc_camera_02")
-        titleIcon:SetSize(20,20); titleIcon:SetPoint("LEFT",f,"TOPLEFT",12,-20)
-
-        -- The Class theme's TITLE_COLOR is r/g/b * 1.2 for extra vibrancy, which
-        -- can exceed 1.0 — clamp before scaling to 0-255 or %02x produces a
-        -- 3-digit component and corrupts the fixed-width |cAARRGGBB code.
-        local function ToByte(v)
-            return math.floor(math.max(0, math.min(1, v or 1)) * 255 + 0.5)
+    for r, row in ipairs(p.rows) do
+        local entry = chars[r]
+        local shown = entry ~= nil
+        row.name:SetShown(shown)
+        if shown then
+            Line(row.name, 11, 13, r, PREVIEW_NAME_W - 8, "LEFT")
+            -- With the logged-in character's green dot, as on the overlay
+            row.name:SetText(CreateCharacterName({ char = entry.key, data = entry.data }, true))
         end
-        local titleColorC = colors.TITLE_COLOR
-        local titleColorStr = string.format("ff%02x%02x%02x", ToByte(titleColorC[1]), ToByte(titleColorC[2]), ToByte(titleColorC[3]))
-        local titleText = f:CreateFontString(nil,"OVERLAY","GameFontNormal")
-        titleText:SetPoint("LEFT", titleIcon, "RIGHT", 7, 0)
-        titleText:SetText("|c" .. titleColorStr .. "Streamer Mode|r  |cff555566— PVPHUB|r")
-
-        -- Close button — same desaturated-silver style as the main window
-        local closeBtn = CreateFrame("Button", nil, f, "UIPanelCloseButton")
-        closeBtn:SetSize(26, 26)
-        closeBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -5, -5)
-        closeBtn:SetFrameLevel(f:GetFrameLevel() + 5)
-        do
-            local _nt = closeBtn:GetNormalTexture()
-            local _pt = closeBtn:GetPushedTexture()
-            local _ht = closeBtn:GetHighlightTexture()
-            _nt:SetDesaturated(true); _nt:SetVertexColor(0.82, 0.82, 0.88, 1)
-            _pt:SetDesaturated(true); _pt:SetVertexColor(0.55, 0.55, 0.60, 1)
-            _ht:SetDesaturated(true); _ht:SetVertexColor(1,    1,    1,    1)
+        for i, fs in ipairs(row.cells) do
+            local bracket = shown and cols[i]
+            if bracket then
+                Line(fs, 11, ColumnX(i), r, PREVIEW_COL_W - 8, "RIGHT")
+                fs:SetText(RatingText((GetShuffleDisplayInfo(entry.data, entry.key, bracket.key))))
+            else
+                fs:Hide()
+            end
         end
-        closeBtn:SetScript("OnClick", function()
+    end
+end
+
+local function BuildAppearancePage(f, page, width)
+    local UI = PVPHUB.UI
+    local cm = PVPHUB_SETTINGS.compactMode
+
+    -- The preview on a grey stand-in for the game behind the overlay
+    local stage = CreateFrame("Frame", nil, page)
+    stage:SetPoint("TOPLEFT", page, "TOPLEFT", 0, 0)
+    stage:SetSize(width, 112)
+    UI.CreatePanel(stage, "fill", "BACKGROUND", 0, 10):SetVertexColor(0.25, 0.27, 0.32, 1)
+    local preview = CreatePreview(stage)
+    preview:SetPoint("CENTER")
+    local caption = SettingsText(page, 11, SET_MUTED)
+    caption:SetPoint("TOP", stage, "BOTTOM", 0, -5)
+    caption:SetText("Live preview")
+
+    -- Skin
+    local skinLabel = SettingsText(page, 12, SET_MUTED)
+    skinLabel:SetPoint("TOPLEFT", stage, "BOTTOMLEFT", 0, -28)
+    skinLabel:SetText("Skin")
+    local picker = CreateSkinPicker(page)
+    picker:SetPoint("TOPLEFT", skinLabel, "BOTTOMLEFT", -2, -6)
+    f.skinPicker = picker
+
+    -- Background color, while the skin has a background
+    local bgLabel = SettingsText(page, 12, SET_MUTED)
+    bgLabel:SetPoint("TOPLEFT", picker, "BOTTOMLEFT", 2, -18)
+    bgLabel:SetText("Background")
+    local bgRow = CreateFrame("Frame", nil, page)
+    bgRow:SetPoint("TOPLEFT", bgLabel, "BOTTOMLEFT", 0, -6)
+    bgRow:SetSize(width, 28)
+    local swatch = CreateFrame("Button", nil, bgRow)
+    swatch:SetSize(28, 28)
+    swatch:SetPoint("LEFT")
+    swatch.fill = UI.CreatePanel(swatch, "fill", "ARTWORK", 0, 6)
+    swatch.ring = UI.CreatePanel(swatch, "ring", "OVERLAY", 0, 6)
+    swatch.ring:SetVertexColor(1, 1, 1, 0.35)
+    local pick = CreateFrame("Button", nil, bgRow, "UIPanelButtonTemplate")
+    pick:SetSize(116, 26)
+    pick:SetPoint("LEFT", swatch, "RIGHT", 10, 0)
+    pick:SetText("Pick color")
+    UI.SkinButton(pick)
+    local alphaText = SettingsText(bgRow, 12, SET_MUTED)
+    alphaText:SetPoint("LEFT", pick, "RIGHT", 12, 0)
+    local noBackground = SettingsText(page, 12, SET_MUTED)
+    noBackground:SetPoint("LEFT", bgRow, "LEFT", 0, 0)
+    noBackground:SetText("The None skin has no background to color.")
+
+    local function OpenColorPicker()
+        local c = cm.backgroundColor
+        local function Apply(r, g, b, a)
+            cm.backgroundColor = { r, g, b, a }
+            PaintCompactShell()
+            -- The Minimal skin's pills are filled with it too
+            local cw = PVPHUB.compactWindow
+            for _, pill in ipairs(cw and cw.pillPool or {}) do
+                pill.fill:SetVertexColor(r, g, b, a or 0.8)
+            end
+            page.Refresh()
+        end
+        local function FromPicker()
+            local r, g, b = ColorPickerFrame:GetColorRGB()
+            Apply(r, g, b, ColorPickerFrame:GetColorAlpha())
+        end
+        ColorPickerFrame:SetupColorPickerAndShow({
+            swatchFunc = FromPicker,
+            opacityFunc = FromPicker,
+            cancelFunc = function(prev)
+                if prev then Apply(prev.r, prev.g, prev.b, prev.a) end
+            end,
+            hasOpacity = true, opacity = c[4],
+            r = c[1], g = c[2], b = c[3],
+        })
+    end
+    swatch:SetScript("OnClick", OpenColorPicker)
+    pick:SetScript("OnClick", OpenColorPicker)
+
+    -- Font and size, side by side
+    local fontLabel = SettingsText(page, 12, SET_MUTED)
+    fontLabel:SetPoint("TOPLEFT", bgRow, "BOTTOMLEFT", 0, -24)
+    fontLabel:SetText("Font")
+    local fonts = CompactFontList()
+    local fontDrop = PVPHUB_CreateFontPicker(page, fontLabel, "BOTTOMLEFT", -16, -2, 220,
+        function() return cm.selectedFont end,
+        function(name)
+            cm.selectedFont = name
+            PVPHUB.compactCurrentFontPath = ResolveCompactFont(name) or FALLBACK_FONT
             if PVPHUB.compactWindow and PVPHUB.compactWindow:IsShown() then
                 PVPHUB:UpdateCompactWindow()
             end
-            f:Hide()
-        end)
-        if PVPHUB.UI then PVPHUB.UI.SkinCloseButton(closeBtn) end
+            page.Refresh()
+        end,
+        function() return fonts end)
+    ApplyModernDropdownStyling(fontDrop)
+    f.compactFontDropdown = fontDrop
 
-        -- ── Scrollable, collapsible card area ────────────────────────────────
-        local footerHeight = 46
-        local scrollFrame = CreateFrame("ScrollFrame", nil, f, "ScrollFrameTemplate")
-        scrollFrame:SetPoint("TOPLEFT", f, "TOPLEFT", 4, -40)
-        scrollFrame:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -25, footerHeight)
-        ApplyModernScrollbarStyling(scrollFrame, colors)
-        PVPHUB.EnableSmoothScroll(scrollFrame, 40)
-
-        local cardParent = CreateFrame("Frame", nil, scrollFrame)
-        cardParent:SetSize(410, 400)
-        scrollFrame:SetScrollChild(cardParent)
-        scrollFrame:SetScript("OnSizeChanged", function(self, w)
-            cardParent:SetWidth(w)
-        end)
-
-        if not PVPHUB_SETTINGS.compactSettingsSections then
-            PVPHUB_SETTINGS.compactSettingsSections = {}
+    local sizeLabel = SettingsText(page, 12, SET_MUTED)
+    sizeLabel:SetPoint("TOPLEFT", fontLabel, "TOPLEFT", 240, 0)
+    local slider = CreateFrame("Slider", nil, page, "MinimalSliderTemplate")
+    slider:SetPoint("TOPLEFT", sizeLabel, "BOTTOMLEFT", 2, -16)
+    slider:SetSize(186, 12)
+    slider:SetMinMaxValues(1.0, 2.0)
+    slider:SetValueStep(0.01)
+    slider:SetObeyStepOnDrag(true)
+    slider:SetValue(PVPHUB_SETTINGS.compactWindowScale)
+    sizeLabel:SetText(string.format("Size  |cffffffff%d%%|r", PVPHUB_SETTINGS.compactWindowScale * 100))
+    slider:SetScript("OnValueChanged", function(_, val)
+        if not val then return end
+        PVPHUB_SETTINGS.compactWindowScale = val
+        sizeLabel:SetText(string.format("Size  |cffffffff%d%%|r", val * 100))
+        local cw = PVPHUB.compactWindow
+        if cw then
+            cw:SetScale(val)
+            PlaceToolbar()
+            if cw.scaleSlider then cw.scaleSlider:SetValue(val) end
+            if cw.scaleLabel then cw.scaleLabel:SetText(string.format("%d%%", val * 100)) end
         end
-        local cs = PVPHUB_SETTINGS.compactSettingsSections
+    end)
+    UI.SkinSlider(slider)
 
-        local allSections = {}
-        local function RecalcPositions()
-            local finalY = PVPHUB_RecalcCardPositions(cardParent, allSections, -8)
-            cardParent:SetHeight(math.max(200, math.abs(finalY) + 10))
+    function page.Refresh()
+        picker.Paint()
+        local c = cm.backgroundColor
+        swatch.fill:SetVertexColor(c[1], c[2], c[3], 1)
+        alphaText:SetText(string.format("%d%% opacity", math.floor((c[4] or 0.8) * 100 + 0.5)))
+        local bare = CompactSkin() == "none"
+        bgRow:SetShown(not bare)
+        noBackground:SetShown(bare)
+        slider:SetValue(PVPHUB_SETTINGS.compactWindowScale)
+        UIDropDownMenu_SetText(fontDrop, cm.selectedFont)
+        PaintPreview(preview)
+    end
+    picker.onChange = page.Refresh
+end
+
+-- --------------------------------------------------------------------------
+-- Characters page
+-- --------------------------------------------------------------------------
+-- Every character with a switch for the overlay. A character with a rated
+-- spec lists those specs under it, each with its own switch (pinned specs,
+-- see PromoteToMultiSpecIfNeeded); one without shows as a single row that
+-- follows its current spec. Rows are pooled.
+
+local function CharacterRow(parent)
+    local r = CreateFrame("Button", nil, parent)
+    r.hl = r:CreateTexture(nil, "HIGHLIGHT")
+    r.hl:SetAllPoints()
+    r.hl:SetColorTexture(1, 1, 1, 0.03)
+    r.icon = r:CreateTexture(nil, "ARTWORK")
+    r.icon:SetSize(18, 18)
+    r.icon:SetPoint("LEFT", r, "LEFT", 26, 0)
+    r.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    r.name = SettingsText(r, 13)
+    r.sub = SettingsText(r, 11, SET_MUTED)
+    r.sub:SetPoint("LEFT", r.name, "RIGHT", 8, -1)
+    r.switch = SettingsSwitch(r, function(on)
+        if r.onToggle then r.onToggle(on) end
+    end)
+    r.switch:SetPoint("RIGHT", r, "RIGHT", -6, 0)
+    r.rating = SettingsText(r, 12)
+    r.rating:SetJustifyH("RIGHT")
+    r.rating:SetPoint("RIGHT", r, "RIGHT", -48, 0)
+    r.line = r:CreateTexture(nil, "BACKGROUND")
+    r.line:SetColorTexture(1, 1, 1, 0.06)
+    r.line:SetHeight(1)
+    r.line:SetPoint("BOTTOMLEFT")
+    r.line:SetPoint("BOTTOMRIGHT")
+    r:SetScript("OnClick", function(self)
+        if self.switch:IsShown() then self.switch:Click() end
+    end)
+    return r
+end
+
+-- kind: "char" (a switch), "head" (a character with spec rows, no switch)
+-- or "spec" (indented, with the spec's icon). Character names are in their
+-- class color.
+local function PaintCharacterRow(r, kind, color, name, sub, rating)
+    r.icon:SetShown(kind == "spec")
+    r.switch:SetShown(kind ~= "head")
+    r.hl:SetAlpha(kind == "head" and 0 or 1)
+    r.name:ClearAllPoints()
+    if kind == "spec" then
+        r.name:SetPoint("LEFT", r.icon, "RIGHT", 8, 0)
+        r.name:SetFont(SET_FONT, 12, "")
+        r.name:SetTextColor(unpack(SET_TEXT))
+    else
+        r.name:SetPoint("LEFT", r, "LEFT", 6, 0)
+        r.name:SetFont(SET_FONT, 13, "")
+        r.name:SetTextColor(color and color.r or 0.9, color and color.g or 0.9, color and color.b or 0.9)
+    end
+    r.name:SetText(name)
+    r.sub:SetText(sub or "")
+    r.rating:SetText(rating or "")
+end
+
+local function BuildCharactersPage(f, page, width)
+    local cm = PVPHUB_SETTINGS.compactMode
+    local listW = width - 14   -- the scroll bar's room
+
+    local search = CreateFrame("EditBox", nil, page, "SearchBoxTemplate")
+    search:SetSize(250, 26)
+    search:SetPoint("TOPLEFT", page, "TOPLEFT", 6, 0)
+    search:SetAutoFocus(false)
+    search:SetMaxLetters(40)
+    if search.Instructions then search.Instructions:SetText("Search characters") end
+    local count = SettingsText(page, 12, SET_MUTED)
+    count:SetPoint("RIGHT", page, "TOPRIGHT", 0, -13)
+    count:SetJustifyH("RIGHT")
+
+    local hideRow = OptionRow(page, width, "Hide characters without a rating", nil, function(on)
+        cm.hideNoRating = on
+        if on then
+            local sel = cm.selectedChars
+            for i = #sel, 1, -1 do
+                if not compactHasAnyRating(PVPHUB_DB and PVPHUB_DB[sel[i]]) then
+                    table.remove(sel, i)
+                end
+            end
+        end
+        page.Refresh()
+        if PVPHUB.compactWindow and PVPHUB.compactWindow:IsShown() then PVPHUB:UpdateCompactWindow() end
+    end)
+    hideRow:SetPoint("TOPLEFT", page, "TOPLEFT", 0, -34)
+    f.hideNoRatingCheckbox = hideRow.switch
+
+    local scroll = CreateFrame("ScrollFrame", nil, page, "ScrollFrameTemplate")
+    scroll:SetPoint("TOPLEFT", hideRow, "BOTTOMLEFT", 0, -6)
+    scroll:SetPoint("BOTTOMRIGHT", page, "BOTTOMRIGHT", -14, 0)
+    ApplyModernScrollbarStyling(scroll, UI_CONSTANTS.COLORS)
+    PVPHUB.EnableSmoothScroll(scroll, 40)
+    local list = CreateFrame("Frame", nil, scroll)
+    list:SetSize(listW, 10)
+    scroll:SetScrollChild(list)
+    f.charScrollFrame = scroll
+
+    local empty = SettingsText(list, 12, SET_MUTED)
+    empty:SetPoint("TOPLEFT", list, "TOPLEFT", 4, -12)
+
+    local rows = {}
+
+    function page.Refresh()
+        MigratePinnedSpecsSchema()
+        cm.pinnedSpecs = cm.pinnedSpecs or {}
+        local current = GetFullName()
+        if current and current ~= "" then
+            PVPHUB_DB[current] = PVPHUB_DB[current] or {}
+            local own = PVPHUB_DB[current]
+            if not own.class then
+                own.class = select(2, UnitClass("player"))
+                own.race = select(2, UnitRace("player"))
+                own.gender = UnitSex("player")
+            end
         end
 
-        -- ── SECTION: Window Controls (toggle left | scale right) ────────────
-        local sControls = PVPHUB_CreateCollapsibleCard(cardParent, cs, "windowControls", "WINDOW CONTROLS", {0.20, 0.45, 0.65}, "Interface\\Icons\\Trade_Engineering", RecalcPositions)
-        table.insert(allSections, sControls)
-        local wcContent = sControls.content
+        local query = (search:GetText() or ""):lower()
+        local total, onOverlay, keys = 0, 0, {}
+        for key, data in pairs(PVPHUB_DB) do
+            if type(data) == "table" and key:find("-", 1, true) and not IsCharacterHidden(key)
+               and (not cm.hideNoRating or compactHasAnyRating(data)) then
+                -- Settings can open before the overlay ever updated, so
+                -- characters graduate to spec rows here too
+                PromoteToMultiSpecIfNeeded(key, data)
+                total = total + 1
+                if IsOnOverlay(key) then onOverlay = onOverlay + 1 end
+                if query == "" or key:lower():find(query, 1, true) then
+                    keys[#keys + 1] = key
+                end
+            end
+        end
+        table.sort(keys)
+        count:SetText(string.format("%d of %d on the overlay", onOverlay, total))
 
-        local toggleBtn, toggleLbl = SK_Btn(wcContent, PVPHUB.compactWindow and PVPHUB.compactWindow:IsShown() and "Hide Streamer Window" or "Show Streamer Window", 190, 26)
-        toggleBtn:SetPoint("TOPLEFT", wcContent, "TOPLEFT", 10, -12)
-        local function RefreshToggleBtn()
-            if PVPHUB.compactWindow and PVPHUB.compactWindow:IsShown() then
-                toggleLbl:SetText("Hide Streamer Window")
+        local n, y = 0, 0
+        local function NextRow(kind)
+            n = n + 1
+            local r = rows[n] or CharacterRow(list)
+            rows[n] = r
+            r:ClearAllPoints()
+            r:SetPoint("TOPLEFT", list, "TOPLEFT", 0, -y)
+            r:SetSize(listW, kind == "spec" and SPEC_ROW_H or CHAR_ROW_H)
+            y = y + r:GetHeight()
+            r:Show()
+            return r
+        end
+
+        for _, key in ipairs(keys) do
+            local data = PVPHUB_DB[key]
+            if key == current then data.class = select(2, UnitClass("player")) end
+            local color = RAID_CLASS_COLORS[data.class or ""]
+            local name = key:match("^(.-)%-") or key
+            local realm = key:match("%-(.+)$") or ""
+            -- The logged-in character's green dot, as on the overlay
+            if key == current then name = name .. " |TInterface\\Common\\Indicator-Green:12|t" end
+
+            if GetDistinctRatedSpecCount(data) < 1 then
+                -- No rated spec yet: one switch, the row follows the
+                -- current spec
+                local r = NextRow("char")
+                PaintCharacterRow(r, "char", color, name, realm, RatingText(BestRating(data)))
+                local selected = false
+                for _, k in ipairs(cm.selectedChars) do
+                    if k == key then selected = true; break end
+                end
+                r.switch:SetChecked(selected)
+                r.line:Show()
+                r.onToggle = function(on)
+                    PVPHUB:ToggleCompactCharacter(key, on)
+                    page.Refresh()
+                end
             else
-                toggleLbl:SetText("Show Streamer Window")
-            end
-        end
-        if PVPHUB.compactWindow then
-            PVPHUB.compactWindow.RefreshSettingsToggle = RefreshToggleBtn
-        end
-        toggleBtn:SetScript("OnClick", function()
-            if PVPHUB.compactWindow and PVPHUB.compactWindow:IsShown() then
-                PVPHUB_SETTINGS.compactWindowStayOpen = false
-                PVPHUB.compactWindow:Hide()
-            else
-                PVPHUB:CreateCompactWindow()
-                if PVPHUB.compactWindow then
-                    PVPHUB.compactWindow.RefreshSettingsToggle = RefreshToggleBtn
-                end
-            end
-            RefreshToggleBtn()
-        end)
+                local head = NextRow("head")
+                PaintCharacterRow(head, "head", color, name, realm, nil)
+                head.line:Hide()
+                head.onToggle = nil
 
-        PVPHUB_SETTINGS.compactWindowScale = math.max(1.0, math.min(2.0, PVPHUB_SETTINGS.compactWindowScale or 1.0))
-
-        local scaleTitleLbl = wcContent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-        scaleTitleLbl:SetPoint("TOPLEFT", wcContent, "TOPLEFT", 220, -8)
-        scaleTitleLbl:SetText("SCALE")
-        scaleTitleLbl:SetTextColor(unpack(colors.HEADER_COLOR))
-
-        local scaleValLabel = wcContent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-        scaleValLabel:SetPoint("TOPLEFT", wcContent, "TOPLEFT", 340, -8)
-        scaleValLabel:SetText(string.format("%d%%", PVPHUB_SETTINGS.compactWindowScale * 100))
-
-        local scaleSlider = CreateFrame("Slider", "PVPHUBSettingsScaleSlider", wcContent, "MinimalSliderTemplate")
-        scaleSlider:SetPoint("TOPLEFT", wcContent, "TOPLEFT", 220, -26)
-        scaleSlider:SetSize(155, 12)
-        scaleSlider:SetMinMaxValues(1.0, 2.0)
-        scaleSlider:SetValueStep(0.01)
-        scaleSlider:SetObeyStepOnDrag(true)
-        scaleSlider:SetValue(PVPHUB_SETTINGS.compactWindowScale)
-        scaleSlider:SetScript("OnValueChanged", function(self, val)
-            if not val then return end
-            PVPHUB_SETTINGS.compactWindowScale = val
-            scaleValLabel:SetText(string.format("%d%%", val * 100))
-            if PVPHUB.compactWindow then
-                PVPHUB.compactWindow:SetScale(val)
-                if PVPHUB.compactWindow.scaleSlider then
-                    PVPHUB.compactWindow.scaleSlider:SetValue(val)
-                end
-                if PVPHUB.compactWindow.scaleLabel then
-                    PVPHUB.compactWindow.scaleLabel:SetText(string.format("%d%%", val * 100))
-                end
-            end
-        end)
-        if PVPHUB.UI then PVPHUB.UI.SkinSlider(scaleSlider) end
-
-        sControls.contentHeight = 56
-
-        -- ── SECTION: Character Selection ─────────────────────────────────────
-        local sChar = PVPHUB_CreateCollapsibleCard(cardParent, cs, "characterSelection", "CHARACTER SELECTION", {0.55, 0.30, 0.65}, "Interface\\Icons\\INV_Misc_GroupLooking", RecalcPositions)
-        table.insert(allSections, sChar)
-        local charSecContent = sChar.content
-
-        local hideNoRatingCB = SK_Check(charSecContent, -10, "Hide No Rating", function(v)
-            PVPHUB_SETTINGS.compactMode.hideNoRating = v
-            if v then
-                local sel = PVPHUB_SETTINGS.compactMode.selectedChars
-                for i = #sel, 1, -1 do
-                    if not compactHasAnyRating(PVPHUB_DB and PVPHUB_DB[sel[i]]) then
-                        table.remove(sel, i)
-                    end
-                end
-            end
-            if f.RefreshCharacterList then f:RefreshCharacterList() end
-            if PVPHUB.compactWindow and PVPHUB.UpdateCompactWindow then PVPHUB:UpdateCompactWindow() end
-        end)
-        hideNoRatingCB:SetChecked(PVPHUB_SETTINGS.compactMode.hideNoRating or false)
-        hideNoRatingCB:SetScript("OnEnter", function(self)
-            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-            GameTooltip:SetText("Hide No Rating", 1, 1, 1)
-            GameTooltip:AddLine("Remove characters with no rated activity from the selection list.", 0.7, 0.7, 0.7, true)
-            GameTooltip:Show()
-        end)
-        hideNoRatingCB:SetScript("OnLeave", function() GameTooltip:Hide() end)
-        f.hideNoRatingCheckbox = hideNoRatingCB
-
-        f.charCheckboxes = {}
-        local charScrollFrame = CreateFrame("ScrollFrame", nil, charSecContent, "ScrollFrameTemplate")
-        PVPHUB.EnableSmoothScroll(charScrollFrame, 40)
-        charScrollFrame:SetPoint("TOPLEFT", charSecContent, "TOPLEFT", 10, -38)
-        charScrollFrame:SetSize(376, 130)
-        ApplyModernScrollbarStyling(charScrollFrame, colors)
-
-        f.charContent = CreateFrame("Frame", nil, charScrollFrame)
-        charScrollFrame:SetScrollChild(f.charContent)
-        f.charContent:SetSize(360, 200)
-
-        function f:RefreshCharacterList()
-            MigratePinnedSpecsSchema()
-
-            for _, cb in ipairs(self.charCheckboxes) do
-                cb:Hide(); cb:SetParent(nil)
-                if cb.lbl then cb.lbl:Hide(); cb.lbl:SetParent(nil) end
-            end
-            self.charCheckboxes = {}
-
-            local currentChar = GetFullName()
-            if currentChar and currentChar ~= "" then
-                PVPHUB_DB[currentChar] = PVPHUB_DB[currentChar] or {}
-                if not PVPHUB_DB[currentChar].class then
-                    local _, class = UnitClass("player")
-                    PVPHUB_DB[currentChar].class = class
-                    PVPHUB_DB[currentChar].race   = select(2, UnitRace("player"))
-                    PVPHUB_DB[currentChar].gender = UnitSex("player")
-                end
-            end
-
-            local hideNoRating = PVPHUB_SETTINGS.compactMode.hideNoRating
-            local charList = {}
-            for charKey, data in pairs(PVPHUB_DB) do
-                if type(data) == "table" and charKey ~= "" and not IsCharacterHidden(charKey) then
-                    if not hideNoRating or compactHasAnyRating(data) then
-                        table.insert(charList, charKey)
-                    end
-                end
-            end
-            table.sort(charList)
-
-            -- Small top pad so the first row doesn't sit flush against the
-            -- scrollframe's clip edge.
-            local yPos = 4
-            for charIndex, charKey in ipairs(charList) do
-                local groupStartY = yPos
-                local charData = PVPHUB_DB[charKey] or {}
-                if charKey == currentChar then local _,cl = UnitClass("player"); charData.class = cl end
-                local classColor = RAID_CLASS_COLORS[charData.class] or NORMAL_FONT_COLOR
-
-                -- Settings can be opened without the compact window ever having
-                -- refreshed, so run the same graduation check here too.
-                PromoteToMultiSpecIfNeeded(charKey, charData)
-
-                local function buildNameLabel(specIDForIcon)
-                    local label = charKey
-                    if specIDForIcon then
-                        local _si = GetCachedSpecInfo(specIDForIcon)
-                        if _si and _si.icon then label = "|T".._si.icon..":14|t "..label end
-                    end
-                    label = string.format("|c%s%s|r", classColor.colorStr or "ffffffff", label)
-                    if charKey == currentChar then label = label .. " |TInterface\\Common\\Indicator-Green:12|t" end
-                    return label
-                end
-
-                local isMultiSpec = GetDistinctRatedSpecCount(charData) >= 1
-
-                if not isMultiSpec then
-                    -- Unrated character: one checkbox controls the whole
-                    -- combined row (every enabled bracket column at once),
-                    -- tracking whatever spec is currently active. Once any
-                    -- spec earns a rating, PromoteToMultiSpecIfNeeded moves
-                    -- the character to individually pinnable spec rows below.
-                    local cb = SK_Check(self.charContent, -yPos, "", function(v)
-                        PVPHUB:ToggleCompactCharacter(charKey, v)
-                    end)
-                    cb:SetSize(20,20); cb:SetPoint("TOPLEFT", self.charContent, "TOPLEFT", 4, -yPos)
-                    cb:Show()
-                    cb.lbl:SetText(buildNameLabel(charData.specID))
-
-                    local isSelected = false
-                    for _, sel in ipairs(PVPHUB_SETTINGS.compactMode.selectedChars) do
-                        if sel == charKey then isSelected = true; break end
-                    end
-                    cb:SetChecked(isSelected)
-
-                    table.insert(self.charCheckboxes, cb)
-                    yPos = yPos + 24
-                else
-                    -- Multi-spec character: the name is a plain header — there's
-                    -- no single "current spec" row anymore, so visibility is
-                    -- controlled entirely by which spec rows below are ticked.
-                    local header = self.charContent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-                    header:SetPoint("TOPLEFT", self.charContent, "TOPLEFT", 6, -yPos - 4)
-                    header:SetText(buildNameLabel(nil))
-                    table.insert(self.charCheckboxes, header)
-                    yPos = yPos + 20
-
-                    -- One checkbox per distinct spec that has ever earned a
-                    -- rating (in either Shuffle or Blitz), including whichever
-                    -- spec is currently active — every row is equally tickable.
-                    -- Ticking one shows that spec across every enabled bracket
-                    -- column, so there's no need to split by bracket here.
-                    local specCandidates = {}
-                    local bestRatingBySpec = {}
-                    for _, bracketKey in ipairs({"ratingShuffle", "ratingBlitz"}) do
-                        local bracketData = charData[bracketKey]
-                        if type(bracketData) == "table" then
-                            for specID, rating in pairs(bracketData) do
-                                if rating and rating > 0 then
-                                    if not bestRatingBySpec[specID] then
-                                        local entry = { specID = specID, bestRating = rating }
-                                        bestRatingBySpec[specID] = entry
-                                        table.insert(specCandidates, entry)
-                                    elseif rating > bestRatingBySpec[specID].bestRating then
-                                        bestRatingBySpec[specID].bestRating = rating
-                                    end
+                -- Every spec that has earned a rating in Shuffle or Blitz,
+                -- best first
+                local specs, bySpec = {}, {}
+                for _, bracketKey in ipairs({ "ratingShuffle", "ratingBlitz" }) do
+                    local bracketData = data[bracketKey]
+                    if type(bracketData) == "table" then
+                        for specID, rating in pairs(bracketData) do
+                            if rating and rating > 0 then
+                                if not bySpec[specID] then
+                                    bySpec[specID] = { specID = specID, best = rating }
+                                    specs[#specs + 1] = bySpec[specID]
+                                elseif rating > bySpec[specID].best then
+                                    bySpec[specID].best = rating
                                 end
                             end
                         end
                     end
-                    table.sort(specCandidates, function(a, b) return a.bestRating > b.bestRating end)
+                end
+                table.sort(specs, function(a, b) return a.best > b.best end)
+                head.rating:SetText(string.format("|cff9a97a6%d %s|r", #specs, #specs == 1 and "spec" or "specs"))
 
-                    local currentSpecID = charData.specID or charData.lastActiveSpecID
-                    local connectorTop = yPos
-                    for _, cand in ipairs(specCandidates) do
-                        local specIcon, specName = "", "Spec"
-                        local _si = GetCachedSpecInfo(cand.specID)
-                        if _si then
-                            if _si.icon then specIcon = "|T" .. _si.icon .. ":12|t " end
-                            specName = _si.name or specName
+                local currentSpec = data.specID or data.lastActiveSpecID
+                local pins = cm.pinnedSpecs[key]
+                for i, spec in ipairs(specs) do
+                    local r = NextRow("spec")
+                    local info = GetCachedSpecInfo(spec.specID)
+                    r.icon:SetTexture(info and info.icon or "Interface\\Icons\\INV_Misc_QuestionMark")
+                    local specName = info and info.name or "Spec"
+                    if spec.specID == currentSpec then
+                        specName = specName .. " |TInterface\\Common\\Indicator-Green:10|t"
+                    end
+                    PaintCharacterRow(r, "spec", color, specName, nil, RatingText(spec.best))
+                    r.switch:SetChecked(pins and pins[spec.specID] and true or false)
+                    r.line:SetShown(i == #specs)
+                    r.onToggle = function(on)
+                        cm.pinnedSpecs[key] = cm.pinnedSpecs[key] or {}
+                        cm.pinnedSpecs[key][spec.specID] = on or nil
+                        if PVPHUB.compactWindow and PVPHUB.compactWindow:IsShown() then
+                            PVPHUB:UpdateCompactWindow()
                         end
-
-                        local pinCb = SK_Check(self.charContent, -yPos, "", function(v)
-                            local pins = PVPHUB_SETTINGS.compactMode.pinnedSpecs
-                            pins[charKey] = pins[charKey] or {}
-                            pins[charKey][cand.specID] = v or nil
-                            if PVPHUB.compactWindow and PVPHUB.compactWindow:IsShown() then
-                                PVPHUB:UpdateCompactWindow()
-                            end
-                        end)
-                        pinCb:SetSize(18, 18)
-                        pinCb:ClearAllPoints()
-                        pinCb:SetPoint("TOPLEFT", self.charContent, "TOPLEFT", 30, -yPos)
-                        pinCb:Show()
-                        -- No rating number or bracket name — one checkbox = one
-                        -- spec, and it shows every enabled bracket column, so
-                        -- there's nothing bracket-specific left to disambiguate.
-                        local currentTag = (cand.specID == currentSpecID) and " |TInterface\\Common\\Indicator-Green:10|t" or ""
-                        pinCb.lbl:SetText(string.format("%s%s%s", specIcon, specName, currentTag))
-                        pinCb.lbl:SetFontObject("GameFontHighlightSmall")
-
-                        local pinned = PVPHUB_SETTINGS.compactMode.pinnedSpecs[charKey]
-                        local isPinned = pinned and pinned[cand.specID]
-                        pinCb:SetChecked(isPinned and true or false)
-
-                        table.insert(self.charCheckboxes, pinCb)
-                        yPos = yPos + 20
-                    end
-
-                    if #specCandidates > 0 then
-                        -- Connector stripe ties the spec rows visually back to
-                        -- their character, in the character's class color.
-                        local connector = self.charContent:CreateTexture(nil, "ARTWORK")
-                        connector:SetTexture("Interface\\Buttons\\WHITE8x8")
-                        connector:SetVertexColor(classColor.r or 1, classColor.g or 1, classColor.b or 1, 0.55)
-                        connector:SetWidth(2)
-                        connector:SetPoint("TOPLEFT",    self.charContent, "TOPLEFT", 13, -connectorTop + 2)
-                        connector:SetPoint("BOTTOMLEFT", self.charContent, "TOPLEFT", 13, -yPos + 10)
-                        table.insert(self.charCheckboxes, connector)
-                    end
-                end
-
-                -- Alternating background band behind the whole character group
-                -- (checkbox row + any pinned-spec rows) so adjacent characters
-                -- read as distinct blocks instead of one blurred list.
-                if charIndex % 2 == 0 then
-                    local band = self.charContent:CreateTexture(nil, "BACKGROUND")
-                    band:SetTexture("Interface\\Buttons\\WHITE8x8")
-                    local bandColor = UI_CONSTANTS.COLORS.ALTERNATING_ROW_BG or {0.15, 0.2, 0.3, 0.35}
-                    band:SetVertexColor(bandColor[1], bandColor[2], bandColor[3], bandColor[4] or 0.35)
-                    band:SetPoint("TOPLEFT",  self.charContent, "TOPLEFT",  -4, -groupStartY + 3)
-                    band:SetPoint("TOPRIGHT", self.charContent, "TOPRIGHT",  4, -groupStartY + 3)
-                    band:SetHeight(yPos - groupStartY)
-                    table.insert(self.charCheckboxes, band)
-                end
-
-                yPos = yPos + 6 -- gap between character groups
-            end
-            self.charContent:SetHeight(math.max(110, yPos))
-
-            if #charList == 0 then
-                if not self.noCharsLabel then
-                    self.noCharsLabel = self.charContent:CreateFontString(nil,"OVERLAY","GameFontNormalSmall")
-                    self.noCharsLabel:SetPoint("TOPLEFT",10,-10); self.noCharsLabel:SetWidth(340)
-                    self.noCharsLabel:SetJustifyH("LEFT"); self.noCharsLabel:SetTextColor(0.6,0.6,0.6,1)
-                end
-                self.noCharsLabel:SetText("No characters found. Log in with each character and open PVPHUB.")
-                self.noCharsLabel:Show()
-            elseif self.noCharsLabel then
-                self.noCharsLabel:Hide()
-            end
-        end
-        f:RefreshCharacterList()
-
-        sChar.contentHeight = 178
-
-        -- ── SECTION: PvP Brackets ─────────────────────────────────────────────
-        local sBrackets = PVPHUB_CreateCollapsibleCard(cardParent, cs, "pvpBrackets", "PVP BRACKETS", {0.65, 0.20, 0.20}, "Interface\\Icons\\achievement_pvp_a_15", RecalcPositions)
-        table.insert(allSections, sBrackets)
-        local bracketsContent = sBrackets.content
-
-        local ratingData = {
-            { key = "rating2v2",     name = "2v2 Arena",    icon = "Interface\\Icons\\achievement_arena_2v2_1" },
-            { key = "rating3v3",     name = "3v3 Arena",    icon = "Interface\\Icons\\achievement_arena_3v3_1" },
-            { key = "ratingShuffle", name = "Solo Shuffle",  icon = "Interface\\Icons\\ability_dualwield" },
-            { key = "ratingBlitz",   name = "Blitz",         icon = "Interface\\Icons\\achievement_bg_killxenemies_generalsroom" },
-            { key = "ratingRBG",     name = "Rated BG",      icon = "Interface\\Icons\\achievement_pvp_a_15" },
-        }
-
-        f.ratingCheckboxes = {}
-        local bY = -10
-        local bX = { 10, 190 }
-        for i, bracket in ipairs(ratingData) do
-            local col = (i % 2 == 0) and 1 or 0
-            local row = math.floor((i - 1) / 2)
-            local cb = SK_Check(bracketsContent, bY - row * 28, "|T"..bracket.icon..":14|t "..bracket.name, function(v)
-                PVPHUB:ToggleCompactRating(bracket.key, v)
-            end)
-            cb:SetPoint("TOPLEFT", bracketsContent, "TOPLEFT", bX[col + 1], bY - row * 28)
-            cb:SetChecked(PVPHUB_SETTINGS.compactMode.showRatings[bracket.key])
-            cb.bracketKey = bracket.key
-            table.insert(f.ratingCheckboxes, cb)
-        end
-
-        sBrackets.contentHeight = 104
-
-        -- ── SECTION: Display Options ──────────────────────────────────────────
-        local sDisplay = PVPHUB_CreateCollapsibleCard(cardParent, cs, "displayOptions", "DISPLAY OPTIONS", {0.20, 0.55, 0.25}, "Interface\\Icons\\Ability_Hunter_EagleEye", RecalcPositions)
-        table.insert(allSections, sDisplay)
-        local displayContent = sDisplay.content
-
-        local displayOptions = {
-            { key = "hideBackground",  label = "Hide Background",   tip = "Remove the window backdrop for a transparent overlay." },
-            { key = "hideInPvP",       label = "Auto-hide in PvP",  tip = "Hide the window automatically during arena/BG matches." },
-            { key = "hideServerNames", label = "Hide Server Names", tip = "Show character names without the realm suffix." },
-        }
-        local doCBs = {}
-        local dY = -10
-        for _, opt in ipairs(displayOptions) do
-            local cb = SK_Check(displayContent, dY, opt.label, function(v)
-                PVPHUB_SETTINGS.compactMode[opt.key] = v
-                if opt.key == "hideBackground" then
-                    if PVPHUB.compactWindow then
-                        if v then
-                            PVPHUB.compactWindow:SetBackdrop(nil)
-                        else
-                            PVPHUB.compactWindow:SetBackdrop({bgFile="Interface\\Buttons\\WHITE8x8",edgeFile="Interface\\Buttons\\WHITE8x8",tile=false,edgeSize=1,insets={left=1,right=1,top=1,bottom=1}})
-                            local c = PVPHUB_SETTINGS.compactMode.backgroundColor or {unpack(UI_CONSTANTS.COLORS.COMPACT_BG)}
-                            PVPHUB.compactWindow:SetBackdropColor(c[1],c[2],c[3],c[4] or 0.8)
-                            PVPHUB.compactWindow:SetBackdropBorderColor(0, 0, 0, 0)
-                        end
-                    end
-                elseif opt.key == "hideInPvP" then
-                    C_Timer.After(0.1, function()
-                        if v and IsInActivePvP() and PVPHUB.compactWindow and PVPHUB.compactWindow:IsShown() then
-                            PVPHUB._compactWindowWasOpenBeforePvP = true
-                            PVPHUB.compactWindow:Hide()
-                        elseif not v and PVPHUB._compactWindowWasOpenBeforePvP then
-                            PVPHUB:CreateCompactWindow()
-                        end
-                    end)
-                elseif opt.key == "hideServerNames" then
-                    if PVPHUB.compactWindow and PVPHUB.UpdateCompactWindow then PVPHUB:UpdateCompactWindow() end
-                end
-            end)
-            cb:SetChecked(PVPHUB_SETTINGS.compactMode[opt.key] or false)
-            doCBs[opt.key] = cb
-            cb:SetScript("OnEnter", function(self)
-                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-                GameTooltip:SetText(opt.label, 1, 1, 1)
-                GameTooltip:AddLine(opt.tip, 0.7, 0.7, 0.7, true)
-                GameTooltip:Show()
-            end)
-            cb:SetScript("OnLeave", function() GameTooltip:Hide() end)
-            dY = dY - 26
-        end
-        f.hideBGCheckbox          = doCBs["hideBackground"]
-        f.hideInPvPCheckbox       = doCBs["hideInPvP"]
-        f.hideServerNamesCheckbox = doCBs["hideServerNames"]
-
-        sDisplay.contentHeight = 92
-
-        -- ── SECTION: Background Color ─────────────────────────────────────────
-        local sBgColor = PVPHUB_CreateCollapsibleCard(cardParent, cs, "backgroundColor", "BACKGROUND COLOR", {0.65, 0.50, 0.10}, "Interface\\Icons\\trade_engineering", RecalcPositions)
-        table.insert(allSections, sBgColor)
-        local bgColorContent = sBgColor.content
-
-        if not PVPHUB_SETTINGS.compactMode.backgroundColor then
-            PVPHUB_SETTINGS.compactMode.backgroundColor = {0.1, 0.1, 0.1, 0.8}
-        end
-
-        local swatchFrame = CreateFrame("Frame", nil, bgColorContent)
-        swatchFrame:SetSize(20, 20)
-        swatchFrame:SetPoint("TOPLEFT", bgColorContent, "TOPLEFT", 10, -14)
-        local colorSwatch = swatchFrame:CreateTexture(nil, "ARTWORK")
-        colorSwatch:SetAllPoints()
-        colorSwatch:SetTexture("Interface\\Buttons\\WHITE8x8")
-        local function RefreshSwatch()
-            local c = PVPHUB_SETTINGS.compactMode.backgroundColor
-            colorSwatch:SetVertexColor(c[1],c[2],c[3],c[4])
-        end
-        RefreshSwatch()
-        SK_Border(swatchFrame)
-
-        local colorBtn, _ = SK_Btn(bgColorContent, "Pick Color", 100, 24)
-        colorBtn:SetPoint("TOPLEFT", bgColorContent, "TOPLEFT", 38, -12)
-        colorBtn:SetScript("OnClick", function()
-            local c = PVPHUB_SETTINGS.compactMode.backgroundColor
-            local function swatchFunc()
-                local r,g,b = ColorPickerFrame:GetColorRGB()
-                local a = ColorPickerFrame:GetColorAlpha()
-                PVPHUB_SETTINGS.compactMode.backgroundColor = {r,g,b,a}
-                RefreshSwatch()
-                if PVPHUB.compactWindow and not PVPHUB_SETTINGS.compactMode.hideBackground then
-                    PVPHUB.compactWindow:SetBackdropColor(r,g,b,a)
-                end
-            end
-            local function cancelFunc(prev)
-                if prev then
-                    PVPHUB_SETTINGS.compactMode.backgroundColor = {prev.r,prev.g,prev.b,prev.a}
-                    RefreshSwatch()
-                    if PVPHUB.compactWindow and not PVPHUB_SETTINGS.compactMode.hideBackground then
-                        PVPHUB.compactWindow:SetBackdropColor(prev.r,prev.g,prev.b,prev.a)
-                    end
-                end
-            end
-            ColorPickerFrame:SetupColorPickerAndShow({
-                swatchFunc = swatchFunc, cancelFunc = cancelFunc,
-                hasOpacity = true, opacity = c[4],
-                r = c[1], g = c[2], b = c[3],
-            })
-        end)
-        f.UpdateColorButtonAppearance = RefreshSwatch
-
-        sBgColor.contentHeight = 46
-
-        -- ── SECTION: Compact Window Font ──────────────────────────────────────
-        local sFont = PVPHUB_CreateCollapsibleCard(cardParent, cs, "compactFont", "COMPACT WINDOW FONT", {0.35, 0.75, 0.75}, "Interface\\Icons\\INV_Misc_Note_04", RecalcPositions)
-        table.insert(allSections, sFont)
-        local fontContent = sFont.content
-
-        if not PVPHUB_SETTINGS.compactMode.selectedFont then
-            PVPHUB_SETTINGS.compactMode.selectedFont = "Friz Quadrata TT"
-        end
-
-        local builtInFonts = {
-            ["Friz Quadrata TT"] = "Fonts\\FRIZQT__.TTF",
-            ["Arial Narrow"]     = "Fonts\\ARIALN.TTF",
-            ["Morpheus"]         = "Fonts\\MORPHEUS.TTF",
-            ["Skurri"]           = "Fonts\\skurri.ttf",
-        }
-
-        -- Resolve a font name to its file path via built-in table then LSM.
-        -- Uses LSM:HashTable (raw path table) instead of LSM:Fetch so that
-        -- global overrides from font-manager addons (e.g. Fontmancer) don't
-        -- hijack the lookup and return the wrong font.
-        local function ResolveFontPath(name)
-            local path = builtInFonts[name]
-            if not path and LibStub then
-                local LSM = LibStub("LibSharedMedia-3.0", true)
-                if LSM and LSM.HashTable then
-                    local fontTable = LSM:HashTable("font")
-                    if fontTable then path = fontTable[name] end
-                end
-            end
-            return path or nil
-        end
-
-        local function ApplyCompactFontChanges()
-            local sel = PVPHUB_SETTINGS.compactMode.selectedFont
-            PVPHUB.compactCurrentFontPath = ResolveFontPath(sel) or FALLBACK_FONT
-            if PVPHUB.compactWindow and PVPHUB.compactWindow:IsShown() and PVPHUB.UpdateCompactWindow then
-                PVPHUB:UpdateCompactWindow()
-            end
-        end
-
-        -- Build font list — only include fonts whose paths WoW can actually load.
-        -- "Friends" (FRIENDS.TTF) was removed from WoW's game files; the validation
-        -- would catch it anyway, but skip it here to avoid generating the error at all.
-        local availableFonts = {}
-        for _, name in ipairs({"Friz Quadrata TT","Arial Narrow","Morpheus","Skurri"}) do
-            if ResolveFontPath(name) then table.insert(availableFonts, name) end
-        end
-        if LibStub then
-            local LSM = LibStub("LibSharedMedia-3.0", true)
-            if LSM then
-                for _, fn in ipairs(LSM:List("font") or {}) do
-                    local found = false
-                    for _, ex in ipairs(availableFonts) do if ex == fn then found = true; break end end
-                    if not found and ResolveFontPath(fn) then
-                        table.insert(availableFonts, fn)
+                        page.Refresh()
                     end
                 end
             end
         end
-        table.sort(availableFonts)
+        for i = n + 1, #rows do
+            rows[i]:Hide()
+            rows[i].onToggle = nil
+        end
+        list:SetHeight(math.max(y, 1))
 
-        local fontDropBtn = PVPHUB_CreateFontPicker(fontContent, fontContent, "TOPLEFT", -15, -10, 220,
-            function() return PVPHUB_SETTINGS.compactMode.selectedFont end,
-            function(v)
-                PVPHUB_SETTINGS.compactMode.selectedFont = v
-                ApplyCompactFontChanges()
-                PVPHubPrint("|cffff0000[PVPHUB]|r Font changed to " .. v)
-            end,
-            function() return availableFonts end)
-        ApplyModernDropdownStyling(fontDropBtn)
-        f.compactFontDropdown = fontDropBtn
-        ApplyCompactFontChanges()
-
-        sFont.contentHeight = 46
-
-        -- ── Footer buttons (fixed, outside the scroll area) ──────────────────
-        local footerSep = f:CreateTexture(nil, "ARTWORK")
-        footerSep:SetColorTexture(borderC[1], borderC[2], borderC[3], 1); footerSep:SetHeight(1)
-        footerSep:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 0, footerHeight)
-        footerSep:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", 0, footerHeight)
-
-        local openMainBtn, _ = SK_Btn(f, "Open Main Window", 140, 26)
-        openMainBtn:SetPoint("BOTTOM", f, "BOTTOM", -44, 12)
-        openMainBtn:SetScript("OnClick", function()
-            SlashCmdList["PVPHUB"]("")
-        end)
-        openMainBtn:SetScript("OnEnter", function(self)
-            GameTooltip:SetOwner(self, "ANCHOR_TOP")
-            GameTooltip:SetText("Open Main Window", 1, 1, 1)
-            GameTooltip:AddLine("Opens the main PVPHUB character list.", 0.7, 0.7, 0.7, true)
-            GameTooltip:Show()
-        end)
-        openMainBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
-
-        local closeFooterBtn, _ = SK_Btn(f, "Close", 80, 26)
-        closeFooterBtn:SetPoint("LEFT", openMainBtn, "RIGHT", 8, 0)
-        closeFooterBtn:SetScript("OnClick", function() f:Hide() end)
-
-        RecalcPositions()
-
-        PVPHUB.compactSettingsWindow = f
+        empty:SetShown(#keys == 0)
+        empty:SetText(query ~= "" and "No characters match"
+            or "No characters found. Log in with each character and open PVPHUB.")
+        hideRow.switch:SetChecked(cm.hideNoRating or false)
     end
 
-    -- Sync live values every time the window opens
+    search:HookScript("OnTextChanged", function() page.Refresh() end)
+end
+
+-- --------------------------------------------------------------------------
+-- Brackets and Behavior pages
+-- --------------------------------------------------------------------------
+
+local function PaintBracketTile(t)
+    local on = PVPHUB_SETTINGS.compactMode.showRatings[t.key] and true or false
+    local hover = t:IsMouseOver()
+    if on then
+        local c = PVPHUB.UI.ThemeColor()
+        t.fill:SetVertexColor(c[1], c[2], c[3], hover and 0.24 or 0.16)
+        t.ring:SetVertexColor(c[1], c[2], c[3], 0.9)
+    else
+        t.fill:SetVertexColor(1, 1, 1, hover and 0.06 or 0.03)
+        t.ring:SetVertexColor(1, 1, 1, hover and 0.25 or 0.1)
+    end
+    t.icon:SetDesaturated(not on)
+    t.icon:SetAlpha(on and 1 or 0.6)
+    local tc = on and 1 or 0.65
+    t.label:SetTextColor(tc, tc, tc)
+    t.state:SetText(on and "Shown" or "Hidden")
+end
+
+local function BuildBracketsPage(page, width)
+    local UI = PVPHUB.UI
+    local caption = SettingsText(page, 12, SET_MUTED)
+    caption:SetPoint("TOPLEFT", page, "TOPLEFT", 0, -2)
+    caption:SetText("Columns on the overlay")
+
+    local gap, tileH = 10, 64
+    local tileW = math.floor((width - gap * 2) / 3)
+    local tiles = {}
+    for i, bracket in ipairs(BRACKET_TILES) do
+        local t = CreateFrame("Button", nil, page)
+        t:SetSize(tileW, tileH)
+        local col, row = (i - 1) % 3, math.floor((i - 1) / 3)
+        t:SetPoint("TOPLEFT", caption, "BOTTOMLEFT", col * (tileW + gap), -10 - row * (tileH + gap))
+        t.key = bracket.key
+        t.fill = UI.CreatePanel(t, "fill", "BACKGROUND", 0, 8)
+        t.ring = UI.CreatePanel(t, "ring", "BORDER", 0, 8)
+        t.icon = t:CreateTexture(nil, "ARTWORK")
+        t.icon:SetSize(26, 26)
+        t.icon:SetPoint("LEFT", t, "LEFT", 12, 0)
+        t.icon:SetTexture(bracket.icon)
+        t.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+        t.label = SettingsText(t, 13)
+        t.label:SetPoint("TOPLEFT", t.icon, "TOPRIGHT", 10, 0)
+        t.label:SetText(bracket.name)
+        t.state = SettingsText(t, 11, SET_MUTED)
+        t.state:SetPoint("TOPLEFT", t.label, "BOTTOMLEFT", 0, -4)
+        t:SetScript("OnClick", function(self)
+            PVPHUB:ToggleCompactRating(self.key, not PVPHUB_SETTINGS.compactMode.showRatings[self.key])
+            PaintBracketTile(self)
+        end)
+        t:SetScript("OnEnter", PaintBracketTile)
+        t:SetScript("OnLeave", PaintBracketTile)
+        tiles[i] = t
+    end
+
+    local hint = SettingsText(page, 11, SET_MUTED)
+    hint:SetPoint("TOPLEFT", caption, "BOTTOMLEFT", 0, -10 - 2 * (tileH + gap) - 6)
+    hint:SetText("They show in this order. Sort the overlay from its toolbar.")
+
+    function page.Refresh()
+        for _, t in ipairs(tiles) do PaintBracketTile(t) end
+    end
+end
+
+local function BuildBehaviorPage(f, page, width)
+    local cm = PVPHUB_SETTINGS.compactMode
+    local pvpRow = OptionRow(page, width, "Auto-hide in PvP",
+        "Hidden during arenas and battlegrounds, back afterwards.", function(on)
+        cm.hideInPvP = on
+        C_Timer.After(0.1, function()
+            if on and IsInActivePvP() and PVPHUB.compactWindow and PVPHUB.compactWindow:IsShown() then
+                PVPHUB._compactWindowWasOpenBeforePvP = true
+                PVPHUB.compactWindow:Hide()
+            elseif not on and PVPHUB._compactWindowWasOpenBeforePvP then
+                PVPHUB:CreateCompactWindow()
+            end
+            f.SyncOverlaySwitch()
+        end)
+    end)
+    pvpRow:SetPoint("TOPLEFT", page, "TOPLEFT", 0, 0)
+
+    local namesRow = OptionRow(page, width, "Hide server names",
+        "Only the character's name, without its realm.", function(on)
+        cm.hideServerNames = on
+        if PVPHUB.compactWindow then PVPHUB:UpdateCompactWindow() end
+    end)
+    namesRow:SetPoint("TOPLEFT", pvpRow, "BOTTOMLEFT", 0, 0)
+
+    f.hideInPvPCheckbox = pvpRow.switch
+    f.hideServerNamesCheckbox = namesRow.switch
+
+    function page.Refresh()
+        pvpRow.switch:SetChecked(cm.hideInPvP or false)
+        namesRow.switch:SetChecked(cm.hideServerNames or false)
+    end
+end
+
+-- --------------------------------------------------------------------------
+-- The window
+-- --------------------------------------------------------------------------
+
+local function BuildCompactSettings()
+    local UI = PVPHUB.UI
+    local cm = PVPHUB_SETTINGS.compactMode
+    cm.backgroundColor = cm.backgroundColor or { 0.1, 0.1, 0.1, 0.8 }
+    cm.selectedFont = cm.selectedFont or "Friz Quadrata TT"
+    PVPHUB.compactCurrentFontPath = ResolveCompactFont(cm.selectedFont) or FALLBACK_FONT
+    PVPHUB_SETTINGS.compactWindowScale = math.max(1.0, math.min(2.0, PVPHUB_SETTINGS.compactWindowScale or 1.0))
+
+    -- Named uniquely per build: a theme change tears this window down and
+    -- builds it again (RefreshCompactTheme), and reusing a global frame
+    -- name for a second CreateFrame is unreliable.
+    PVPHUB._compactSettingsSeq = (PVPHUB._compactSettingsSeq or 0) + 1
+    local frameName = "PVPHUBCompactSettings" .. PVPHUB._compactSettingsSeq
+    local f = CreateFrame("Frame", frameName, UIParent)
+    f:SetFrameStrata("DIALOG")
+    f:SetSize(SET_W, SET_H)
+    f:SetPoint("CENTER")
+    f:SetMovable(true)
+    f:EnableMouse(true)
+    f:RegisterForDrag("LeftButton")
+    f:SetClampedToScreen(true)
+    f:SetScript("OnDragStart", f.StartMoving)
+    f:SetScript("OnDragStop", f.StopMovingOrSizing)
+    table.insert(UISpecialFrames, frameName)
+    UI.SkinWindow(f)
+
+    -- Header: title, the overlay's on/off switch, close
+    f.title = f:CreateFontString(nil, "OVERLAY")
+    f.title:SetFont("Interface\\AddOns\\PVPHUB\\media\\fonts\\Prototype.ttf", 18, "")
+    f.title:SetPoint("LEFT", f, "TOPLEFT", SET_PAD, -SET_HEADER_H / 2)
+    f.title:SetText("Streamer Mode")
+    f.title:SetTextColor(unpack(UI_CONSTANTS.COLORS.TITLE_COLOR))
+    local brand = SettingsText(f, 12, SET_MUTED)
+    brand:SetPoint("LEFT", f.title, "RIGHT", 8, -1)
+    brand:SetText("PVPHUB")
+
+    local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
+    close:SetSize(26, 26)
+    close:SetPoint("RIGHT", f, "TOPRIGHT", -14, -SET_HEADER_H / 2)
+    close:SetScript("OnClick", function()
+        if PVPHUB.compactWindow and PVPHUB.compactWindow:IsShown() then
+            PVPHUB:UpdateCompactWindow()
+        end
+        f:Hide()
+    end)
+    UI.SkinCloseButton(close)
+
+    f.overlaySwitch = SettingsSwitch(f, function(on)
+        if on then
+            PVPHUB:CreateCompactWindow()
+        elseif PVPHUB.compactWindow then
+            PVPHUB_SETTINGS.compactWindowStayOpen = false
+            PVPHUB.compactWindow:Hide()
+        end
+        f.SyncOverlaySwitch()
+    end)
+    f.overlaySwitch:SetPoint("RIGHT", close, "LEFT", -16, 0)
+    local overlayLabel = SettingsText(f, 12, SET_MUTED)
+    overlayLabel:SetPoint("RIGHT", f.overlaySwitch, "LEFT", -8, 0)
+    overlayLabel:SetText("Overlay shown")
+
+    -- The switch follows the overlay, also when it's closed from its own
+    -- toolbar (RefreshSettingsToggle) or kept hidden in PvP
+    function f.SyncOverlaySwitch()
+        local cw = PVPHUB.compactWindow
+        f.overlaySwitch:SetChecked(cw and cw:IsShown() or false)
+        if cw then cw.RefreshSettingsToggle = f.SyncOverlaySwitch end
+    end
+
+    local headLine = f:CreateTexture(nil, "ARTWORK")
+    headLine:SetColorTexture(1, 1, 1, 0.07)
+    headLine:SetHeight(1)
+    headLine:SetPoint("TOPLEFT", f, "TOPLEFT", 1, -SET_HEADER_H)
+    headLine:SetPoint("TOPRIGHT", f, "TOPRIGHT", -1, -SET_HEADER_H)
+    local sideLine = f:CreateTexture(nil, "ARTWORK")
+    sideLine:SetColorTexture(1, 1, 1, 0.07)
+    sideLine:SetWidth(1)
+    sideLine:SetPoint("TOPLEFT", f, "TOPLEFT", SET_SIDEBAR_W, -SET_HEADER_H)
+    sideLine:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", SET_SIDEBAR_W, 1)
+
+    -- Sidebar and pages
+    f.pages, f.nav = {}, {}
+    for i, info in ipairs(SETTINGS_PAGES) do
+        local b = NavButton(f, info.label, info.icon)
+        b:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -(SET_HEADER_H + 12 + (i - 1) * 38))
+        b:SetScript("OnClick", function() f.ShowPage(info.key) end)
+        f.nav[info.key] = b
+        local page = CreateFrame("Frame", nil, f)
+        page:SetPoint("TOPLEFT", f, "TOPLEFT", SET_SIDEBAR_W + SET_PAD, -(SET_HEADER_H + 16))
+        page:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -SET_PAD, 16)
+        page:Hide()
+        f.pages[info.key] = page
+    end
+    local openMain = NavButton(f, "Open PVPHUB", "Interface\\AddOns\\PVPHUB\\media\\PVPHUB.png")
+    openMain.icon:SetTexCoord(0, 1, 0, 1)
+    openMain:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 12, 12)
+    openMain:SetScript("OnClick", function() SlashCmdList["PVPHUB"]("") end)
+
+    local pageW = SET_W - SET_SIDEBAR_W - SET_PAD * 2
+    BuildAppearancePage(f, f.pages.appearance, pageW)
+    BuildCharactersPage(f, f.pages.characters, pageW)
+    BuildBracketsPage(f.pages.brackets, pageW)
+    BuildBehaviorPage(f, f.pages.behavior, pageW)
+
+    function f.ShowPage(key)
+        if not f.pages[key] then key = "appearance" end
+        PVPHUB_SETTINGS.compactSettingsPage = key
+        for k, page in pairs(f.pages) do page:SetShown(k == key) end
+        for k, b in pairs(f.nav) do
+            b.selected = (k == key)
+            PaintNavButton(b)
+        end
+        f.pages[key].Refresh()
+    end
+    function f:RefreshCharacterList() self.pages.characters.Refresh() end
+    return f
+end
+
+function PVPHUB:ShowCompactSettings()
+    PVPHUB:EnsureCompactModeDefaults()
     local w = PVPHUB.compactSettingsWindow
-    w:RefreshCharacterList()
-    for _, cb in ipairs(w.ratingCheckboxes or {}) do
-        if cb.bracketKey then cb:SetChecked(PVPHUB_SETTINGS.compactMode.showRatings[cb.bracketKey]) end
+    if w and w:IsShown() then
+        w:Hide()
+        return
     end
-    if w.UpdateColorButtonAppearance then w.UpdateColorButtonAppearance() end
-
-    PVPHUB.compactSettingsWindow:Show()
+    if not w then
+        w = BuildCompactSettings()
+        PVPHUB.compactSettingsWindow = w
+    end
+    w.SyncOverlaySwitch()
+    w.ShowPage(PVPHUB_SETTINGS.compactSettingsPage or "appearance")
+    w:Show()
 end
 
 -- CreateFrame with a name string always registers that name in _G. Named

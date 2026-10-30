@@ -42,4 +42,7 @@ PVPHUB_core.lua
 modules\compact.lua
 modules\popups.lua
 modules\ui_kit.lua
+modules\seasons.lua
+modules\season_tab.lua
+modules\characters.lua
 modules\cards.lua

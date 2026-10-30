@@ -137,6 +137,74 @@ function PVPHUB.FlashRegion(region)
 end
 
 -- --------------------------------------------------------------------------
+-- Ladder rank (7.0)
+-- --------------------------------------------------------------------------
+-- The rank Blizzard's PvP window shows ("Preservation: Rank #207"):
+-- GetPersonalRatedInfo's ranking, saved with each bracket's stats by
+-- SaveBracketStats (per spec for Shuffle and Blitz). The game only reports
+-- it while on the ladder, and only for the logged-in character's current
+-- spec, so other characters' ranks are as of when they last played; ranks
+-- move while others play, which is why the lines below say their age.
+
+local SHUFFLE_OR_BLITZ = { ratingShuffle = true, ratingBlitz = true }
+
+-- The saved rank for a bracket (and spec, for Shuffle/Blitz) of this
+-- season, and when it was saved; nil without one.
+function PVPHUB.GetLadderRank(charKey, bracketKey, specID)
+    local data = PVPHUB_DB and PVPHUB_DB[charKey]
+    local stats = data and data.bracketStats and data.bracketStats[bracketKey]
+    if SHUFFLE_OR_BLITZ[bracketKey] then
+        stats = type(stats) == "table" and specID and stats[specID]
+    end
+    if type(stats) ~= "table" then return nil end
+    local season = (C_PvP.GetUIDisplaySeason and C_PvP.GetUIDisplaySeason()) or 0
+    if season > 0 and stats.season and stats.season ~= season then return nil end
+    local rank = tonumber(stats.ranking)
+    if not rank or rank <= 0 then return nil end
+    return rank, stats.lastUpdated
+end
+
+-- "Rank #207", with "(3 days ago)" when it was saved a day or more ago
+local function RankText(rank, savedAt)
+    local text = "Rank #" .. BreakUpLargeNumbers(rank)
+    local age = savedAt and (GetServerTime() - savedAt) or 0
+    if age >= 86400 then
+        local days = math.floor(age / 86400)
+        text = text .. string.format(" |cff888888(%d %s ago)|r", days, days == 1 and "day" or "days")
+    end
+    return text
+end
+
+-- The rating tooltip's rank lines for a bracket: one for 2v2/3v3/RBG, one
+-- per ranked spec for Shuffle/Blitz (best first, with the spec's icon).
+-- Each is { icon, text }.
+function PVPHUB.LadderRankLines(charKey, bracketKey)
+    local lines = {}
+    if SHUFFLE_OR_BLITZ[bracketKey] then
+        local data = PVPHUB_DB and PVPHUB_DB[charKey]
+        local stats = data and data.bracketStats and data.bracketStats[bracketKey]
+        for specID in pairs(type(stats) == "table" and stats or {}) do
+            local rank, savedAt = PVPHUB.GetLadderRank(charKey, bracketKey, specID)
+            if rank then
+                local info = PVPHUB._GetCachedSpecInfo and PVPHUB._GetCachedSpecInfo(specID)
+                lines[#lines + 1] = {
+                    icon = info and info.icon,
+                    text = string.format("|cffffffff%s:|r |cffffd100%s|r", info and info.name or "Spec", RankText(rank, savedAt)),
+                    rank = rank,
+                }
+            end
+        end
+        table.sort(lines, function(a, b) return a.rank < b.rank end)
+    else
+        local rank, savedAt = PVPHUB.GetLadderRank(charKey, bracketKey)
+        if rank then
+            lines[1] = { text = "|cffffd100" .. RankText(rank, savedAt) .. "|r", rank = rank }
+        end
+    end
+    return lines
+end
+
+-- --------------------------------------------------------------------------
 -- Data persistence
 -- --------------------------------------------------------------------------
 
@@ -161,6 +229,10 @@ local function SaveBracketStats(charKey)
 
     PVPHUB_DB[charKey]              = PVPHUB_DB[charKey]             or {}
     PVPHUB_DB[charKey].bracketStats = PVPHUB_DB[charKey].bracketStats or {}
+
+    -- 7.0: archive what's stored before it's overwritten below. On the first
+    -- login of a new season these are last season's final numbers.
+    if PVPHUB.Seasons then PVPHUB.Seasons.SaveStats(charKey, false) end
 
     local season = (C_PvP.GetUIDisplaySeason and C_PvP.GetUIDisplaySeason()) or 0
     local specID = GetCurrentSpecID()
@@ -205,6 +277,7 @@ local function SaveBracketStats(charKey)
                     lost        = played - won,
                     seasonBest  = N(seasonBest),
                     pvpTier     = pvpTier,
+                    ranking     = ranking,   -- 7.0: this spec's ladder rank
                     season      = season,
                     lastUpdated = now,
                 }
@@ -247,6 +320,9 @@ local function SaveBracketStats(charKey)
             end
         end
     end
+
+    -- 7.0: and the fresh numbers, so the season archive is always current
+    if PVPHUB.Seasons then PVPHUB.Seasons.SaveStats(charKey) end
 end
 
 -- CapturePreMatchSnapshot: snapshot current ratings before a match starts so
@@ -298,6 +374,8 @@ local function SaveTitleProgress(charKey)
     if not PVPHUB_DB or not charKey then return end
     PVPHUB_DB[charKey]               = PVPHUB_DB[charKey]               or {}
     PVPHUB_DB[charKey].titleProgress = PVPHUB_DB[charKey].titleProgress or {}
+    -- 7.0: archive the stored progress before it's re-read below
+    if PVPHUB.Seasons then PVPHUB.Seasons.BeforeTitleRefresh(charKey) end
 
     for key, def in pairs(TITLE_ACHIEVEMENTS) do
         local ok, id, _, _, completed, month, day, year, description, _, icon, rewardText =
@@ -322,6 +400,8 @@ local function SaveTitleProgress(charKey)
     end
 
     if PVPHUB.UpdateTitleTracker then PVPHUB:UpdateTitleTracker() end
+    -- 7.0: keep the season archive's title progress current
+    if PVPHUB.Seasons then PVPHUB.Seasons.SaveStats(charKey) end
 end
 
 -- --------------------------------------------------------------------------
