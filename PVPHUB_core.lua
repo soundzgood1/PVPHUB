@@ -13615,7 +13615,7 @@ StaticPopupDialogs["PVPHUB_RESTORE_LAST_WIPE"] = {
 
 -- StaticPopup for confirming reset all data
 StaticPopupDialogs["PVPHUB_RESET_ALL_DATA"] = {
-    text = "RESET ALL CHARACTER DATA\n\nThis will permanently delete ALL character PvP data including ratings, honor, conquest, and currencies.\n\n|cffFF0000This action cannot be undone!|r\n\nAre you sure you want to continue?",
+    text = "RESET ALL CHARACTER DATA\n\nThis will permanently delete ALL character PvP data including ratings, honor, conquest, and currencies, and reset PVPHUB's settings (window size, position, theme and columns are kept).\n\n|cffFF0000This action cannot be undone!|r\n\nYour interface reloads afterwards. Are you sure you want to continue?",
     button1 = "Yes, Reset Everything",
     button2 = "Cancel",
     OnAccept = function()
@@ -13657,20 +13657,14 @@ StaticPopupDialogs["PVPHUB_RESET_ALL_DATA"] = {
             mainWindow = mainWindow or {},
             disableHonorWarnings = disableHonorWarnings or false
         }
-        
-        -- Refresh the UI if main window is open
-        if PVPHUB.window and PVPHUB.window.UpdateContent then
-            PVPHUB.window:UpdateContent()
-        end
-        
-        -- Refresh compact window if it's open
-        if PVPHUB.compactWindow and PVPHUB.compactWindow.UpdateContent then
-            PVPHUB.compactWindow:UpdateContent()
-        end
-        
-        -- Show confirmation message
-        PVPHubPrint("|cffff0000[PVPHUB]|r All character data has been reset!")
-        PlaySound(8959) -- Attention sound
+
+        -- Reload, so every part of PVPHUB starts over with its defaults: the
+        -- table above only has the window's, the rest (queue timer, Streamer
+        -- Mode, ...) is filled in as the addon loads. Without the reload
+        -- their settings broke ("attempt to index field 'queueTimer'") and
+        -- their menus stayed empty until the next /reload.
+        PVPHubPrint("|cffff0000[PVPHUB]|r All character data has been reset. Reloading...")
+        ReloadUI()
     end,
     OnCancel = function()
         -- Do nothing - user cancelled

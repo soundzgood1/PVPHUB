@@ -189,6 +189,10 @@ local DISPLAY_NAME_TO_BRACKET_KEY = {
     ["Rated BG"] = "ratingRBG",
 }
 
+-- Shuffle and Blitz are rated per spec: their MMR belongs to the current
+-- spec only. 2v2, 3v3 and Rated BG are rated per character.
+local PER_SPEC_BRACKETS = { ratingShuffle = true, ratingBlitz = true }
+
 -- Returns the last recorded MMR (number > 0) for a given queue display name,
 -- or nil when none is stored yet.
 local function GetStoredMMR(displayName)
@@ -207,6 +211,7 @@ local function GetStoredMMR(displayName)
 
     -- Resolve current spec ID (deprecated-API safe, see modules/compat.lua)
     local specID = PVPHUB.Compat.GetCurrentSpecID()
+    local perSpec = PER_SPEC_BRACKETS[bracketKey]
 
     -- Primary: per-spec MMR stored by the MMR tracker (actual MMR, not CR)
     local lastKnown = charData.lastKnownMMR and charData.lastKnownMMR[bracketKey]
@@ -216,7 +221,10 @@ local function GetStoredMMR(displayName)
         if entry and entry.mmr and entry.mmr > 0 then
             return entry.mmr
         end
-        -- Fall back to the most-recently recorded spec for this bracket
+    end
+    -- Fall back to the most-recently recorded spec for this bracket (not for
+    -- Shuffle/Blitz: another spec's MMR says nothing about this one)
+    if lastKnown and not perSpec then
         local bestTs, bestMMR = 0, nil
         for _, e in pairs(lastKnown) do
             if type(e) == "table" and e.mmr and e.mmr > 0 then
@@ -227,8 +235,10 @@ local function GetStoredMMR(displayName)
         if bestMMR then return bestMMR end
     end
 
-    -- Secondary fallback: flat mmrData (written by arena TrackMMRChange)
+    -- Secondary fallback: mmrData (written by TrackMMRChange), stored per
+    -- spec for Shuffle/Blitz
     local mmrData = charData.mmrData and charData.mmrData[bracketKey]
+    if perSpec then mmrData = mmrData and specID and mmrData[specID] end
     if mmrData and mmrData.mmr and mmrData.mmr > 0 then
         return mmrData.mmr
     end
@@ -255,6 +265,14 @@ local function GetLastMMRChange(displayName)
 
     local history = charData.mmrHistory[bracketKey]
     local entry = history[#history]
+    if PER_SPEC_BRACKETS[bracketKey] then
+        -- Shuffle/Blitz: the current spec's last match
+        local specID = PVPHUB.Compat.GetCurrentSpecID()
+        entry = nil
+        for i = #history, 1, -1 do
+            if specID and history[i].specID == specID then entry = history[i] break end
+        end
+    end
     if not entry or not entry.preMatchMMR or not entry.postMatchMMR then return nil end
 
     -- Ignore stale data left over from a prior PvP season.
@@ -598,6 +616,16 @@ end
 -- around as the numbers in it change.
 local COMPACT_CARD_WIDTH = 200
 
+-- Every label of the timer, exempt from Fontmancer's global SetFont hook the
+-- way core's SafeSetFont does it (IsFontmancerPreview, set before the first
+-- SetFont). Without it Fontmancer put its own font on every SetFont, so the
+-- font picked under Style never showed on the timer.
+local function NewFontString(parent)
+    local fs = parent:CreateFontString(nil, "OVERLAY")
+    fs.IsFontmancerPreview = true
+    return fs
+end
+
 -- Width of a label's text in the card's own units, measured on an off-screen
 -- probe at the size the text is actually drawn at (font size x the card's
 -- Size scale). The label's own GetStringWidth() came out about 14% narrower
@@ -610,7 +638,7 @@ local function MeasureText(fs, scale)
         local holder = CreateFrame("Frame", nil, UIParent)
         holder:SetSize(1, 1)
         holder:SetPoint("BOTTOMRIGHT", UIParent, "TOPLEFT", -100, 100)  -- off screen
-        probe = holder:CreateFontString(nil, "OVERLAY")
+        probe = NewFontString(holder)
         probe:SetWordWrap(false)
     end
     local path, size, flags = fs:GetFont()
@@ -728,7 +756,7 @@ function PVPHUB.QueueTimer:CreateFrame()
     frame.icon = icon
 
     -- Queue name label
-    local nameLabel = header:CreateFontString(nil, "OVERLAY")
+    local nameLabel = NewFontString(header)
     nameLabel:SetFont("Fonts\\FRIZQT__.TTF", 13, "OUTLINE")
     nameLabel:SetPoint("LEFT",  icon,   "RIGHT", 5, 0)
     nameLabel:SetPoint("RIGHT", header, "RIGHT", -5, 0)
@@ -779,7 +807,7 @@ function PVPHUB.QueueTimer:CreateFrame()
         -- tail instead of the card growing to fit it — the card is sized to
         -- the text (via ResizeToContent/GetStringWidth), not the other way
         -- around, so nothing here should ever constrain its own width.
-        local nameLabel = row:CreateFontString(nil, "OVERLAY")
+        local nameLabel = NewFontString(row)
         nameLabel:SetFont("Fonts\\FRIZQT__.TTF", 13, "OUTLINE")
         nameLabel:SetPoint("TOPLEFT", row, "TOPLEFT", PAD_X, -PAD_Y)
         nameLabel:SetJustifyH("LEFT")
@@ -789,7 +817,7 @@ function PVPHUB.QueueTimer:CreateFrame()
 
         -- "MMR: X → Y (±N)" line — only populated/shown by the "Detail"
         -- style; sits between the name and the avg-wait line when present.
-        local mmrLine = row:CreateFontString(nil, "OVERLAY")
+        local mmrLine = NewFontString(row)
         mmrLine:SetFont("Fonts\\FRIZQT__.TTF", 11, "OUTLINE")
         mmrLine:SetPoint("TOPLEFT", nameLabel, "BOTTOMLEFT", 0, -LINE_GAP)
         mmrLine:SetJustifyH("LEFT")
@@ -798,7 +826,7 @@ function PVPHUB.QueueTimer:CreateFrame()
 
         -- Single-line summary used by the "Compact" style:
         -- "Name (MMR)   Avg Xm   Q M:SS" — everything on one row.
-        local compactLine = row:CreateFontString(nil, "OVERLAY")
+        local compactLine = NewFontString(row)
         compactLine:SetFont("Fonts\\FRIZQT__.TTF", 12, "OUTLINE")
         compactLine:SetPoint("TOPLEFT", row, "TOPLEFT", PAD_X, -PAD_Y)
         compactLine:SetJustifyH("LEFT")
@@ -808,26 +836,26 @@ function PVPHUB.QueueTimer:CreateFrame()
         row.compactLine = compactLine
 
         -- "Avg Wait:" sub-line
-        local avgLabel = row:CreateFontString(nil, "OVERLAY")
+        local avgLabel = NewFontString(row)
         avgLabel:SetFont("Fonts\\FRIZQT__.TTF", 11, "OUTLINE")
         avgLabel:SetPoint("TOPLEFT", nameLabel, "BOTTOMLEFT", 0, -LINE_GAP)
         avgLabel:SetText("Avg Wait:")
         row.avgLabel = avgLabel
 
-        local avgValue = row:CreateFontString(nil, "OVERLAY")
+        local avgValue = NewFontString(row)
         avgValue:SetFont("Fonts\\FRIZQT__.TTF", 11, "OUTLINE")
         avgValue:SetPoint("LEFT", avgLabel, "RIGHT", 5, 0)
         avgValue:SetText("--")
         row.avgValue = avgValue
 
         -- "In Queue:" sub-line
-        local inQLabel = row:CreateFontString(nil, "OVERLAY")
+        local inQLabel = NewFontString(row)
         inQLabel:SetFont("Fonts\\FRIZQT__.TTF", 11, "OUTLINE")
         inQLabel:SetPoint("TOPLEFT", avgLabel, "BOTTOMLEFT", 0, -LINE_GAP)
         inQLabel:SetText("In Queue:")
         row.inQLabel = inQLabel
 
-        local inQValue = row:CreateFontString(nil, "OVERLAY")
+        local inQValue = NewFontString(row)
         inQValue:SetFont("Fonts\\FRIZQT__.TTF", 11, "OUTLINE")
         inQValue:SetPoint("LEFT", inQLabel, "RIGHT", 5, 0)
         inQValue:SetText("--")

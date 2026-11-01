@@ -12,7 +12,6 @@ local GetShuffleDisplayInfo         = PVPHUB._GetShuffleDisplayInfo
 local ApplyModernScrollbarStyling   = PVPHUB._ApplyModernScrollbarStyling
 local ApplyModernDropdownStyling    = PVPHUB._ApplyModernDropdownStyling
 local FormatNumber                  = PVPHUB._FormatNumber
-local PVP_BRACKETS                  = PVPHUB._PVP_BRACKETS
 
 -- Season-aware: last season's numbers are kept in the DB (they are no longer
 -- deleted on a season change — see IsSeasonDataCurrent in core.lua), so this
@@ -121,6 +120,22 @@ local function MigratePinnedSpecsSchema()
     end
 end
 
+-- Pins the spec a character shown as a plain row was showing: its active
+-- spec if that's rated; otherwise whichever spec has the best rating, so a
+-- character caught mid-respec (active spec rated 0, like Elemental right
+-- after swapping off a rated Restoration) doesn't just vanish from the
+-- display until the user manually re-pins it.
+local function PinShownSpec(charKey, data)
+    local currentSpecID = data.specID or data.lastActiveSpecID
+    local specToSeed = CharacterHasRatingForSpec(data, currentSpecID) and currentSpecID or GetBestRatedSpec(data)
+    if specToSeed then
+        local cm = PVPHUB_SETTINGS.compactMode
+        cm.pinnedSpecs = cm.pinnedSpecs or {}
+        cm.pinnedSpecs[charKey] = cm.pinnedSpecs[charKey] or {}
+        cm.pinnedSpecs[charKey][specToSeed] = true
+    end
+end
+
 -- A character that has earned a rating in any spec "graduates" from the single
 -- combined row (governed by the plain selectedChars checkbox, which always
 -- tracks whatever spec is currently active — showing 0 the moment you respec
@@ -150,18 +165,7 @@ local function PromoteToMultiSpecIfNeeded(charKey, data)
     end
 
     if wasSelected then
-        -- Prefer the currently-active spec if it's actually rated; otherwise
-        -- fall back to whichever spec has the best rating, so a character
-        -- caught mid-respec (active spec rated 0, like Elemental right after
-        -- swapping off a rated Restoration) doesn't just vanish from the
-        -- display until the user manually re-pins it.
-        local currentSpecID = data.specID or data.lastActiveSpecID
-        local specToSeed = CharacterHasRatingForSpec(data, currentSpecID) and currentSpecID or GetBestRatedSpec(data)
-        if specToSeed then
-            cm.pinnedSpecs = cm.pinnedSpecs or {}
-            cm.pinnedSpecs[charKey] = cm.pinnedSpecs[charKey] or {}
-            cm.pinnedSpecs[charKey][specToSeed] = true
-        end
+        PinShownSpec(charKey, data)
     end
 end
 
@@ -779,13 +783,15 @@ end
 -- it's the only row for that character and may land next to a completely
 -- unrelated character after sorting, so it must render as a plain anchor row
 -- itself rather than visually latching onto whatever happens to be above it.
-local function ConfigureCompactRow(row, charKey, data, yOffset, windowWidth, pinnedSpecID, isSubRow)
+-- Fills in the texts only; PlaceCompactRow lays them out once every row is
+-- filled, since the columns are as wide as their widest content.
+local function ConfigureCompactRow(row, charKey, data, yOffset, pinnedSpecID, isSubRow)
     local C = PVPHUB_CONSTANTS.COMPACT_WINDOW
     local fontPath = PVPHUB.compactCurrentFontPath
     row.charKey = charKey
     row.data = data
 
-    row:SetSize((windowWidth or C.MIN_WIDTH) - 16, C.ROW_HEIGHT)
+    row:SetHeight(C.ROW_HEIGHT)
     row:ClearAllPoints()
     row:SetPoint("TOPLEFT", 0, -yOffset)
 
@@ -796,7 +802,7 @@ local function ConfigureCompactRow(row, charKey, data, yOffset, windowWidth, pin
     -- Sub-rows are indented with the tree connector so they read as belonging
     -- to the row directly above them, instead of looking like an unrelated
     -- duplicate entry once rows are grouped adjacently.
-    local nameIndent = isSubRow and 16 or 5
+    row.nameIndent = isSubRow and 16 or 5
     row.connectorV:SetShown(isSubRow == true)
     row.connectorH:SetShown(isSubRow == true)
 
@@ -804,9 +810,6 @@ local function ConfigureCompactRow(row, charKey, data, yOffset, windowWidth, pin
     -- spec's icon instead of the character's currently-active one, so the
     -- duplicated rows for one character are visually distinguishable.
     local nameText = row.nameText
-    nameText:ClearAllPoints()
-    nameText:SetPoint("LEFT", nameIndent, 0)
-    nameText:SetWidth(C.BASE_WIDTH - 15 - (nameIndent - 5)) -- Leave some padding
     if pinnedSpecID then
         local pinnedSpecIcon = ""
         local _si = GetCachedSpecInfo(pinnedSpecID)
@@ -826,13 +829,8 @@ local function ConfigureCompactRow(row, charKey, data, yOffset, windowWidth, pin
     -- Use compact-specific font
     SafeSetFont(nameText, fontPath, 11)
 
-    row.nameTooltipBtn:ClearAllPoints()
-    row.nameTooltipBtn:SetPoint("LEFT", nameIndent, 0)
-    row.nameTooltipBtn:SetSize(C.BASE_WIDTH - 15, C.ROW_HEIGHT)
-
-    -- Rating columns with dynamic positioning — same order as headers
+    -- Rating columns — same order as headers
     local showRatings = PVPHUB_SETTINGS.compactMode and PVPHUB_SETTINGS.compactMode.showRatings
-    local columnIndex = 0
     for i, bracket in ipairs(COMPACT_BRACKET_ORDER) do
         local slot = row.slots[i]
         if showRatings and showRatings[bracket.key] then
@@ -873,9 +871,6 @@ local function ConfigureCompactRow(row, charKey, data, yOffset, windowWidth, pin
                 end
             end
 
-            local xPos = C.BASE_WIDTH + (columnIndex * C.COLUMN_WIDTH) - 5
-            slot.text:ClearAllPoints()
-            slot.text:SetPoint("LEFT", xPos, 0)
             slot.text:SetText(display)
             SafeSetFont(slot.text, fontPath, 11)
             slot.text:Show()
@@ -887,19 +882,12 @@ local function ConfigureCompactRow(row, charKey, data, yOffset, windowWidth, pin
 
             -- Star icon for multi-spec ratings, to the right of the centered rating
             if isMultiSpec then
-                slot.star:ClearAllPoints()
-                slot.star:SetPoint("LEFT", xPos + (C.COLUMN_WIDTH / 2) + 15, 0)
                 SafeSetFont(slot.star, fontPath, 11)
                 slot.star:Show()
             else
                 slot.star:Hide()
             end
-
-            slot.hoverBtn:ClearAllPoints()
-            slot.hoverBtn:SetPoint("LEFT", xPos, 0)
             slot.hoverBtn:Show()
-
-            columnIndex = columnIndex + 1
         else
             slot.text:Hide()
             slot.star:Hide()
@@ -908,6 +896,108 @@ local function ConfigureCompactRow(row, charKey, data, yOffset, windowWidth, pin
     end
 
     row:Show()
+end
+
+-- Column layout: the columns are only as wide as what they show. The name
+-- column fits the longest name shown, each rating column its widest rating
+-- (with its recent change) or header, centered, with room for the
+-- multi-spec star. It used to reserve 135 for the names and 80 per column.
+-- The window stays at least MIN_WIDTH for the toolbar under it; that extra
+-- room goes between the names and the ratings.
+local NAME_GAP, COLUMN_GAP, CELL_PAD, STAR_GAP, ROW_PAD = 14, 6, 8, 3, 5
+
+-- Blizzard allows character names of 2 to 12 letters (accents, but no
+-- numbers or symbols). With server names shown, core's CreateCharacterName
+-- shortens the realm so name and realm are 20 characters at most. The name
+-- column's limit is that many of the widest letters in the overlay's font,
+-- with every icon a name can carry (spec, logged-in dot, pin), so no real
+-- name is cut; anything longer (broken data) ends in "...".
+local NAME_LETTERS, NAME_WITH_REALM = 12, 20
+local NAME_ICONS = "|TInterface\\Icons\\INV_Misc_QuestionMark:14|t "
+    .. "|TInterface\\Common\\Indicator-Green:12|t "
+    .. "|TInterface\\Minimap\\UI-Minimap-ZoomInButton-Up:14|t "
+
+local function NameColumnLimit(headerRow)
+    local probe = headerRow.nameProbe
+    if not probe then
+        probe = headerRow:CreateFontString(nil, "OVERLAY")
+        probe:SetPoint("LEFT")
+        probe:SetAlpha(0)   -- only measured
+        headerRow.nameProbe = probe
+    end
+    SafeSetFont(probe, PVPHUB.compactCurrentFontPath, 11)   -- as the names
+    local cm = PVPHUB_SETTINGS.compactMode
+    local letters = cm.hideServerNames and NAME_LETTERS or NAME_WITH_REALM
+    local widest = 0
+    for _, wide in ipairs({ { "M", "m" }, { "W", "w" } }) do
+        probe:SetText(NAME_ICONS .. wide[1] .. string.rep(wide[2], letters - 1))
+        widest = math.max(widest, probe:GetUnboundedStringWidth())
+    end
+    return 16 + math.ceil(widest) + 2   -- 16: a sub-row's indent, the deepest
+end
+
+-- Measures the filled header and rows: where the names end, and each shown
+-- column's x and width
+local function CompactLayout(headerRow, rows)
+    local layout = { columnX = {}, columnW = {} }
+    local nameRight = 8 + headerRow.charHeader:GetUnboundedStringWidth()
+    for _, row in ipairs(rows) do
+        nameRight = math.max(nameRight, row.nameIndent + row.nameText:GetUnboundedStringWidth())
+    end
+    -- A little slack, so a name that just fits isn't cut by rounding
+    layout.nameRight = math.min(NameColumnLimit(headerRow), math.ceil(nameRight) + 2)
+    local right = layout.nameRight
+    local x = right + NAME_GAP
+    for i, header in ipairs(headerRow.columns) do
+        if header:IsShown() then
+            local textW, starW = 0, 0
+            for _, row in ipairs(rows) do
+                local slot = row.slots[i]
+                textW = math.max(textW, slot.text:GetUnboundedStringWidth())
+                if slot.star:IsShown() then starW = math.max(starW, slot.star:GetStringWidth()) end
+            end
+            local w = math.max(header:GetUnboundedStringWidth(), textW) + CELL_PAD
+            -- The star sits right of the centered rating, inside the cell
+            if starW > 0 then w = math.max(w, textW + 2 * (STAR_GAP + starW)) end
+            layout.columnX[i], layout.columnW[i] = x, math.ceil(w)
+            right = x + layout.columnW[i]
+            x = right + COLUMN_GAP
+        end
+    end
+    layout.width = right + ROW_PAD
+    -- The toolbar's minimum: the ratings move right, the names keep their room
+    local minimum = PVPHUB_CONSTANTS.COMPACT_WINDOW.MIN_WIDTH - 16
+    if layout.width < minimum then
+        local extra = minimum - layout.width
+        for i, cx in pairs(layout.columnX) do layout.columnX[i] = cx + extra end
+        layout.width = minimum
+    end
+    return layout
+end
+
+local function PlaceCompactRow(row, layout)
+    local height = PVPHUB_CONSTANTS.COMPACT_WINDOW.ROW_HEIGHT
+    local indent = row.nameIndent
+    row:SetWidth(layout.width)
+    row.nameText:ClearAllPoints()
+    row.nameText:SetPoint("LEFT", indent, 0)
+    row.nameText:SetWidth(layout.nameRight - indent)
+    row.nameTooltipBtn:ClearAllPoints()
+    row.nameTooltipBtn:SetPoint("LEFT", indent, 0)
+    row.nameTooltipBtn:SetSize(layout.nameRight - indent, height)
+    for i, slot in ipairs(row.slots) do
+        local x, w = layout.columnX[i], layout.columnW[i]
+        if x then
+            slot.text:ClearAllPoints()
+            slot.text:SetPoint("LEFT", x, 0)
+            slot.text:SetWidth(w)
+            slot.star:ClearAllPoints()
+            slot.star:SetPoint("LEFT", x + (w + slot.text:GetUnboundedStringWidth()) / 2 + STAR_GAP, 0)
+            slot.hoverBtn:ClearAllPoints()
+            slot.hoverBtn:SetPoint("LEFT", x, 0)
+            slot.hoverBtn:SetSize(w, height)
+        end
+    end
 end
 
 -- Implementation for PVPHUB:UpdateCompactWindow (wrapped below in a pcall).
@@ -972,43 +1062,32 @@ local function UpdateCompactWindowImpl()
         PVPHUB.compactWindow.toolbar:SetBackdropBorderColor(0, 0, 0, 0)
     end
 
-    -- If nothing is selected AND nothing is pinned, add current character by
-    -- default. Checking pinnedSpecs too matters because graduating to
-    -- pinned-spec rows (PromoteToMultiSpecIfNeeded) removes a character from
-    -- selectedChars, which can leave it at zero entries even though the
-    -- character is still very much being shown via its pinned row(s) — without
-    -- this check, this default would re-add that character to selectedChars
-    -- right back on top of its pinned row, producing a duplicate.
-    if #PVPHUB_SETTINGS.compactMode.selectedChars == 0 then
-        local hasAnyPin = false
-        for _, pins in pairs(PVPHUB_SETTINGS.compactMode.pinnedSpecs) do
-            if next(pins) then hasAnyPin = true; break end
+    -- If nothing is selected AND nothing is pinned, add the current character,
+    -- once ever (seededDefault), so a new overlay isn't empty. After that an
+    -- empty overlay is the user's choice: this used to run on every update,
+    -- so switching off the last spec put the character straight back, as a
+    -- plain row the settings had no switch for. Checking pinnedSpecs too
+    -- matters because graduating to pinned-spec rows
+    -- (PromoteToMultiSpecIfNeeded) removes a character from selectedChars.
+    local cm = PVPHUB_SETTINGS.compactMode
+    if not cm.seededDefault then
+        local hasAny = #cm.selectedChars > 0
+        for _, pins in pairs(cm.pinnedSpecs) do
+            if next(pins) then hasAny = true; break end
         end
-        if not hasAnyPin then
+        if not hasAny then
             local currentChar = GetFullName()
             if currentChar and PVPHUB_DB[currentChar] then
-                table.insert(PVPHUB_SETTINGS.compactMode.selectedChars, currentChar)
+                table.insert(cm.selectedChars, currentChar)
+                hasAny = true
             end
         end
+        cm.seededDefault = hasAny or nil   -- try again once the character is saved
     end
     -- Remove any prompt about opening PvP window for compact mode; data is fetched automatically for current character
-    
-    -- Calculate dynamic window width based on visible columns
-    local visibleRatingCount = 0
-    for _, bracket in ipairs(PVP_BRACKETS) do
-        if PVPHUB_SETTINGS.compactMode.showRatings[bracket.key] then
-            visibleRatingCount = visibleRatingCount + 1
-        end
-    end
-    
-    local dynamicWidth = math.max(
-        PVPHUB_CONSTANTS.COMPACT_WINDOW.MIN_WIDTH,
-        PVPHUB_CONSTANTS.COMPACT_WINDOW.BASE_WIDTH + (visibleRatingCount * PVPHUB_CONSTANTS.COMPACT_WINDOW.COLUMN_WIDTH)
-    )
-    
-    -- Update window and content width
-    PVPHUB.compactWindow:SetWidth(dynamicWidth)
-    PVPHUB.compactWindow.content:SetWidth(dynamicWidth - 16)
+
+    -- The width follows the content, set once the rows are filled
+    -- (CompactLayout)
 
     -- Keep the sort cycle button label in sync
     if PVPHUB.compactWindow.sortBtnText and PVPHUB.compactWindow.GetSortLabel then
@@ -1020,24 +1099,17 @@ local function UpdateCompactWindowImpl()
 
     -- Header row (pooled, see GetCompactHeaderRow)
     local headerRow = GetCompactHeaderRow()
-    headerRow:SetSize(dynamicWidth - 16, rowHeight)
+    headerRow:SetHeight(rowHeight)
     headerRow:ClearAllPoints()
     headerRow:SetPoint("TOPLEFT", 0, -yOffset - 3) -- Add 3px top padding
-    headerRow.charHeader:SetWidth(PVPHUB_CONSTANTS.COMPACT_WINDOW.BASE_WIDTH - 15) -- Leave some padding
     SafeSetFont(headerRow.charHeader, PVPHUB.compactCurrentFontPath, 10, "OUTLINE")
 
-    -- Rating headers with dynamic positioning
-    local columnIndex = 0
+    -- Rating headers, placed with the rows (PlaceCompactRow)
     for i, header in ipairs(COMPACT_BRACKET_ORDER) do
         local headerText = headerRow.columns[i]
         if PVPHUB_SETTINGS.compactMode.showRatings[header.key] then
-            local xPos = PVPHUB_CONSTANTS.COMPACT_WINDOW.BASE_WIDTH + (columnIndex * PVPHUB_CONSTANTS.COMPACT_WINDOW.COLUMN_WIDTH) - 5
-            headerText:ClearAllPoints()
-            headerText:SetPoint("LEFT", xPos, 0)
-            headerText:SetWidth(PVPHUB_CONSTANTS.COMPACT_WINDOW.COLUMN_WIDTH - 10) -- Set width for centering
             SafeSetFont(headerText, PVPHUB.compactCurrentFontPath, 9, "OUTLINE")
             headerText:Show()
-            columnIndex = columnIndex + 1
         else
             headerText:Hide()
         end
@@ -1076,12 +1148,20 @@ local function UpdateCompactWindowImpl()
     -- "nothing selected" default above re-adding it after graduating emptied
     -- the list — strip it out here every time rather than only at the moment
     -- of graduation, so a stale entry like that can't linger indefinitely.
+    -- A rated character left there without pins (the old every-update default
+    -- re-added one) gets its shown spec pinned instead: the settings list
+    -- only has spec switches for it, so the plain row couldn't be turned off.
     do
         local sel = PVPHUB_SETTINGS.compactMode.selectedChars
         for i = #sel, 1, -1 do
-            local pins = PVPHUB_SETTINGS.compactMode.pinnedSpecs[sel[i]]
+            local charKey = sel[i]
+            local pins = PVPHUB_SETTINGS.compactMode.pinnedSpecs[charKey]
+            local data = PVPHUB_DB[charKey]
             if pins and next(pins) then
                 table.remove(sel, i)
+            elseif data and GetDistinctRatedSpecCount(data) >= 1 then
+                table.remove(sel, i)
+                PinShownSpec(charKey, data)
             end
         end
     end
@@ -1258,7 +1338,7 @@ local function UpdateCompactWindowImpl()
     PVPHUB.compactWindow.rows = {}
     for i, entry in ipairs(selected) do
         local row = AcquireCompactRow(i)
-        ConfigureCompactRow(row, entry.char, entry.data, yOffset, dynamicWidth, entry.pinnedSpecID, entry.isSubRow)
+        ConfigureCompactRow(row, entry.char, entry.data, yOffset, entry.pinnedSpecID, entry.isSubRow)
         table.insert(PVPHUB.compactWindow.rows, row)
         yOffset = yOffset + rowHeight
         visibleCharCount = visibleCharCount + 1
@@ -1270,7 +1350,25 @@ local function UpdateCompactWindowImpl()
             pool[i]:Hide()
         end
     end
-    
+
+    -- Columns as wide as their content, then the window around them
+    local layout = CompactLayout(headerRow, PVPHUB.compactWindow.rows)
+    headerRow:SetWidth(layout.width)
+    headerRow.charHeader:SetWidth(layout.nameRight - 8)
+    for i, headerText in ipairs(headerRow.columns) do
+        local x = layout.columnX[i]
+        if x then
+            headerText:ClearAllPoints()
+            headerText:SetPoint("LEFT", x, 0)
+            headerText:SetWidth(layout.columnW[i])   -- centered over the ratings
+        end
+    end
+    for _, row in ipairs(PVPHUB.compactWindow.rows) do
+        PlaceCompactRow(row, layout)
+    end
+    local dynamicWidth = layout.width + 16
+    PVPHUB.compactWindow:SetWidth(dynamicWidth)
+
     -- Calculate dynamic window height based on content only.
     -- The overlay toolbar floats on top and does not reserve space.
     local headerHeight = rowHeight + 5
@@ -1705,7 +1803,9 @@ function PVPHUB:ShowCompactSettings()
                         -- No rating number or bracket name — one checkbox = one
                         -- spec, and it shows every enabled bracket column, so
                         -- there's nothing bracket-specific left to disambiguate.
-                        local currentTag = (cand.specID == currentSpecID) and " |TInterface\\Common\\Indicator-Green:10|t" or ""
+                        -- Only the logged-in character's spec: the others'
+                        -- last spec isn't "online"
+                        local currentTag = (charKey == currentChar and cand.specID == currentSpecID) and " |TInterface\\Common\\Indicator-Green:10|t" or ""
                         pinCb.lbl:SetText(string.format("%s%s%s", specIcon, specName, currentTag))
                         pinCb.lbl:SetFontObject("GameFontHighlightSmall")
 
