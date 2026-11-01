@@ -1,11 +1,13 @@
 -- PVPHUB Season tab (7.0)
 --
 -- The whole roster's season at a glance, top to bottom:
---   header       season name, one line of context, the season menu (the
---                current season or one from the season archive, seasons.lua)
---   key numbers  games, win rate, best rating, characters
---   brackets     one comparable row per bracket (games, W-L, win rate, best);
---                hover a row for every character's share | season titles
+--   hero         three tiles: the season (its name, characters and games,
+--                the season menu: the current season or one from the season
+--                archive, seasons.lua), the best rating, the win rate
+--   brackets     a card per bracket: its icon, best rating, win rate and the
+--                classes that played it; hover for every character's share
+--   titles | top the season titles with their achievement icons, and the
+--                best characters by rating, the most played one marked MVP
 --   roster       classes played, most played spec, favourite bracket
 --
 -- Frames are built once and repainted on every render (core calls
@@ -20,15 +22,27 @@ PVPHUB.SeasonTab = Tab
 
 local GAP            = 10    -- between panels
 local PAD            = 12    -- inside a panel
-local HEADER_H       = 44
-local KPI_H          = 70
-local KPI_COUNT      = 5     -- games, win rate, best rating, characters, MVP
-local ROW_H          = 24    -- bracket row
+local HERO_H         = 92    -- the top row's tiles
+-- The season tile's expansion logo. The logo files (2:1) have wide empty
+-- margins left and right; LOGO_CROP cuts them off, the size keeps the
+-- rest's proportions.
+local LOGO_CROP      = { 0.12, 0.84 }
+local LOGO_H         = 60
+local LOGO_W         = math.floor(LOGO_H * 2 * (LOGO_CROP[2] - LOGO_CROP[1]))
+local EMBLEM         = 52    -- its round Conquest emblem when there's no logo
+local CARD_H         = 112   -- a bracket card
+local FACE           = 18    -- a class icon on a bracket card
+local MAX_FACES      = 4     -- class icons on a bracket card, "+N" for more
 local TITLE_ROW_H    = 50
+local TITLE_ICON     = 30
+local TOP_ROW_H      = 36    -- a character in Top characters
+local TOP_COUNT      = 5
 local CHIP_H         = 22    -- class chip in the roster
 local ROSTER_ROW_H   = 18    -- character in the roster's expanded list
-local TWO_COLUMN_MIN = 640   -- narrower than this: the titles go below the brackets
+local TWO_COLUMN_MIN = 640   -- narrower than this: titles and top characters stack
 local MAX_CLASSES    = 13
+local CONQUEST_ID    = 1602  -- the Conquest currency, whose emblem heads the season
+local ICON_MASK      = "Interface\\CharacterFrame\\TempPortraitAlphaMask"
 
 local PER_SPEC = { ratingShuffle = true, ratingBlitz = true }
 
@@ -121,6 +135,7 @@ local function BuildData(season, archived)
                     d.brackets[meta.key] = bt
                 end
                 bt.played, bt.won, bt.lost = bt.played + s.played, bt.won + s.won, bt.lost + s.lost
+                bt.best = math.max(bt.best, s.best)
                 bt.chars[#bt.chars + 1] = { key = ch.key, s = s }
                 d.played, d.won, d.lost = d.played + s.played, d.won + s.won, d.lost + s.lost
                 if not d.best or s.best > d.best.rating then
@@ -164,6 +179,7 @@ local function BuildData(season, archived)
             local tp = valid and type(ch.data.titleProgress) == "table" and ch.data.titleProgress[meta.key]
             if type(tp) == "table" and (tp.required or 0) > 0 then
                 t.required = tp.required
+                t.icon = t.icon or tp.icon   -- the achievement's own icon
                 if tp.completed then
                     if not t.earned then t.earned, t.char, t.tp = true, ch.key, tp end
                 elseif not t.earned and (tp.current or 0) > t.current then
@@ -259,13 +275,19 @@ local function NewPanel(parent)
     return p
 end
 
+-- The panels' color: the window's, a little lighter (r, g, b)
+local function PanelColor()
+    local c = PVPHUB.currentColors
+    local base = (c and c.WINDOW_BG) or { 0.08, 0.05, 0.05 }
+    return base[1] * 1.6, base[2] * 1.6, base[3] * 1.6
+end
+
 local function PaintPanel(p, gold)
     if gold then
         p.bg:SetVertexColor(0.3, 0.22, 0.04, 0.42)
     else
-        local c = PVPHUB.currentColors
-        local base = (c and c.WINDOW_BG) or { 0.08, 0.05, 0.05 }
-        p.bg:SetVertexColor(base[1] * 1.6, base[2] * 1.6, base[3] * 1.6, 0.55)
+        local r, g, b = PanelColor()
+        p.bg:SetVertexColor(r, g, b, 0.55)
     end
 end
 
@@ -349,17 +371,99 @@ local function TooltipFor(frame, fill)
     frame:SetScript("OnLeave", function() GameTooltip:Hide() end)
 end
 
-local function CreateHeader(content)
-    w.title = NewText(content, 17)
-    w.title:SetPoint("TOPLEFT", 0, 0)
-    w.title:SetTextColor(1, 0.82, 0, 1)
-    w.sub = Muted(NewText(content, 11))
-    w.sub:SetPoint("TOPLEFT", w.title, "BOTTOMLEFT", 0, -5)
+local function ClassName(token)
+    return (LOCALIZED_CLASS_NAMES_MALE and LOCALIZED_CLASS_NAMES_MALE[token]) or token
+end
 
-    -- Where the numbers come from, behind a small "i"
-    w.info = CreateFrame("Button", nil, content)
+local function ClassIcon(tex, token)
+    local path = PVPHUB._CLASS_ICON_PATHS and PVPHUB._CLASS_ICON_PATHS[token]
+    tex:SetTexture(path)
+    tex:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+end
+
+-- A round icon in a thin ring (a panel ring whose corners are half its
+-- size is a circle)
+local function NewRoundIcon(parent, size)
+    local h = CreateFrame("Frame", nil, parent)
+    h:SetSize(size, size)
+    h.icon = h:CreateTexture(nil, "ARTWORK")
+    h.icon:SetPoint("TOPLEFT", 1, -1)
+    h.icon:SetPoint("BOTTOMRIGHT", -1, 1)
+    local mask = h:CreateMaskTexture()
+    mask:SetTexture(ICON_MASK, "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
+    mask:SetAllPoints(h.icon)
+    h.icon:AddMaskTexture(mask)
+    h.ring = PVPHUB.UI.CreatePanel(h, "ring", "OVERLAY", 0, size / 2)
+    return h
+end
+
+-- Shows texture in the icon with its ring in r, g, b, a (hidden without
+-- a texture)
+local function PaintRoundIcon(h, texture, r, g, b, a)
+    h:SetShown(texture ~= nil)
+    if not texture then return end
+    h.icon:SetTexture(texture)
+    h.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+    h.icon:SetDesaturated(false)
+    h.ring:SetVertexColor(r or 1, g or 1, b or 1, a or 0.6)
+end
+
+-- A character's class icon in a ring of its class color
+local function PaintClassFace(h, charKey)
+    local data = PVPHUB_DB and PVPHUB_DB[charKey]
+    local token = data and data.class and data.class:upper()
+    local c = token and RAID_CLASS_COLORS[token]
+    h:Show()
+    ClassIcon(h.icon, token)
+    h.icon:SetDesaturated(false)
+    h.ring:SetVertexColor(c and c.r or 0.6, c and c.g or 0.6, c and c.b or 0.6, 0.9)
+end
+
+-- An expansion's logo (the login screen's), nil if the game has none for it
+local function ExpansionLogo(level)
+    if not (level and GetExpansionDisplayInfo) then return nil end
+    local ok, info = pcall(GetExpansionDisplayInfo, level)
+    return ok and info and info.logo or nil
+end
+
+-- The Conquest emblem, nil if the game doesn't hand it out
+local function ConquestIcon()
+    if not (C_CurrencyInfo and C_CurrencyInfo.GetCurrencyInfo) then return nil end
+    local ok, info = pcall(C_CurrencyInfo.GetCurrencyInfo, CONQUEST_ID)
+    return ok and info and info.iconFileID or nil
+end
+
+-- One character in a tooltip: games, main bracket, best rating
+local function CharacterTooltip(pl)
+    GameTooltip:SetText(CharName(pl.key, true))
+    GameTooltip:AddDoubleLine("Games", Count(pl.played) .. "  ·  " .. WinText(pl.won / math.max(1, pl.played)), 0.7, 0.7, 0.7, 1, 1, 1)
+    if pl.main then GameTooltip:AddDoubleLine("Plays most", BracketLabel(pl.main), 0.7, 0.7, 0.7, 1, 1, 1) end
+    if pl.bestMeta then
+        GameTooltip:AddDoubleLine("Best rating", Rating(pl.best) .. "  |cff8f8c99" .. BracketLabel(pl.bestMeta) .. "|r", 0.7, 0.7, 0.7, 1, 1, 1)
+    end
+end
+
+-- The top row: the season, the best rating, the win rate
+local function CreateHero(content)
+    -- Season: the expansion's logo (or the Conquest emblem), the season's
+    -- name, its characters and games, and the season menu. The text is
+    -- placed when painted, right of whichever of the two is shown.
+    local s = NewPanel(content)
+    w.season = s
+    s:SetHeight(HERO_H)
+    s.logo = s:CreateTexture(nil, "ARTWORK")
+    s.logo:SetSize(LOGO_W, LOGO_H)
+    s.logo:SetPoint("LEFT", PAD, 0)
+    s.emblem = NewRoundIcon(s, EMBLEM)
+    s.emblem:SetPoint("LEFT", PAD, 0)
+    w.title = NewText(s, 16)
+    w.title:SetTextColor(1, 0.82, 0, 1)
+    w.sub = Muted(NewText(s, 11))
+
+    -- Where the numbers come from, behind a small "i" in the corner
+    w.info = CreateFrame("Button", nil, s)
     w.info:SetSize(14, 14)
-    w.info:SetPoint("LEFT", w.sub, "RIGHT", 6, 0)
+    w.info:SetPoint("TOPRIGHT", -10, -10)
     local icon = w.info:CreateTexture(nil, "ARTWORK")
     icon:SetAllPoints()
     icon:SetTexture("Interface\\common\\help-i")
@@ -369,120 +473,105 @@ local function CreateHeader(content)
         GameTooltip:AddLine("Most played spec counts the matches PVPHUB recorded, so only those since it was installed.", 0.7, 0.7, 0.7, true)
     end)
 
-    w.seasonBtn = CreateFrame("Button", nil, content, "UIPanelButtonTemplate")
-    w.seasonBtn:SetSize(170, 22)
-    w.seasonBtn:SetPoint("TOPRIGHT", content, "TOPRIGHT", 0, -4)
+    w.seasonBtn = CreateFrame("Button", nil, s, "UIPanelButtonTemplate")
+    w.seasonBtn:SetSize(160, 20)
     w.seasonBtn:SetScript("OnClick", function(self) Tab.OpenSeasonMenu(self) end)
     if PVPHUB.UI then PVPHUB.UI.SkinButton(w.seasonBtn) end
+
+    -- Best rating: the number big in its color, the bracket's icon, and
+    -- who got it
+    local b = NewPanel(content)
+    w.best = b
+    b:SetHeight(HERO_H)
+    b.label = Muted(NewText(b, 11))
+    b.label:SetPoint("TOPLEFT", PAD, -12)
+    b.label:SetText("Best rating")
+    b.value = NewText(b, 26)
+    b.value:SetPoint("TOPLEFT", PAD, -28)
+    b.bracket = NewRoundIcon(b, 40)
+    b.bracket:SetPoint("TOPRIGHT", -PAD, -14)
+    b.face = NewRoundIcon(b, 16)
+    b.face:SetPoint("TOPLEFT", PAD, -64)
+    b.who = NewText(b, 11)
+    b.who:SetPoint("LEFT", b.face, "RIGHT", 6, 0)
+
+    -- Win rate: the number, wins against losses as one bar, the games
+    local v = NewPanel(content)
+    w.win = v
+    v:SetHeight(HERO_H)
+    v.label = Muted(NewText(v, 11))
+    v.label:SetPoint("TOPLEFT", PAD, -12)
+    v.label:SetText("Win rate")
+    v.games = Muted(NewText(v, 11))
+    v.games:SetPoint("TOPRIGHT", -PAD, -12)
+    v.games:SetJustifyH("RIGHT")
+    v.value = NewText(v, 26)
+    v.value:SetPoint("TOPLEFT", PAD, -28)
+    v.bar = NewBar(v, 6)
+    v.bar:SetPoint("TOPLEFT", PAD, -62)
+    v.won = NewText(v, 11)
+    v.won:SetPoint("TOPLEFT", PAD, -73)
+    v.lost = NewText(v, 11)
+    v.lost:SetPoint("TOPRIGHT", -PAD, -73)
+    v.lost:SetJustifyH("RIGHT")
 end
 
-local function CreateKPIs(content)
-    w.kpi = NewPanel(content)
-    w.kpi:SetHeight(KPI_H)
-    w.kpiCells, w.kpiSeps = {}, {}
-    for i = 1, KPI_COUNT do
-        local cell = CreateFrame("Frame", nil, w.kpi)
-        cell:SetHeight(KPI_H)
-        cell.label = Muted(NewText(cell, 11))
-        cell.label:SetPoint("TOPLEFT", PAD, -10)
-        cell.value = NewText(cell, 20)
-        cell.value:SetPoint("TOPLEFT", PAD, -25)
-        cell.sub = Muted(NewText(cell, 11))
-        cell.sub:SetPoint("TOPLEFT", PAD, -51)
-        w.kpiCells[i] = cell
-        if i > 1 then
-            local sep = w.kpi:CreateTexture(nil, "ARTWORK")
-            sep:SetTexture("Interface\\Buttons\\WHITE8x8")
-            sep:SetVertexColor(1, 1, 1, 0.07)
-            sep:SetWidth(1)
-            w.kpiSeps[i] = sep
-        end
-    end
-    -- Win rate gets a bar between its value and its W-L line
-    w.winBar = NewBar(w.kpiCells[2], 4)
-    w.winBar:SetPoint("TOPLEFT", PAD, -49)
-    w.kpiCells[2].sub:ClearAllPoints()
-    w.kpiCells[2].sub:SetPoint("TOPLEFT", PAD, -56)
-
-    -- MVP: hover for the five most played characters
-    local mvp = w.kpiCells[KPI_COUNT]
-    mvp:EnableMouse(true)
-    TooltipFor(mvp, function(self)
-        GameTooltip:SetText("Most played this season", 1, 0.82, 0)
-        for i = 1, math.min(5, #(self.players or {})) do
-            local pl = self.players[i]
-            GameTooltip:AddDoubleLine(string.format("%d.  %s", i, CharName(pl.key, true)),
-                string.format("%s games  ·  %s", Count(pl.played), WinText(pl.won / pl.played)),
-                1, 1, 1, 0.85, 0.85, 0.85)
-        end
-    end)
-end
-
-local function CreateBrackets(content)
-    local p = NewPanel(content)
-    w.brackets = p
-    p.heading = NewText(p, 12)
-    p.heading:SetPoint("TOPLEFT", PAD, -10)
-    p.heading:SetTextColor(1, 0.82, 0, 1)
-    p.heading:SetText("Brackets")
-
-    p.cols = {}
-    for _, key in ipairs({ "bracket", "games", "wl", "win", "best" }) do
-        p.cols[key] = Muted(NewText(p, 11))
-    end
-    p.cols.bracket:SetText("Bracket")
-    p.cols.games:SetText("Games")
-    p.cols.wl:SetText("W – L")
-    p.cols.win:SetText("Win rate")
-    p.cols.best:SetText("Best")
-    p.cols.games:SetJustifyH("RIGHT")
-    p.cols.wl:SetJustifyH("RIGHT")
-    p.cols.best:SetJustifyH("RIGHT")
-
-    p.line = p:CreateTexture(nil, "ARTWORK")
-    p.line:SetTexture("Interface\\Buttons\\WHITE8x8")
-    p.line:SetVertexColor(1, 1, 1, 0.07)
-    p.line:SetHeight(1)
-
-    p.rows = {}
+-- A card per bracket, tinted in the bracket's color; hover for every
+-- character's games in it
+local function CreateBracketCards(content)
+    w.cards = {}
     for i = 1, #PVPHUB._BRACKET_META do
-        local row = CreateFrame("Button", nil, p)
-        row:SetHeight(ROW_H)
-        local hl = row:CreateTexture(nil, "HIGHLIGHT")
-        hl:SetAllPoints()
-        hl:SetTexture("Interface\\Buttons\\WHITE8x8")
-        hl:SetVertexColor(1, 1, 1, 0.05)
-        row.icon = row:CreateTexture(nil, "ARTWORK")
-        row.icon:SetSize(14, 14)
-        row.icon:SetPoint("LEFT", 2, 0)
-        row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-        row.label = NewText(row, 12)
-        row.label:SetPoint("LEFT", row.icon, "RIGHT", 6, 0)
-        row.games = NewText(row, 12)
-        row.games:SetJustifyH("RIGHT")
-        row.wl = NewText(row, 12)
-        row.wl:SetJustifyH("RIGHT")
-        row.bar = NewBar(row, 4)
-        row.pct = NewText(row, 11)
-        row.best = NewText(row, 12)
-        row.best:SetJustifyH("RIGHT")
-        TooltipFor(row, function(self)
+        local c = CreateFrame("Button", nil, content)
+        c:SetHeight(CARD_H)
+        c.bg = PVPHUB.CreateRoundedShape(c, "BACKGROUND", 0, 0, 10)
+        c.bg:SetRounded(true)
+        c.glow = PVPHUB.CreateRoundedShape(c, "BORDER", 0, 0, 10)
+        c.glow:SetRounded(true)
+        c.glow:SetVertexColor(1, 1, 1, 0.05)
+        c.glow:Hide()
+
+        c.icon = NewRoundIcon(c, 30)
+        c.icon:SetPoint("TOPLEFT", PAD, -PAD)
+        c.label = NewText(c, 12)
+        c.label:SetPoint("LEFT", c.icon, "RIGHT", 8, 0)
+        c.best = NewText(c, 22)
+        c.best:SetPoint("TOPLEFT", PAD, -52)
+        c.bestLabel = Muted(NewText(c, 10))
+        c.bestLabel:SetPoint("BOTTOMLEFT", c.best, "BOTTOMRIGHT", 5, 2)
+        c.bestLabel:SetText("best")
+        c.bar = NewBar(c, 5)
+        c.bar:SetPoint("TOPLEFT", PAD, -82)
+        c.stats = NewText(c, 11)
+        c.stats:SetPoint("TOPLEFT", PAD, -93)
+
+        -- The classes that played it, overlapping like avatars
+        c.faces = {}
+        for f = 1, MAX_FACES do
+            c.faces[f] = NewRoundIcon(c, FACE)
+        end
+        c.more = Muted(NewText(c, 10))
+        c.more:SetJustifyH("RIGHT")
+
+        c:SetScript("OnEnter", function(self)
             local bt = self.data
+            if not bt then return end
+            self.glow:Show()
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
             GameTooltip:SetText(bt.meta.label, 1, 0.82, 0)
             GameTooltip:AddLine("Games per character this season", 0.7, 0.7, 0.7)
-            table.sort(bt.chars, function(a, b) return a.s.played > b.s.played end)
-            for _, c in ipairs(bt.chars) do
-                GameTooltip:AddDoubleLine(CharName(c.key, true),
-                    string.format("%d games  ·  %s  ·  best %s", c.s.played, WinText(c.s.won / c.s.played), Rating(c.s.best)),
+            for _, ch in ipairs(bt.chars) do
+                GameTooltip:AddDoubleLine(CharName(ch.key, true),
+                    string.format("%d games  ·  %s  ·  best %s", ch.s.played, WinText(ch.s.won / ch.s.played), Rating(ch.s.best)),
                     1, 1, 1, 0.85, 0.85, 0.85)
             end
+            GameTooltip:Show()
         end)
-        p.rows[i] = row
+        c:SetScript("OnLeave", function(self)
+            self.glow:Hide()
+            GameTooltip:Hide()
+        end)
+        w.cards[i] = c
     end
-
-    p.hint = Muted(NewText(p, 11))
-    p.hint:SetText("Hover a bracket for each character's games")
-    p.empty = Muted(NewText(p, 12))
 end
 
 local function CreateTitles(content)
@@ -499,16 +588,20 @@ local function CreateTitles(content)
         row:SetHeight(TITLE_ROW_H)
         row:EnableMouse(true)
         row.meta = meta
+        -- The title achievement's icon, ringed gold once earned
+        row.icon = NewRoundIcon(row, TITLE_ICON)
+        row.icon:SetPoint("TOPLEFT", 0, -2)
+        local textX = TITLE_ICON + 10
         row.name = NewText(row, 12)
-        row.name:SetPoint("TOPLEFT", 0, 0)
+        row.name:SetPoint("TOPLEFT", textX, 0)
         row.name:SetText(meta.name)
         row.value = NewText(row, 12)
         row.value:SetPoint("TOPRIGHT", 0, 0)
         row.value:SetJustifyH("RIGHT")
         row.bar = NewBar(row, 6)
-        row.bar:SetPoint("TOPLEFT", 0, -18)
+        row.bar:SetPoint("TOPLEFT", textX, -18)
         row.who = NewText(row, 11)
-        row.who:SetPoint("TOPLEFT", 0, -29)
+        row.who:SetPoint("TOPLEFT", textX, -29)
 
         -- Track: the floating title overlay (PVPHUB:UpdateTitleTracker),
         -- a pill button right after the title's name
@@ -538,16 +631,6 @@ local function CreateTitles(content)
     end
 end
 
-local function ClassName(token)
-    return (LOCALIZED_CLASS_NAMES_MALE and LOCALIZED_CLASS_NAMES_MALE[token]) or token
-end
-
-local function ClassIcon(tex, token)
-    local path = PVPHUB._CLASS_ICON_PATHS and PVPHUB._CLASS_ICON_PATHS[token]
-    tex:SetTexture(path)
-    tex:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-end
-
 -- A character under an opened class: name and realm, its games and win
 -- rate, best rating on the right; hover for its main bracket too
 local function CreateCharRow(parent)
@@ -565,15 +648,7 @@ local function CreateCharRow(parent)
     r.games = NewText(r, 11)
     r.games:SetPoint("RIGHT", -52, 0)
     r.games:SetJustifyH("RIGHT")
-    TooltipFor(r, function(self)
-        local pl = self.player
-        GameTooltip:SetText(CharName(pl.key, true))
-        GameTooltip:AddDoubleLine("Games", Count(pl.played) .. "  ·  " .. WinText(pl.won / math.max(1, pl.played)), 0.7, 0.7, 0.7, 1, 1, 1)
-        if pl.main then GameTooltip:AddDoubleLine("Plays most", BracketLabel(pl.main), 0.7, 0.7, 0.7, 1, 1, 1) end
-        if pl.bestMeta then
-            GameTooltip:AddDoubleLine("Best rating", Rating(pl.best) .. "  |cff8f8c99" .. BracketLabel(pl.bestMeta) .. "|r", 0.7, 0.7, 0.7, 1, 1, 1)
-        end
-    end)
+    TooltipFor(r, function(self) CharacterTooltip(self.player) end)
     return r
 end
 
@@ -674,6 +749,67 @@ local function CreateRoster(content)
     p.favValue = NewText(p, 12)
 end
 
+-- The best characters by rating: rank, class icon, name, the bracket of
+-- their best rating, games and win rate, the rating; the most played one
+-- wears an MVP badge
+local function CreateTop(content)
+    local p = NewPanel(content)
+    w.top = p
+    p.heading = NewText(p, 12)
+    p.heading:SetPoint("TOPLEFT", PAD, -10)
+    p.heading:SetTextColor(1, 0.82, 0, 1)
+    p.heading:SetText("Top characters")
+    p.hint = Muted(NewText(p, 10))
+    p.hint:SetPoint("TOPRIGHT", -PAD, -12)
+    p.hint:SetJustifyH("RIGHT")
+    p.hint:SetText("by best rating")
+
+    p.rows = {}
+    for i = 1, TOP_COUNT do
+        local r = CreateFrame("Button", nil, p)
+        r:SetHeight(TOP_ROW_H)
+        local hl = r:CreateTexture(nil, "HIGHLIGHT")
+        hl:SetAllPoints()
+        hl:SetTexture("Interface\\Buttons\\WHITE8x8")
+        hl:SetVertexColor(1, 1, 1, 0.05)
+        r.rank = Muted(NewText(r, 12))
+        r.rank:SetPoint("LEFT", 0, 0)
+        r.rank:SetWidth(14)
+        r.rank:SetJustifyH("CENTER")
+        r.face = NewRoundIcon(r, 26)
+        r.face:SetPoint("LEFT", 20, 0)
+        r.name = NewText(r, 12)
+        r.name:SetPoint("TOPLEFT", r.face, "TOPRIGHT", 8, 0)
+        r.bracket = r:CreateTexture(nil, "ARTWORK")
+        r.bracket:SetSize(12, 12)
+        r.bracket:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+        r.bracket:SetPoint("BOTTOMLEFT", r.face, "BOTTOMRIGHT", 8, 0)
+        r.sub = Muted(NewText(r, 10))
+        r.sub:SetPoint("LEFT", r.bracket, "RIGHT", 4, 0)
+        r.rating = NewText(r, 15)
+        r.rating:SetPoint("RIGHT", -4, 0)
+        r.rating:SetJustifyH("RIGHT")
+
+        r.mvp = CreateFrame("Frame", nil, r)
+        r.mvp:SetSize(30, 13)
+        r.mvp:SetPoint("LEFT", r.name, "RIGHT", 6, 0)
+        PVPHUB.UI.CreatePill(r.mvp, "ARTWORK", 0):SetVertexColor(1, 0.82, 0, 0.25)
+        local mvpText = NewText(r.mvp, 9)
+        mvpText:SetPoint("CENTER", 0, 0)
+        mvpText:SetText("|cffffd100MVP|r")
+
+        TooltipFor(r, function(self)
+            CharacterTooltip(self.player)
+            if self.mvp:IsShown() then
+                GameTooltip:AddLine("MVP: the most games this season", 1, 0.82, 0)
+            end
+        end)
+        p.rows[i] = r
+    end
+    p.empty = Muted(NewText(p, 12))
+    p.empty:SetPoint("TOPLEFT", PAD, -36)
+end
+
 -- --------------------------------------------------------------------------
 -- Painting
 -- --------------------------------------------------------------------------
@@ -684,163 +820,187 @@ local function SeasonLabel(season, archived)
     return (PVPHUB._GetSeasonDisplayName and PVPHUB._GetSeasonDisplayName(season)) or "This season"
 end
 
-local function PaintHeader(d, season, archived, width)
-    w.title:SetText(SeasonLabel(season, archived) .. (archived and "  |cff888888(archive)|r" or ""))
-    local n = d.chars
-    w.sub:SetText(string.format("%d character%s with rated games%s", n, n == 1 and "" or "s",
-        archived and " that season" or " this season"))
+-- Places panels side by side from x = 0, widths in proportion to shares
+local function Row(panels, shares, top, width)
+    local total = 0
+    for _, s in ipairs(shares) do total = total + s end
+    local avail = width - GAP * (#panels - 1)
+    local x = 0
+    for i, p in ipairs(panels) do
+        local pw = (i == #panels) and (width - x) or math.floor(avail * shares[i] / total)
+        p:ClearAllPoints()
+        p:SetPoint("TOPLEFT", Tab.content, "TOPLEFT", x, -top)
+        p:SetWidth(pw)
+        x = x + pw + GAP
+    end
+end
 
+local function PaintHero(d, season, archived, top, width)
+    Row({ w.season, w.best, w.win }, { 1.55, 1, 1 }, top, width)
+
+    -- Season
+    local s = w.season
+    PaintPanel(s)
+    -- The logo of the expansion the season belongs to (an archived season
+    -- remembers it); the Conquest emblem if the game has no logo for it
+    local level = (archived and PVPHUB.Seasons.Expansion(season))
+        or (GetServerExpansionLevel and GetServerExpansionLevel())
+        or (GetExpansionLevel and GetExpansionLevel())
+    local logo = ExpansionLogo(level)
+    s.logo:SetShown(logo ~= nil)
+    if logo then
+        s.logo:SetTexture(logo)
+        s.logo:SetTexCoord(LOGO_CROP[1], LOGO_CROP[2], 0, 1)
+        s.emblem:Hide()
+    else
+        PaintRoundIcon(s.emblem, ConquestIcon() or "Interface\\Icons\\achievement_arena_3v3_1", 1, 0.82, 0, 0.75)
+    end
+    -- The season menu only when there's another season to pick
     local past = PVPHUB.Seasons and PVPHUB.Seasons.Summary() or {}
     local hasPast = false
-    for _, s in ipairs(past) do
-        if s.season ~= CurrentSeason() then hasPast = true end
+    for _, ps in ipairs(past) do
+        if ps.season ~= CurrentSeason() then hasPast = true end
     end
+    local menu = hasPast or archived
+
+    -- Name, characters and games (and the menu) as one block, centered on
+    -- the logo
+    local textX = PAD + (logo and LOGO_W or EMBLEM) + 14
+    local blockTop = math.floor((HERO_H - (menu and 62 or 36)) / 2)
+    w.title:ClearAllPoints()
+    w.title:SetPoint("TOPLEFT", s, "TOPLEFT", textX, -blockTop)
+    w.sub:ClearAllPoints()
+    w.sub:SetPoint("TOPLEFT", s, "TOPLEFT", textX, -(blockTop + 22))
+    w.seasonBtn:ClearAllPoints()
+    w.seasonBtn:SetPoint("TOPLEFT", s, "TOPLEFT", textX, -(blockTop + 42))
+    local textW = s:GetWidth() - textX - PAD
+    w.title:SetText(SeasonLabel(season, archived) .. (archived and "  |cff888888(archive)|r" or ""))
+    w.title:SetWidth(textW - 22)   -- clear of the "i" in the corner
+    local n = d.chars
+    w.sub:SetText(string.format("%d character%s  ·  %s games", n, n == 1 and "" or "s", Count(d.played)))
+    w.sub:SetWidth(textW)
     w.seasonBtn:SetText(archived and SeasonLabel(season, true) or "Current season")
-    w.seasonBtn:SetShown(hasPast or archived)
-    w.title:SetWidth(math.max(100, width - (w.seasonBtn:IsShown() and 190 or 0)))
-end
+    w.seasonBtn:SetShown(menu)
+    w.seasonBtn:SetWidth(math.min(160, textW))
 
-local function PaintKPIs(d, top, width)
-    local p = w.kpi
-    PaintPanel(p)
-    p:ClearAllPoints()
-    p:SetPoint("TOPLEFT", Tab.content, "TOPLEFT", 0, -top)
-    p:SetWidth(width)
-    local cellW = width / KPI_COUNT
-    for i, cell in ipairs(w.kpiCells) do
-        cell:ClearAllPoints()
-        cell:SetPoint("TOPLEFT", p, "TOPLEFT", (i - 1) * cellW, 0)
-        cell:SetWidth(cellW)
-        if w.kpiSeps[i] then
-            w.kpiSeps[i]:ClearAllPoints()
-            w.kpiSeps[i]:SetPoint("TOPLEFT", p, "TOPLEFT", (i - 1) * cellW, -10)
-            w.kpiSeps[i]:SetPoint("BOTTOMLEFT", p, "BOTTOMLEFT", (i - 1) * cellW, 10)
-        end
-    end
-
-    local c = w.kpiCells
-    c[1].label:SetText("Games")
-    c[1].value:SetText("|cffffffff" .. Count(d.played) .. "|r")
-    c[1].sub:SetText("all brackets")
-
-    local pct = d.played > 0 and d.won / d.played or 0
-    local r, g, b = WinColor(pct)
-    c[2].label:SetText("Win rate")
-    c[2].value:SetText(d.played > 0 and math.floor(pct * 100 + 0.5) .. "%" or "—")
-    c[2].value:SetTextColor(r, g, b, 1)
-    PaintBar(w.winBar, cellW - PAD * 2, pct, r, g, b)
-    w.winBar:SetShown(d.played > 0)
-    c[2].sub:SetText(d.played > 0 and string.format("|cff5fd17a%s|r – |cffff6b6b%s|r", Count(d.won), Count(d.lost)) or "")
-
-    c[3].label:SetText("Best rating")
+    -- Best rating
+    local b = w.best
+    PaintPanel(b)
     if d.best then
-        c[3].value:SetText(Rating(d.best.rating))
-        c[3].sub:SetText(CharName(d.best.char) .. "  |cff8f8c99· " .. BracketLabel(d.best.meta) .. "|r")
+        local mc = d.best.meta.color
+        b.value:SetText(Rating(d.best.rating))
+        PaintRoundIcon(b.bracket, d.best.meta.icon, mc[1], mc[2], mc[3], 0.9)
+        PaintClassFace(b.face, d.best.char)
+        b.who:SetText(CharName(d.best.char) .. "  |cff8f8c99· " .. BracketLabel(d.best.meta) .. "|r")
     else
-        c[3].value:SetText("|cff555555—|r")
-        c[3].sub:SetText("")
+        b.value:SetText("|cff555555—|r")
+        b.bracket:Hide()
+        b.face:Hide()
+        b.who:SetText("|cff777777No rated games yet|r")
     end
-    c[3].sub:SetWidth(cellW - PAD * 2)
+    b.who:SetWidth(b:GetWidth() - PAD * 2 - 22)
 
-    c[4].label:SetText("Characters")
-    c[4].value:SetText("|cffffffff" .. d.chars .. "|r")
-    c[4].sub:SetText("with rated games")
-
-    -- MVP: the most played character, with its games and main bracket
-    local mvp = d.players[1]
-    c[5].label:SetText("MVP")
-    c[5].players = d.players
-    if mvp then
-        c[5].value:SetText(CharName(mvp.key))
-        c[5].sub:SetText(string.format("%s games  |cff8f8c99· %s|r", Count(mvp.played), BracketLabel(mvp.main)))
+    -- Win rate: wins fill the bar in green, the rest of it is the losses
+    local v = w.win
+    PaintPanel(v)
+    local iw = v:GetWidth() - PAD * 2
+    if d.played > 0 then
+        local pct = d.won / d.played
+        local r, g, bl = WinColor(pct)
+        v.value:SetText(math.floor(pct * 100 + 0.5) .. "%")
+        v.value:SetTextColor(r, g, bl, 1)
+        PaintBar(v.bar, iw, pct, 0.37, 0.82, 0.48)
+        v.bar.track:SetVertexColor(1, 0.42, 0.42, 0.75)
+        v.games:SetText(Count(d.played) .. " games")
+        v.won:SetText("|cff5fd17a" .. Count(d.won) .. " won|r")
+        v.lost:SetText("|cffff6b6b" .. Count(d.lost) .. " lost|r")
     else
-        c[5].value:SetText("|cff555555—|r")
-        c[5].sub:SetText("")
+        v.value:SetText("—")
+        v.value:SetTextColor(0.33, 0.33, 0.33, 1)
+        PaintBar(v.bar, iw, 0, 1, 1, 1)
+        v.games:SetText("")
+        v.won:SetText("")
+        v.lost:SetText("")
     end
-    c[5].value:SetWidth(cellW - PAD * 2)
-    c[5].sub:SetWidth(cellW - PAD * 2)
-    return top + KPI_H
+    return top + HERO_H
 end
 
--- Returns the panel's height
-local function PaintBrackets(d, archived, top, x, width)
-    local p = w.brackets
-    PaintPanel(p)
-    p:ClearAllPoints()
-    p:SetPoint("TOPLEFT", Tab.content, "TOPLEFT", x, -top)
-    p:SetWidth(width)
 
-    local list = {}
-    for _, bt in pairs(d.brackets) do list[#list + 1] = bt end
-    table.sort(list, function(a, b) return a.played > b.played end)
+-- Played brackets first (most games first), then the rest in their usual
+-- order, dimmed. Returns where the cards end.
+local function PaintBracketCards(d, archived, top, width)
+    local order = {}
+    for i, meta in ipairs(PVPHUB._BRACKET_META) do
+        order[i] = { meta = meta, bt = d.brackets[meta.key], index = i }
+    end
+    table.sort(order, function(a, b)
+        local pa, pb = a.bt and a.bt.played or 0, b.bt and b.bt.played or 0
+        if pa ~= pb then return pa > pb end
+        return a.index < b.index
+    end)
 
-    local iw = width - PAD * 2
-    local col = {
-        games = iw * 0.46, wl = iw * 0.63,     -- right edges
-        bar = iw * 0.67, barW = iw * 0.13,     -- left edge, width
-        best = iw,                             -- right edge
-    }
+    local perRow = (width >= 700) and #order or 3
+    local cardW = (width - GAP * (perRow - 1)) / perRow
+    local pr, pg, pb = PanelColor()
+    for i, c in ipairs(w.cards) do
+        local meta, bt = order[i].meta, order[i].bt
+        local mc = meta.color
+        c.data = bt
+        c:ClearAllPoints()
+        c:SetPoint("TOPLEFT", Tab.content, "TOPLEFT",
+            ((i - 1) % perRow) * (cardW + GAP), -(top + math.floor((i - 1) / perRow) * (CARD_H + GAP)))
+        c:SetWidth(cardW)
+        c.label:SetText(BracketLabel(meta))
+        c.label:SetWidth(cardW - PAD * 2 - 38)
+        PaintRoundIcon(c.icon, meta.icon, mc[1], mc[2], mc[3], bt and 0.9 or 0.4)
+        c.icon.icon:SetDesaturated(not bt)
 
-    local y = 32
-    p.cols.bracket:SetPoint("TOPLEFT", PAD + 2, -y)
-    p.cols.games:SetPoint("TOPRIGHT", p, "TOPLEFT", PAD + col.games, -y)
-    p.cols.wl:SetPoint("TOPRIGHT", p, "TOPLEFT", PAD + col.wl, -y)
-    p.cols.win:SetPoint("TOPLEFT", PAD + col.bar, -y)
-    p.cols.best:SetPoint("TOPRIGHT", p, "TOPLEFT", PAD + col.best, -y)
-    for _, fs in pairs(p.cols) do fs:SetShown(#list > 0) end
-    y = y + 18
-    p.line:ClearAllPoints()
-    p.line:SetPoint("TOPLEFT", PAD, -y)
-    p.line:SetPoint("TOPRIGHT", -PAD, -y)
-    p.line:SetShown(#list > 0)
-    y = y + 2
-
-    for i, row in ipairs(p.rows) do
-        local bt = list[i]
-        row:SetShown(bt ~= nil)
+        local shown = 0
         if bt then
-            row.data = bt
-            row:ClearAllPoints()
-            row:SetPoint("TOPLEFT", PAD, -y)
-            row:SetWidth(iw)
-            row.icon:SetTexture(bt.meta.icon)
-            row.label:SetText(BracketLabel(bt.meta))
-            row.games:ClearAllPoints()
-            row.games:SetPoint("RIGHT", row, "LEFT", col.games, 0)
-            row.games:SetText("|cffffffff" .. Count(bt.played) .. "|r")
-            row.wl:ClearAllPoints()
-            row.wl:SetPoint("RIGHT", row, "LEFT", col.wl, 0)
-            row.wl:SetText(string.format("|cff5fd17a%s|r–|cffff6b6b%s|r", Count(bt.won), Count(bt.lost)))
-            local pct = bt.played > 0 and bt.won / bt.played or 0
+            -- The bracket's color glows in from the top
+            c.bg:SetGradient("VERTICAL", CreateColor(pr, pg, pb, 0.6),
+                CreateColor(pr + (mc[1] - pr) * 0.4, pg + (mc[2] - pg) * 0.4, pb + (mc[3] - pb) * 0.4, 0.75))
+            c.best:SetText(Rating(bt.best))
+            c.bestLabel:SetShown(bt.best > 0)
+            local pct = bt.won / bt.played
             local r, g, b = WinColor(pct)
-            row.bar:ClearAllPoints()
-            row.bar:SetPoint("LEFT", row, "LEFT", col.bar, 0)
-            PaintBar(row.bar, col.barW, pct, r, g, b)
-            row.pct:ClearAllPoints()
-            row.pct:SetPoint("LEFT", row.bar, "RIGHT", 6, 0)
-            row.pct:SetText(WinText(pct))
-            row.best:ClearAllPoints()
-            row.best:SetPoint("RIGHT", row, "LEFT", col.best, 0)
-            row.best:SetText(Rating(bt.best))
-            y = y + ROW_H
+            PaintBar(c.bar, cardW - PAD * 2, pct, r, g, b)
+            c.bar:Show()
+            c.stats:SetText(string.format("|cffffffff%s|r |cff8f8c99games  ·|r %s", Count(bt.played), WinText(pct)))
+            -- As many faces as fit right of the rating, "+N" for the rest
+            table.sort(bt.chars, function(x, y) return x.s.played > y.s.played end)
+            local step = FACE - 4
+            local room = cardW - PAD * 2 - c.best:GetStringWidth() - 10
+                - (c.bestLabel:IsShown() and c.bestLabel:GetStringWidth() + 5 or 0)
+            shown = math.min(#bt.chars, MAX_FACES)
+            while shown > 0 do
+                local extra = #bt.chars - shown
+                c.more:SetText(extra > 0 and ("+" .. extra) or "")
+                local need = FACE + (shown - 1) * step + (extra > 0 and c.more:GetStringWidth() + 3 or 0)
+                if need <= room then break end
+                shown = shown - 1
+            end
+            for f = 1, shown do
+                local face = c.faces[f]
+                PaintClassFace(face, bt.chars[f].key)
+                face:ClearAllPoints()
+                face:SetPoint("TOPRIGHT", c, "TOPRIGHT", -PAD - (shown - f) * step, -54)
+            end
+            c.more:SetShown(shown > 0 and #bt.chars > shown)
+            c.more:ClearAllPoints()
+            if shown > 0 then c.more:SetPoint("RIGHT", c.faces[1], "LEFT", -3, 0) end
+        else
+            c.bg:SetVertexColor(pr, pg, pb, 0.4)
+            c.best:SetText("|cff555555—|r")
+            c.bestLabel:Hide()
+            c.bar:Hide()
+            c.stats:SetText("|cff666666No games " .. (archived and "that season" or "yet") .. "|r")
+            c.more:Hide()
         end
+        for f = shown + 1, MAX_FACES do c.faces[f]:Hide() end
+        c:SetAlpha(bt and 1 or 0.7)
     end
-
-    p.empty:SetShown(#list == 0)
-    p.hint:SetShown(#list > 0)
-    if #list == 0 then
-        p.empty:ClearAllPoints()
-        p.empty:SetPoint("TOPLEFT", PAD, -36)
-        p.empty:SetText(archived and "No rated games archived for this season."
-            or "No rated games recorded this season yet.")
-        y = 60
-    else
-        y = y + 6
-        p.hint:ClearAllPoints()
-        p.hint:SetPoint("TOPLEFT", PAD, -y)
-        y = y + 18
-    end
-    return y
+    return top + math.ceil(#order / perRow) * (CARD_H + GAP) - GAP
 end
 
 local function PaintTitles(d, archived, top, x, width)
@@ -860,18 +1020,23 @@ local function PaintTitles(d, archived, top, x, width)
         row:ClearAllPoints()
         row:SetPoint("TOPLEFT", PAD, -y)
         row:SetWidth(iw)
-        row.who:SetWidth(iw)
+        local barW = iw - (TITLE_ICON + 10)
+        row.who:SetWidth(barW)
 
+        local mc = meta.color
+        PaintRoundIcon(row.icon, t.icon or meta.icon, mc[1], mc[2], mc[3], 0.6)
         if t.earned then
+            row.icon.ring:SetVertexColor(1, 0.82, 0, 0.95)
             row.value:SetText("|cffffd100Earned|r")
-            PaintBar(row.bar, iw, 1, 1, 0.82, 0)
+            PaintBar(row.bar, barW, 1, 1, 0.82, 0)
             local when = EarnedDate(t.tp)
             row.who:SetText(CharName(t.char) .. (when and ("  |cff8f8c99· " .. when .. "|r") or ""))
         else
             local required = t.required > 0 and t.required or nil
             local pct = required and math.min(1, t.current / required) or 0
+            row.icon.icon:SetDesaturated(t.current <= 0)
             row.value:SetText(required and string.format("|cffffffff%d / %d|r", math.min(t.current, required), required) or "|cff555555—|r")
-            PaintBar(row.bar, iw, pct, ProgressColor(pct))
+            PaintBar(row.bar, barW, pct, ProgressColor(pct))
             row.who:SetText(t.char and CharName(t.char) or "|cff777777No progress yet|r")
         end
 
@@ -1020,6 +1185,52 @@ local function PaintRoster(d, top, width)
     return top + y
 end
 
+-- Returns the panel's height
+local function PaintTop(d, top, x, width)
+    local p = w.top
+    PaintPanel(p)
+    p:ClearAllPoints()
+    p:SetPoint("TOPLEFT", Tab.content, "TOPLEFT", x, -top)
+    p:SetWidth(width)
+    local iw = width - PAD * 2
+
+    local list = {}
+    for _, pl in ipairs(d.players) do
+        if pl.best > 0 then list[#list + 1] = pl end
+    end
+    table.sort(list, function(a, b)
+        if a.best ~= b.best then return a.best > b.best end
+        return a.played > b.played
+    end)
+    local mvp = d.players[1]   -- most games first
+
+    local y = 34
+    for i, r in ipairs(p.rows) do
+        local pl = list[i]
+        r:SetShown(pl ~= nil)
+        if pl then
+            r.player = pl
+            r:ClearAllPoints()
+            r:SetPoint("TOPLEFT", PAD, -y)
+            r:SetWidth(iw)
+            r.rank:SetText(i)
+            PaintClassFace(r.face, pl.key)
+            r.name:SetText(CharName(pl.key))
+            r.mvp:SetShown(pl == mvp)
+            r.bracket:SetTexture(pl.bestMeta and pl.bestMeta.icon)
+            r.sub:SetText(string.format("%s  ·  %s games  ·  %s", pl.bestMeta and BracketLabel(pl.bestMeta) or "",
+                Count(pl.played), WinText(pl.won / math.max(1, pl.played))))
+            r.sub:SetWidth(math.max(40, iw - 70 - 50))   -- clear of the rating
+            r.rating:SetText(Rating(pl.best))
+            y = y + TOP_ROW_H
+        end
+    end
+    p.empty:SetShown(#list == 0)
+    p.empty:SetText("No rated characters yet")
+    if #list == 0 then y = 60 end
+    return y + 6
+end
+
 function Tab.Render()
     local content = Tab.content
     if not content or not Tab.built then return end
@@ -1033,25 +1244,24 @@ function Tab.Render()
     local season = Tab.season or current
     local d = BuildData(season, archived)
 
-    PaintHeader(d, season, archived, width)
-    local y = PaintKPIs(d, HEADER_H, width) + GAP
+    local y = PaintHero(d, season, archived, 0, width) + GAP
+    y = PaintBracketCards(d, archived, y, width) + GAP
 
     local h
     if width >= TWO_COLUMN_MIN then
-        local leftW = math.floor((width - GAP) * 0.62)
-        local rightW = width - GAP - leftW
-        local hb = PaintBrackets(d, archived, y, 0, leftW)
-        local ht = PaintTitles(d, archived, y, leftW + GAP, rightW)
-        h = math.max(hb, ht)
-        w.brackets:SetHeight(h)
+        local leftW = math.floor((width - GAP) / 2)
+        local ht = PaintTitles(d, archived, y, 0, leftW)
+        local hp = PaintTop(d, y, leftW + GAP, width - GAP - leftW)
+        h = math.max(ht, hp)
         w.titles:SetHeight(h)
+        w.top:SetHeight(h)
         y = y + h + GAP
     else
-        h = PaintBrackets(d, archived, y, 0, width)
-        w.brackets:SetHeight(h)
-        y = y + h + GAP
         h = PaintTitles(d, archived, y, 0, width)
         w.titles:SetHeight(h)
+        y = y + h + GAP
+        h = PaintTop(d, y, 0, width)
+        w.top:SetHeight(h)
         y = y + h + GAP
     end
 
@@ -1111,10 +1321,10 @@ function Tab.Create(f)
     scroll:SetScrollChild(content)
 
     Tab.content, Tab.scroll = content, scroll
-    CreateHeader(content)
-    CreateKPIs(content)
-    CreateBrackets(content)
+    CreateHero(content)
+    CreateBracketCards(content)
     CreateTitles(content)
+    CreateTop(content)
     CreateRoster(content)
     Tab.built = true
 

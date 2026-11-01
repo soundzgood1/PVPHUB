@@ -17,10 +17,11 @@ local _, PVPHUB = ...
 local Cards = {}
 PVPHUB.Cards = Cards
 
--- Card view area inside the window, in window units: below the toolbar row,
--- above the footer, same side margins as the list.
-local AREA_TOP, AREA_BOTTOM, AREA_LEFT, AREA_RIGHT = -92, 60, 20, 45
-local LIST_TOP     = -120   -- the list's own scroll area starts below its column headers
+-- Card view area inside the window, in window units: below the title row
+-- (title, toolbar, close), above the footer, same side margins as the list.
+-- The list's column headers sit at the same height (core, -62).
+local AREA_TOP, AREA_BOTTOM, AREA_LEFT, AREA_RIGHT = -62, 60, 20, 45
+local LIST_TOP     = -90    -- the list's own scroll area starts below its column headers
 local LIST_SHARE   = 0.20   -- the character list's share of the width; the info panel gets the rest
 local LIST_MIN_W   = 200    -- wide enough for a full spec and realm name
 local COLUMN_GAP   = 12
@@ -30,10 +31,18 @@ local CARD_GAP     = 6
 local CARD_RADIUS  = 5
 local EMBLEM_SIZE  = 38
 local GROUP_HEIGHT = 26     -- group bar in the list
-local NEW_GROUP_H  = 24     -- "New Group" button above the list
-local GROUPS_SWITCH_W = 92  -- the "Groups" switch and its label beside it
-local SEARCH_H     = 20     -- search box under it
-local LIST_HEAD_H  = NEW_GROUP_H + 4 + SEARCH_H + 6   -- both, above the list
+
+-- The toolbar in the title row (the tabs are a rail outside the window), for
+-- the list and the card view alike: List/Cards after the title; search,
+-- Groups, "+" (new group), Columns (list only) and Sort before the close
+-- button, each in a thin frame (UI.AddToolFrame)
+local TOOLBAR_Y, TOOLBAR_H = -14, 24   -- level with the title and close button
+local TOOLBAR_LEFT  = 152   -- the title and "by soundz vX" under it end before this
+local TOOLBAR_RIGHT = 52    -- the close button: 26 wide, 18 from the right edge
+local TOOL_GAP      = 6
+local GROUPS_W      = 92    -- the Groups switch and its label, in their frame
+local SEARCH_MIN_W  = 70    -- narrower than this, the search box hides
+local SEARCH_MAX_W  = 180
 
 local DETAIL_PAD   = 14
 local BIG_PORTRAIT = 52
@@ -121,6 +130,44 @@ end
 local function ThemeColor()
     if PVPHUB.UI and PVPHUB.UI.ThemeColor then return PVPHUB.UI.ThemeColor() end
     return GetColors().ACCENT_LINE or { 0.8, 0.3, 0.5 }
+end
+
+-- The view's own colors: dark cards like the character select screen and
+-- gold. A theme can restyle them with a CARDS table (Graphite does); a
+-- field it leaves out falls back to these.
+--   cardFill/cardRing             a character card
+--   selBottom/selTop/selRing      the selected card (fill gradient, rim)
+--   groupFill/groupRing           a group bar
+--   heading                       section titles, their lines, the +/- signs
+--   name                          an unselected card's name (hex)
+--   tileSel {r, g, b, a, hoverA}  the rating tile the graph shows
+--   tileDrop                      a tile something is dragged over
+local DEFAULT_CARDS = {
+    cardFill  = { 0.06, 0.05, 0.04, 0.85 },
+    cardRing  = { 0.32, 0.29, 0.26, 0.7 },
+    selBottom = { 0.30, 0.22, 0.03, 0.95 },
+    selTop    = { 0.58, 0.44, 0.08, 0.95 },
+    selRing   = { 1, 0.85, 0.2, 1 },
+    groupFill = { 0.09, 0.07, 0.06, 0.92 },
+    groupRing = { 0.36, 0.32, 0.28, 0.8 },
+    heading   = { 1, 0.82, 0 },
+    name      = "ffd100",
+    tileSel   = { 0.32, 0.24, 0.05, 0.55, 0.7 },
+    tileDrop  = { 0.5, 0.38, 0.08, 0.85 },
+}
+local CARDS_FALLBACK = { __index = DEFAULT_CARDS }
+
+local function CardStyle()
+    local style = GetColors().CARDS
+    if not style then return DEFAULT_CARDS end
+    if not getmetatable(style) then setmetatable(style, CARDS_FALLBACK) end
+    return style
+end
+
+local function ToggleText(open)
+    local h = CardStyle().heading
+    return string.format("|cff%02x%02x%02x%s|r",
+        math.floor(h[1] * 255 + 0.5), math.floor(h[2] * 255 + 0.5), math.floor(h[3] * 255 + 0.5), open and "–" or "+")
 end
 
 local function ClassColor(data)
@@ -331,13 +378,14 @@ local function PaintCharCard(card, entry, width, selected)
     local cc, token = ClassColor(data)
 
     -- Dark card like the character select screen; the selected one is gold,
-    -- lighter at the top, with a bright gold rim
+    -- lighter at the top, with a bright gold rim (CardStyle)
+    local style = CardStyle()
     if selected then
-        card.ring:SetVertexColor(1, 0.85, 0.2, 1)
-        card.fill:SetGradient("VERTICAL", CreateColor(0.30, 0.22, 0.03, 0.95), CreateColor(0.58, 0.44, 0.08, 0.95))
+        card.ring:SetVertexColor(unpack(style.selRing))
+        card.fill:SetGradient("VERTICAL", CreateColor(unpack(style.selBottom)), CreateColor(unpack(style.selTop)))
     else
-        card.ring:SetVertexColor(0.32, 0.29, 0.26, 0.7)
-        card.fill:SetVertexColor(0.06, 0.05, 0.04, 0.85)
+        card.ring:SetVertexColor(unpack(style.cardRing))
+        card.fill:SetVertexColor(unpack(style.cardFill))
     end
 
     SetFactionEmblem(card.emblem, data.faction or RACE_FACTION[data.race])
@@ -347,7 +395,7 @@ local function PaintCharCard(card, entry, width, selected)
     card.who:SetWidth(textW)
     card.realm:SetWidth(textW)
 
-    card.name:SetText((selected and "|cffffffff" or "|cffffd100") .. (data.displayName or charKey:match("^([^%-]+)") or charKey) .. "|r")
+    card.name:SetText("|cff" .. (selected and "ffffff" or style.name) .. (data.displayName or charKey:match("^([^%-]+)") or charKey) .. "|r")
 
     local className = (LOCALIZED_CLASS_NAMES_MALE and LOCALIZED_CLASS_NAMES_MALE[token]) or token
     local spec = PVPHUB._GetCachedSpecInfo(data.specID)
@@ -375,8 +423,6 @@ local function CreateGroupHeader(container)
     h.ring:SetRounded(true)
     h.fill:SetRounded(true)
     h.glow:SetRounded(true)
-    h.ring:SetVertexColor(0.36, 0.32, 0.28, 0.8)
-    h.fill:SetVertexColor(0.09, 0.07, 0.06, 0.92)
     h.glow:SetVertexColor(1, 1, 1, 0.06)
     h.glow:Hide()
 
@@ -432,7 +478,10 @@ local function PaintGroupHeader(h, entry)
     h.groupIndex = entry.groupIndex
     h.groupName  = entry.groupName
     h.isDefault  = entry.groupIsDefault
-    h.toggle:SetText(entry.groupCollapsed and "|cffffd100+|r" or "|cffffd100–|r")
+    local style = CardStyle()
+    h.ring:SetVertexColor(unpack(style.groupRing))
+    h.fill:SetVertexColor(unpack(style.groupFill))
+    h.toggle:SetText(ToggleText(not entry.groupCollapsed))
     h.text:SetText(string.format("|cffffffff%s|r  |cff777777%d|r", entry.groupName or "", entry.characterCount or 0))
 end
 
@@ -833,6 +882,13 @@ local function SectionOrder()
     return order
 end
 
+-- Colors a section's title and the line under it (CardStyle heading)
+local function PaintSectionHeader(h)
+    local c = CardStyle().heading
+    h.title:SetTextColor(c[1], c[2], c[3], 1)
+    h.line:SetGradient("HORIZONTAL", CreateColor(c[1], c[2], c[3], 0.5), CreateColor(c[1], c[2], c[3], 0))
+end
+
 local function CreateSectionHeader(parent, text, key)
     local h = CreateFrame("Button", nil, parent)
     h:SetHeight(22)
@@ -841,18 +897,16 @@ local function CreateSectionHeader(parent, text, key)
     h.title = NewText(h, 13)
     h.title:SetPoint("LEFT", 0, 2)
     h.title:SetText(text)
-    h.title:SetTextColor(1, 0.82, 0, 1)
 
     h.toggle = NewText(h, 15)
     h.toggle:SetPoint("RIGHT", -4, 2)
     h.toggle:SetJustifyH("RIGHT")
 
-    local line = h:CreateTexture(nil, "ARTWORK")
-    line:SetTexture(WHITE)
-    line:SetHeight(1)
-    line:SetPoint("BOTTOMLEFT")
-    line:SetPoint("BOTTOMRIGHT")
-    line:SetGradient("HORIZONTAL", CreateColor(1, 0.82, 0, 0.5), CreateColor(1, 0.82, 0, 0))
+    h.line = h:CreateTexture(nil, "ARTWORK")
+    h.line:SetTexture(WHITE)
+    h.line:SetHeight(1)
+    h.line:SetPoint("BOTTOMLEFT")
+    h.line:SetPoint("BOTTOMRIGHT")
 
     local hl = h:CreateTexture(nil, "HIGHLIGHT")
     hl:SetAllPoints()
@@ -866,6 +920,7 @@ local function CreateSectionHeader(parent, text, key)
     h:RegisterForDrag("LeftButton")
     h:SetScript("OnDragStart", function(self) Cards.BeginSectionDrag(self) end)
     h:SetScript("OnDragStop", function() Cards.EndSectionDrag() end)
+    PaintSectionHeader(h)
     return h
 end
 
@@ -999,15 +1054,17 @@ local function CreateRatingRow(content)
 end
 
 -- Gold tint for the tile the graph shows, lighter on hover; brightest while
--- something is dragged over it
+-- something is dragged over it (CardStyle)
 function Cards.PaintTileBackground(t)
+    local style = CardStyle()
     if t.isGhost then
         -- The drag copy floats over anything: solid black, so it reads
         t.bg:SetVertexColor(0.03, 0.03, 0.04, 0.97)
     elseif t.dropTarget then
-        t.bg:SetVertexColor(0.5, 0.38, 0.08, 0.85)
+        t.bg:SetVertexColor(unpack(style.tileDrop))
     elseif t.selected then
-        t.bg:SetVertexColor(0.32, 0.24, 0.05, t.hover and 0.7 or 0.55)
+        local c = style.tileSel
+        t.bg:SetVertexColor(c[1], c[2], c[3], t.hover and c[5] or c[4])
     else
         t.bg:SetVertexColor(1, 1, 1, t.hover and 0.09 or 0.05)
     end
@@ -2004,16 +2061,15 @@ local function GetDetail(f)
     -- sides, column titles, rows
     panel.listSep = CreateFrame("Frame", nil, panel.ratingsBody)
     panel.listSep:SetHeight(1)
-    local sepLeft = panel.listSep:CreateTexture(nil, "ARTWORK")
-    sepLeft:SetTexture(WHITE)
-    sepLeft:SetPoint("TOPLEFT")
-    sepLeft:SetPoint("BOTTOMRIGHT", panel.listSep, "BOTTOM")
-    sepLeft:SetGradient("HORIZONTAL", CreateColor(1, 0.82, 0, 0), CreateColor(1, 0.82, 0, 0.6))
-    local sepRight = panel.listSep:CreateTexture(nil, "ARTWORK")
-    sepRight:SetTexture(WHITE)
-    sepRight:SetPoint("TOPLEFT", panel.listSep, "TOP")
-    sepRight:SetPoint("BOTTOMRIGHT")
-    sepRight:SetGradient("HORIZONTAL", CreateColor(1, 0.82, 0, 0.6), CreateColor(1, 0.82, 0, 0))
+    -- (colored in PaintDetail, CardStyle heading)
+    panel.sepLeft = panel.listSep:CreateTexture(nil, "ARTWORK")
+    panel.sepLeft:SetTexture(WHITE)
+    panel.sepLeft:SetPoint("TOPLEFT")
+    panel.sepLeft:SetPoint("BOTTOMRIGHT", panel.listSep, "BOTTOM")
+    panel.sepRight = panel.listSep:CreateTexture(nil, "ARTWORK")
+    panel.sepRight:SetTexture(WHITE)
+    panel.sepRight:SetPoint("TOPLEFT", panel.listSep, "TOP")
+    panel.sepRight:SetPoint("BOTTOMRIGHT")
     panel.listTitles = {}
     for i, col in ipairs(LIST_COLUMNS) do
         local fs = NewText(panel.ratingsBody, 10)
@@ -2100,6 +2156,9 @@ local function PaintDetail(f, charKey, width)
     local colors = GetColors()
     local base = colors.WINDOW_BG or { 0.08, 0.05, 0.05 }
     panel.bg:SetVertexColor(base[1] * 1.6, base[2] * 1.6, base[3] * 1.6, 0.55)
+    local hc = CardStyle().heading
+    panel.sepLeft:SetGradient("HORIZONTAL", CreateColor(hc[1], hc[2], hc[3], 0), CreateColor(hc[1], hc[2], hc[3], 0.6))
+    panel.sepRight:SetGradient("HORIZONTAL", CreateColor(hc[1], hc[2], hc[3], 0.6), CreateColor(hc[1], hc[2], hc[3], 0))
 
     panel.content:SetShown(data ~= nil)
     panel.empty:SetShown(data == nil)
@@ -2161,7 +2220,8 @@ local function PaintDetail(f, charKey, width)
         header:SetPoint("TOPLEFT", panel.content, "TOPLEFT", 0, -top)
         header:SetWidth(contentW)
         local open = SectionOpen(header.key)
-        header.toggle:SetText(open and "|cffffd100–|r" or "|cffffd100+|r")
+        PaintSectionHeader(header)
+        header.toggle:SetText(ToggleText(open))
         body:SetShown(open)
         return top + 26, open
     end
@@ -2616,9 +2676,10 @@ local function SetCardArea(f)
     local detailW = areaW - listW - COLUMN_GAP
     local listX = AREA_LEFT + detailW + COLUMN_GAP
 
-    -- The list starts below the New Group button and the search box
+    -- The list starts level with the info panel: New Group, the Groups
+    -- switch and the search box are in the toolbar row above (LayoutToolbar)
     f.scrollFrame:ClearAllPoints()
-    f.scrollFrame:SetPoint("TOPLEFT", f, "TOPLEFT", listX, AREA_TOP - LIST_HEAD_H)
+    f.scrollFrame:SetPoint("TOPLEFT", f, "TOPLEFT", listX, AREA_TOP)
     f.scrollFrame:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -AREA_RIGHT, AREA_BOTTOM)
 
     local panel = GetDetail(f)
@@ -2627,77 +2688,15 @@ local function SetCardArea(f)
     panel:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", AREA_LEFT, AREA_BOTTOM)
     panel:SetWidth(detailW)
     panel:Show()
-
-    -- "New Group" above the list, like the character select screen. A child
-    -- of the info panel so it shows and hides with the card view.
-    if not panel.newGroupButton then
-        local b = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
-        b:SetText("New Group")
-        b:SetScript("OnClick", function() StaticPopup_Show("PVPHUB_CREATE_GROUP") end)
-        b:SetScript("OnEnter", function(self)
-            GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
-            GameTooltip:SetText("New Group", 1, 1, 1)
-            GameTooltip:AddLine("Drag characters onto a group bar to put them in it, and drag the bars to order your groups.", 0.7, 0.7, 0.7, true)
-            GameTooltip:Show()
-        end)
-        b:SetScript("OnLeave", function() GameTooltip:Hide() end)
-        b:SetSize(listW - 2 - GROUPS_SWITCH_W, NEW_GROUP_H)   -- before skinning: the corner radius follows the height
-        if PVPHUB.UI then PVPHUB.UI.SkinButton(b) end
-        panel.newGroupButton = b
-    end
-    panel.newGroupButton:ClearAllPoints()
-    panel.newGroupButton:SetPoint("TOPLEFT", f, "TOPLEFT", listX, AREA_TOP)
-    panel.newGroupButton:SetSize(listW - 2 - GROUPS_SWITCH_W, NEW_GROUP_H)
-
-    -- "Groups" switch beside it: character groups on or off right here,
-    -- the same setting as Settings > Display > Enable Character Groups
-    if not panel.groupsSwitch then
-        local cb = CreateFrame("CheckButton", nil, panel, "UICheckButtonTemplate")
-        cb:SetSize(30, NEW_GROUP_H)
-        cb.Text = cb.Text or NewText(cb, 12)
-        cb.Text:SetText("Groups")
-        cb.Text:SetTextColor(0.9, 0.9, 0.9, 1)
-        cb:SetHitRectInsets(0, -44, 0, 0)   -- the label is clickable too
-        cb:SetScript("OnClick", function(self)
-            Cards.SetGroupsEnabled(self:GetChecked() and true or false)
-        end)
-        cb:SetScript("OnEnter", function(self)
-            GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
-            GameTooltip:SetText("Character groups", 1, 1, 1)
-            GameTooltip:AddLine("Show your characters in their groups, or as one list.", 0.7, 0.7, 0.7, true)
-            GameTooltip:Show()
-        end)
-        cb:SetScript("OnLeave", function() GameTooltip:Hide() end)
-        if PVPHUB.UI then PVPHUB.UI.SkinSwitch(cb) end
-        panel.groupsSwitch = cb
-    end
-    panel.groupsSwitch:ClearAllPoints()
-    panel.groupsSwitch:SetPoint("LEFT", panel.newGroupButton, "RIGHT", 10, 0)
-    local groups = PVPHUB_SETTINGS.characterGroups
-    panel.groupsSwitch:SetChecked(groups and groups.enabled or false)
-
-    -- Search under it: Blizzard's search box (magnifier, placeholder, clear
-    -- button); filters the list as you type (Cards.SetSearch)
-    if not panel.searchBox then
-        local s = CreateFrame("EditBox", nil, panel, "SearchBoxTemplate")
-        s:SetAutoFocus(false)
-        s:SetMaxLetters(40)
-        s:HookScript("OnTextChanged", function(self) Cards.SetSearch(self:GetText()) end)
-        panel.searchBox = s
-    end
-    panel.searchBox:ClearAllPoints()
-    -- The template's left edge art sits a few units outside the box
-    panel.searchBox:SetPoint("TOPLEFT", f, "TOPLEFT", listX + 6, AREA_TOP - NEW_GROUP_H - 4)
-    panel.searchBox:SetSize(listW - 8, SEARCH_H)
     return listW, detailW
 end
 
 -- --------------------------------------------------------------------------
 -- Search
 -- --------------------------------------------------------------------------
--- The search box under New Group filters the list as you type: a character
--- matches when its name, realm, class or spec contains the text. Groups
--- show only their matches, expanded even when collapsed, and groups
+-- The toolbar's search box filters the cards and the list as you type: a
+-- character matches when its name, realm, class or spec contains the text.
+-- Groups show only their matches, expanded even when collapsed, and groups
 -- without matches are left out. Dragging is paused while searching.
 
 Cards.searchText = ""
@@ -2738,6 +2737,7 @@ local function BuildSearchList(displayList, sorted, query)
         if #matches > 0 then
             out[#out + 1] = {
                 isGroupHeader  = true,
+                groupData      = header.groupData,   -- the list's group bars use it
                 groupIndex     = header.groupIndex,
                 groupName      = header.groupName,
                 groupIsDefault = header.groupIsDefault,
@@ -2750,16 +2750,28 @@ local function BuildSearchList(displayList, sorted, query)
     return out
 end
 
--- Called as the search text changes: redraws just the card view
+-- The list's display list as the search leaves it (core's UpdateContent,
+-- for the list view; the card view filters in Render)
+function Cards.FilterForSearch(displayList, sorted)
+    if Cards.searchText == "" then return displayList end
+    return BuildSearchList(displayList, sorted, Cards.searchText)
+end
+
+-- Called as the search text changes: redraws just the card view, or the
+-- whole list
 function Cards.SetSearch(text)
     text = (text or ""):gsub("^%s+", ""):gsub("%s+$", "")
     if text == Cards.searchText then return end
     Cards.searchText = text
     local f = PVPHUB.window
-    if f and Cards.IsActive() and f.currentTab == "characters" and Cards.lastDisplayList then
+    if not (f and f.currentTab == "characters") then return end
+    if Cards.IsActive() and Cards.lastDisplayList then
         local height = Cards.Render(f, Cards.lastDisplayList, Cards.lastSorted)
         f.contentFrame:SetHeight(math.max(height, 100))
         f.scrollFrame:SetVerticalScroll(0)
+    elseif not Cards.IsActive() and f.UpdateContent then
+        f.scrollFrame:SetVerticalScroll(0)
+        f:UpdateContent()
     end
 end
 
@@ -2781,11 +2793,8 @@ function Cards.Render(f, displayList, sorted)
     Cards.lastSorted = sorted
     local container = GetContainer(f)
     if f.viewToggle then Cards.PaintToggle(f.viewToggle) end
-    -- The card view has its own New Group button above the list, and the
-    -- list's Show/Hide (columns) does nothing here; Sort stays, it orders
-    -- the character cards
-    if f.manageGroupsBtn then f.manageGroupsBtn:Hide() end
-    if _G.PVPHUBColumnDropdown then _G.PVPHUBColumnDropdown:Hide() end
+    -- The toolbar without Columns, which do nothing here
+    Cards.LayoutToolbar(f)
 
     -- Keep the chosen character while it's listed at all, even inside a
     -- collapsed group; otherwise start with the logged-in one, or the first.
@@ -2877,15 +2886,8 @@ function Cards.Hide(f)
         f.scrollFrame:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -AREA_RIGHT, AREA_BOTTOM)
     end
     if f.viewToggle then Cards.PaintToggle(f.viewToggle) end
-    -- The list's own "+ New Group" button and Show/Hide again, as SwitchTab
-    -- shows them
-    if f.currentTab == "characters" then
-        if f.manageGroupsBtn then
-            local groups = PVPHUB_SETTINGS.characterGroups
-            f.manageGroupsBtn:SetShown(groups and groups.enabled and true or false)
-        end
-        if _G.PVPHUBColumnDropdown then _G.PVPHUBColumnDropdown:Show() end
-    end
+    -- The toolbar with Columns again
+    Cards.LayoutToolbar(f)
 end
 
 -- --------------------------------------------------------------------------
@@ -2897,55 +2899,42 @@ end
 local SWITCH_W, SWITCH_H = 132, 24
 local SWITCH_INSET = 2
 
--- Eases the highlight toward its side
-local function SwitchOnUpdate(bar, elapsed)
-    local diff = bar.thumbTarget - bar.thumbX
-    if math.abs(diff) < 0.5 then
-        bar.thumbX = bar.thumbTarget
-        bar:SetScript("OnUpdate", nil)
-    else
-        bar.thumbX = bar.thumbX + diff * math.min(1, elapsed * 14)
-    end
+-- Places the highlight at x; each label brightens as the highlight reaches
+-- it and dims as it leaves
+local function PlaceThumb(bar, x)
     bar.thumbFrame:ClearAllPoints()
-    bar.thumbFrame:SetPoint("LEFT", bar, "LEFT", bar.thumbX, 0)
+    bar.thumbFrame:SetPoint("LEFT", bar, "LEFT", x, 0)
+    local t = (x - SWITCH_INSET) / (SWITCH_W / 2 - SWITCH_INSET)   -- 0 on List, 1 on Cards
+    for _, b in ipairs(bar.buttons) do
+        local on = (b.mode == "cards") and t or (1 - t)
+        if b.hover then on = math.max(on, 0.7) end
+        b.text:SetTextColor(0.62 + 0.38 * on, 0.62 + 0.38 * on, 0.66 + 0.34 * on, 1)
+    end
 end
 
--- Colors the switch and moves the highlight to the active view (instantly
--- the first time, sliding afterwards)
+-- Colors the switch and slides the highlight to the active view (instantly
+-- the first time). The slide is UI.Slide's, which doesn't skip frames when
+-- the click rebuilds the window in the same frame.
 function Cards.PaintToggle(bar, instant)
     local ac = ThemeColor()
-    local active = Cards.IsActive() and "cards" or "list"
-
     bar.track:SetVertexColor(1, 1, 1, 0.08)
     bar.thumb:SetGradient("VERTICAL",
         CreateColor(ac[1] * 0.55, ac[2] * 0.55, ac[3] * 0.55, 0.95),
         CreateColor(math.min(1, ac[1] * 0.9 + 0.1), math.min(1, ac[2] * 0.9 + 0.1), math.min(1, ac[3] * 0.9 + 0.1), 0.95))
-
-    for _, b in ipairs(bar.buttons) do
-        if b.mode == active then
-            b.text:SetTextColor(1, 1, 1, 1)
-        else
-            b.text:SetTextColor(0.62, 0.62, 0.66, 1)
-        end
-    end
-
-    bar.thumbTarget = (active == "cards") and (SWITCH_W / 2) or SWITCH_INSET
-    if instant or not bar.thumbX then
-        bar.thumbX = bar.thumbTarget
-        SwitchOnUpdate(bar, 0)
-    elseif bar.thumbX ~= bar.thumbTarget then
-        bar:SetScript("OnUpdate", SwitchOnUpdate)
-    end
+    PVPHUB.UI.Slide(bar, Cards.IsActive() and (SWITCH_W / 2) or SWITCH_INSET, bar.place, instant)
 end
 
--- Builds the switch on the Characters tab's toolbar row, right-aligned with
--- the list (SwitchTab shows it on the Characters tab only).
+local BuildToolbar   -- below, under Toolbar
+
+-- Builds the switch at the left of the Characters tab's toolbar row and the
+-- rest of that row (BuildToolbar). SwitchTab shows the switch on the
+-- Characters tab only; LayoutToolbar places everything.
 function Cards.CreateToggle(f)
     if f.viewToggle then return f.viewToggle end
 
     local bar = CreateFrame("Frame", nil, f)
     bar:SetSize(SWITCH_W, SWITCH_H)
-    bar:SetPoint("TOPRIGHT", f, "TOPRIGHT", -AREA_RIGHT, -60)
+    bar:SetPoint("TOPLEFT", f, "TOPLEFT", TOOLBAR_LEFT, TOOLBAR_Y)
 
     -- Track: a faint lighter pill, no outline. Track and highlight are
     -- smooth textures (UI.CreatePill), not masked shapes, which left a thin
@@ -2956,6 +2945,8 @@ function Cards.CreateToggle(f)
     bar.thumbFrame = CreateFrame("Frame", nil, bar)
     bar.thumbFrame:SetSize(SWITCH_W / 2 - SWITCH_INSET, SWITCH_H - SWITCH_INSET * 2)
     bar.thumb = PVPHUB.UI.CreatePill(bar.thumbFrame, "ARTWORK", 0)
+    bar.place = function(x) PlaceThumb(bar, x) end
+    local function Repaint() PlaceThumb(bar, bar.pvpSlide and bar.pvpSlide.value or SWITCH_INSET) end
 
     bar.buttons = {}
     local modes = {
@@ -2980,26 +2971,28 @@ function Cards.CreateToggle(f)
             end
         end)
         b:SetScript("OnEnter", function(self)
-            if Cards.IsActive() ~= (self.mode == "cards") then
-                self.text:SetTextColor(0.9, 0.9, 0.92, 1)
-            end
+            self.hover = true
+            Repaint()
             GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
             GameTooltip:SetText(mode.text, 1, 1, 1)
             GameTooltip:AddLine(mode.tip, 0.7, 0.7, 0.7, true)
             GameTooltip:Show()
         end)
-        b:SetScript("OnLeave", function()
+        b:SetScript("OnLeave", function(self)
+            self.hover = nil
+            Repaint()
             GameTooltip:Hide()
-            Cards.PaintToggle(bar)
         end)
         bar.buttons[i] = b
     end
 
-    -- A "NEW" tag above "Cards" for all of 7.0 (gone with 7.1), so players
-    -- find the card view; it isn't tied to being seen or hovered
+    -- A "NEW" tag under "Cards" for all of 7.0 (gone with 7.1), so players
+    -- find the card view; it isn't tied to being seen or hovered. It sits
+    -- between the title row and the content, out of the toolbar's way (its
+    -- blink animation sets its alpha, so it can't be faded out for room).
     if PVPHUB.CreateNewBadge then
         local badge = PVPHUB.CreateNewBadge(bar, {}, "7.0")
-        badge:SetPoint("BOTTOM", bar.buttons[2], "TOP", 0, 2)
+        badge:SetPoint("TOP", bar.buttons[2], "BOTTOM", 0, -3)
         badge:SetFrameLevel(bar.buttons[2]:GetFrameLevel() + 2)
         bar.newBadge = badge
     end
@@ -3007,7 +3000,137 @@ function Cards.CreateToggle(f)
     f.viewToggle = bar
     Cards.PaintToggle(bar, true)
     bar:SetShown(f.currentTab == "characters")
+    BuildToolbar(f, bar)
+    f:HookScript("OnSizeChanged", function() Cards.LayoutToolbar(f) end)
+    Cards.LayoutToolbar(f)
     return bar
+end
+
+-- --------------------------------------------------------------------------
+-- Toolbar
+-- --------------------------------------------------------------------------
+-- In the title row: List/Cards after the title (its NEW tag under it),
+-- then the greeting when there's room; search, Groups, "+" (core's
+-- f.manageGroupsBtn, while groups are on), Columns (list only, core's
+-- PVPHUBColumnDropdown) and Sort (PVPHUBSortDropdown) before the close
+-- button, each in a thin frame. What's left goes to the search first (it
+-- hides below SEARCH_MIN_W), then the greeting. The list view is at least
+-- 820 wide for this (core), the card view 760.
+
+-- The search box and the Groups switch. A child of the List/Cards switch,
+-- so the row shows on the Characters tab only, as the switch does.
+function BuildToolbar(f, bar)
+    local tb = CreateFrame("Frame", nil, bar)
+    tb:SetAllPoints(bar)   -- the items are anchored to the window
+    f.toolbar = tb
+
+    -- Blizzard's search box (magnifier, placeholder, clear button)
+    local s = CreateFrame("EditBox", nil, tb, "SearchBoxTemplate")
+    s:SetAutoFocus(false)
+    s:SetMaxLetters(40)
+    s:SetHeight(TOOLBAR_H - 4)
+    s:HookScript("OnTextChanged", function(self) Cards.SetSearch(self:GetText()) end)
+    PVPHUB.UI.SkinToolSearch(s)
+    tb.search = s
+
+    -- Groups on or off, the same setting as Settings > Display > Enable
+    -- Character Groups; the whole frame is clickable
+    local g = CreateFrame("Frame", nil, tb)
+    g:SetSize(GROUPS_W, TOOLBAR_H)
+    local cb = CreateFrame("CheckButton", nil, g, "UICheckButtonTemplate")
+    cb:SetSize(30, TOOLBAR_H)
+    cb:SetPoint("LEFT", g, "LEFT", 9, 0)
+    cb.Text = cb.Text or NewText(cb, 12)
+    cb.Text:SetText("Groups")
+    cb.Text:SetTextColor(0.9, 0.9, 0.9, 1)
+    cb:SetHitRectInsets(-9, -(GROUPS_W - 39), 0, 0)
+    cb:SetScript("OnClick", function(self)
+        Cards.SetGroupsEnabled(self:GetChecked() and true or false)
+    end)
+    cb:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
+        GameTooltip:SetText("Character groups", 1, 1, 1)
+        GameTooltip:AddLine("Show your characters in their groups, or as one list.", 0.7, 0.7, 0.7, true)
+        GameTooltip:Show()
+    end)
+    cb:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    PVPHUB.UI.SkinSwitch(cb)
+    PVPHUB.UI.AddToolFrame(g, nil, cb)
+    g.switch = cb
+    tb.groups = g
+end
+
+-- Puts a dropdown's box (22 in from the frame's left, 2 from its right, 5
+-- from the top; its tool frame 4) with its right edge `right` from the
+-- window's right, top at the toolbar's. Returns the box's width.
+local function PlaceDropdown(f, dd, right)
+    dd:ClearAllPoints()
+    dd:SetPoint("TOPRIGHT", f, "TOPRIGHT", -(right - 2), TOOLBAR_Y + 4)
+    return dd:GetWidth() - 24
+end
+
+-- Places the row for the current view and width: on every render of the
+-- Characters tab (Render, Hide), when the window's size changes, and from
+-- core's UpdateGreetingLayout. Shows and hides items only on that tab.
+function Cards.LayoutToolbar(f)
+    local bar, tb = f.viewToggle, f.toolbar
+    if not (bar and tb) then return end
+    local cards = Cards.IsActive()
+    local onTab = f.currentTab == "characters"
+    local groups = PVPHUB_SETTINGS.characterGroups
+    local groupsOn = groups and groups.enabled and true or false
+
+    bar:ClearAllPoints()
+    bar:SetPoint("TOPLEFT", f, "TOPLEFT", TOOLBAR_LEFT, TOOLBAR_Y)
+    local left = TOOLBAR_LEFT + bar:GetWidth() + 14
+
+    -- From the close button leftwards
+    local right = TOOLBAR_RIGHT
+    local sort = _G.PVPHUBSortDropdown
+    if sort then
+        PVPHUB.UI.SkinToolDropdown(sort)
+        right = right + PlaceDropdown(f, sort, right) + TOOL_GAP
+    end
+    local columns = _G.PVPHUBColumnDropdown
+    if columns then
+        PVPHUB.UI.SkinToolDropdown(columns)
+        if onTab then columns:SetShown(not cards) end
+        if not cards then right = right + PlaceDropdown(f, columns, right) + TOOL_GAP end
+    end
+    local plus = f.manageGroupsBtn
+    if plus then
+        if onTab then plus:SetShown(groupsOn) end
+        plus:ClearAllPoints()
+        plus:SetPoint("TOPRIGHT", f, "TOPRIGHT", -right, TOOLBAR_Y)
+        plus:SetFrameLevel(tb:GetFrameLevel() + 5)
+        if groupsOn then right = right + plus:GetWidth() + TOOL_GAP end
+    end
+    tb.groups:ClearAllPoints()
+    tb.groups:SetPoint("TOPRIGHT", f, "TOPRIGHT", -right, TOOLBAR_Y)
+    tb.groups.switch:SetChecked(groupsOn)
+    right = right + GROUPS_W + TOOL_GAP
+
+    -- The search: the room left, up to SEARCH_MAX_W; its frame reaches 6
+    -- left of the box and 2 above it
+    local searchW = math.min(SEARCH_MAX_W, f:GetWidth() - right - left)
+    tb.search:SetShown(searchW >= SEARCH_MIN_W)
+    tb.search:ClearAllPoints()
+    tb.search:SetPoint("TOPRIGHT", f, "TOPRIGHT", -right, TOOLBAR_Y - 2)
+    tb.search:SetWidth(math.max(1, searchW - 6))
+    if tb.search:IsShown() then right = right + searchW + 8 end
+
+    -- The greeting (when it's on) between List/Cards and the search, cut
+    -- short with "..." when it doesn't fit; no underline in this row
+    if f.greeting then
+        local room = f:GetWidth() - right - left
+        f.greeting:ClearAllPoints()
+        f.greeting:SetPoint("LEFT", f, "TOPLEFT", left, TOOLBAR_Y - TOOLBAR_H / 2)
+        f.greeting:SetPoint("RIGHT", f, "TOPRIGHT", -right, TOOLBAR_Y - TOOLBAR_H / 2)
+        f.greeting:SetJustifyH("LEFT")
+        f.greeting:SetWordWrap(false)
+        f.greeting:SetAlpha(room >= 80 and 1 or 0)
+        if f.titleLine then f.titleLine:SetAlpha(0) end
+    end
 end
 
 -- --------------------------------------------------------------------------

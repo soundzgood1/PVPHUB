@@ -8,6 +8,9 @@
 --   UI.SkinButton(button, "danger")  Blizzard red button -> rounded button
 --   UI.SkinDescendants(frame)        the three above, for everything inside a frame
 --   UI.SkinCloseButton(button)       red "X" -> thin "×" with a hover circle
+--   UI.CreateRail(...)               tabs: icons with a sliding highlight
+--   UI.AddToolFrame(frame, ...)      the main window toolbar's control frames
+--   UI.Slide(frame, to, apply)       the eased slide the switches use
 --   UI.SkinWindow(frame)             square backdrop -> rounded window shell
 --   UI.RefreshTheme()                repaint after a theme change (ApplyTheme)
 -- Rounded shapes come from core (PVPHUB.CreateRoundedShape); the switch
@@ -115,14 +118,37 @@ end
 
 local PANEL_CORNER = 24 / 64
 
-function UI.CreatePanel(frame, kind, layer, sublevel, corner)
+-- A flat side (flat = { LEFT = true, ... }) takes the middle of the texture
+-- where its corners and edge were: square corners on that side and, for a
+-- ring, no outline there (a panel joined to something along that side).
+-- Panels only; a pill's slices have no pvpCoords.
+function Slices:SetFlat(flat)
+    flat = flat or {}
+    local a, z = PANEL_CORNER, 1 - PANEL_CORNER
+    for _, tex in ipairs(self) do
+        local l, r, t, b = unpack(tex.pvpCoords)
+        if (flat.LEFT and l == 0) or (flat.RIGHT and r == 1) then l, r = a, z end
+        if (flat.TOP and t == 0) or (flat.BOTTOM and b == 1) then t, b = a, z end
+        tex:SetTexCoord(l, r, t, b)
+    end
+end
+
+-- insets { left, top, right, bottom } shrink the shape inside the frame
+-- (negative ones grow it past the frame's edges); flat as for SetFlat.
+function UI.CreatePanel(frame, kind, layer, sublevel, corner, insets, flat)
     local file = MEDIA .. (kind == "ring" and "panel_ring" or "panel_fill")
+    local il, it, ir, ib = 0, 0, 0, 0
+    if insets then il, it, ir, ib = insets[1], insets[2], insets[3], insets[4] end
+    local offsets = {
+        TOPLEFT = { il, -it }, TOPRIGHT = { -ir, -it },
+        BOTTOMLEFT = { il, ib }, BOTTOMRIGHT = { -ir, ib },
+    }
     local a, z = PANEL_CORNER, 1 - PANEL_CORNER
     local parts = {}
     local function Part(left, right, top, bottom)
         local tex = frame:CreateTexture(nil, layer, nil, sublevel)
         tex:SetTexture(file)
-        tex:SetTexCoord(left, right, top, bottom)
+        tex.pvpCoords = { left, right, top, bottom }   -- set by SetFlat below
         parts[#parts + 1] = tex
         return tex
     end
@@ -131,7 +157,7 @@ function UI.CreatePanel(frame, kind, layer, sublevel, corner)
     local bl = Part(0, a, z, 1)
     local br = Part(z, 1, z, 1)
     for point, tex in pairs({ TOPLEFT = tl, TOPRIGHT = tr, BOTTOMLEFT = bl, BOTTOMRIGHT = br }) do
-        tex:SetPoint(point)
+        tex:SetPoint(point, frame, point, offsets[point][1], offsets[point][2])
         tex:SetSize(corner, corner)
     end
     local function Between(tex, from, fromPoint, to, toPoint)
@@ -145,7 +171,52 @@ function UI.CreatePanel(frame, kind, layer, sublevel, corner)
     if kind ~= "ring" then
         Between(Part(a, z, a, z), tl, "BOTTOMRIGHT", br, "TOPLEFT")  -- middle
     end
-    return setmetatable(parts, Slices)
+    local panel = setmetatable(parts, Slices)
+    panel:SetFlat(flat)
+    return panel
+end
+
+-- --------------------------------------------------------------------------
+-- Sliding
+-- --------------------------------------------------------------------------
+-- UI.Slide(frame, to, apply, instant) moves a number (a knob's or a
+-- highlight's x) from where it is to `to` in SLIDE_TIME, easing out, and
+-- calls apply(x) every frame. A click often rebuilds a whole window in the
+-- same frame (a tab, List/Cards, the Groups switch), and that long frame
+-- used to swallow the animation, so the knob jumped instead of sliding:
+-- each frame now counts for at most 1/30 s. Uses the frame's OnUpdate.
+
+local SLIDE_TIME, SLIDE_MAX_STEP = 0.22, 1 / 30
+
+local function SlideOnUpdate(frame, elapsed)
+    local s = frame.pvpSlide
+    s.t = s.t + math.min(elapsed, SLIDE_MAX_STEP)
+    local p = math.min(1, s.t / SLIDE_TIME)
+    s.value = s.from + (s.to - s.from) * (1 - (1 - p) ^ 3)
+    s.apply(s.value)
+    if p >= 1 then frame:SetScript("OnUpdate", nil) end
+end
+
+function UI.Slide(frame, to, apply, instant)
+    local s = frame.pvpSlide
+    if not s then
+        s = {}
+        frame.pvpSlide = s
+    end
+    s.apply = apply
+    -- Jump: the first paint, a hidden frame (no OnUpdate runs), or already there
+    if instant or s.value == nil or s.value == to or not frame:IsVisible() then
+        s.value, s.to = to, to
+        frame:SetScript("OnUpdate", nil)
+        apply(to)
+    elseif s.to ~= to or not frame:GetScript("OnUpdate") then
+        s.from, s.to, s.t = s.value, to, 0
+        frame:SetScript("OnUpdate", SlideOnUpdate)
+    end
+end
+
+local function Mix(a, b, t)
+    return a + (b - a) * t
 end
 
 -- --------------------------------------------------------------------------
@@ -156,47 +227,28 @@ end
 -- so nothing around it moves; its label sits right of the switch.
 
 local SWITCH_W, SWITCH_H, KNOB = 30, 16, 12
+local KNOB_OFF, KNOB_ON = 2, SWITCH_W - KNOB - 2
 
-local function KnobX(on)
-    return on and (SWITCH_W - KNOB - 2) or 2
-end
-
-local function SwitchOnUpdate(sw, elapsed)
-    local diff = sw.knobTarget - sw.knobX
-    if math.abs(diff) < 0.3 then
-        sw.knobX = sw.knobTarget
-        sw:SetScript("OnUpdate", nil)
-    else
-        sw.knobX = sw.knobX + diff * math.min(1, elapsed * 16)
-    end
+-- Places the knob at x. The track and knob colors follow it, so the switch
+-- fades from off to on while the knob slides instead of changing at once.
+local function PlaceKnob(sw, x)
     sw.knobFrame:ClearAllPoints()
-    sw.knobFrame:SetPoint("LEFT", sw, "LEFT", sw.knobX, 0)
+    sw.knobFrame:SetPoint("LEFT", sw, "LEFT", x, 0)
+    local t = (x - KNOB_OFF) / (KNOB_ON - KNOB_OFF)
+    local ac = sw.accent
+    sw.bottom:SetRGBA(Mix(0.2, ac[1] * 0.6, t), Mix(0.2, ac[2] * 0.6, t), Mix(0.24, ac[3] * 0.6, t), 1)
+    sw.top:SetRGBA(Mix(0.2, Lighten(ac[1], 0.9), t), Mix(0.2, Lighten(ac[2], 0.9), t),
+        Mix(0.24, Lighten(ac[3], 0.9), t), 1)
+    sw.track:SetGradient("VERTICAL", sw.bottom, sw.top)
+    local k = Mix(0.72, 1, t)
+    sw.knob:SetVertexColor(k, k, Mix(0.76, 1, t), 1)
 end
 
 local function PaintSwitch(cb, instant)
     local sw = cb.pvpSwitch
-    local on = cb:GetChecked() and true or false
-    local enabled = cb:IsEnabled()
-    local ac = ThemeColor()
-
-    if on then
-        sw.track:SetGradient("VERTICAL",
-            CreateColor(ac[1] * 0.6, ac[2] * 0.6, ac[3] * 0.6, 1),
-            CreateColor(Lighten(ac[1], 0.9), Lighten(ac[2], 0.9), Lighten(ac[3], 0.9), 1))
-        sw.knob:SetVertexColor(1, 1, 1, 1)
-    else
-        sw.track:SetVertexColor(0.2, 0.2, 0.24, 1)
-        sw.knob:SetVertexColor(0.72, 0.72, 0.76, 1)
-    end
-    sw:SetAlpha(enabled and 1 or 0.45)
-
-    sw.knobTarget = KnobX(on)
-    if instant or not sw.knobX then
-        sw.knobX = sw.knobTarget
-        SwitchOnUpdate(sw, 0)
-    elseif sw.knobX ~= sw.knobTarget then
-        sw:SetScript("OnUpdate", SwitchOnUpdate)
-    end
+    sw.accent = ThemeColor()
+    sw:SetAlpha(cb:IsEnabled() and 1 or 0.45)
+    UI.Slide(sw, cb:GetChecked() and KNOB_ON or KNOB_OFF, sw.place, instant)
 end
 
 function UI.SkinSwitch(cb)
@@ -231,6 +283,8 @@ function UI.SkinSwitch(cb)
     sw.knob = sw.knobFrame:CreateTexture(nil, "OVERLAY")
     sw.knob:SetTexture(MEDIA .. "switch_knob")
     sw.knob:SetAllPoints()
+    sw.bottom, sw.top = CreateColor(0, 0, 0, 1), CreateColor(0, 0, 0, 1)
+    sw.place = function(x) PlaceKnob(sw, x) end
     cb.pvpSwitch = sw
 
     -- Label right of the switch
@@ -248,6 +302,171 @@ function UI.SkinSwitch(cb)
 
     switches[#switches + 1] = cb
     PaintSwitch(cb, true)
+end
+
+-- --------------------------------------------------------------------------
+-- Icon rail
+-- --------------------------------------------------------------------------
+-- A column of round icon buttons with a round highlight in the theme color
+-- behind the selected one that slides over when it changes: the main
+-- window's tabs. The rail is joined to the outside of the window's right
+-- edge, `top` units below a rounded window's top (clear of its corner) or
+-- flush with a square one's, and reads as part of the window: its
+-- side toward the window is square and open, its fill continues the
+-- window's background (gradient and opacity too; core's ApplyWindowBGColor
+-- repaints it) and the window's border ring runs on round it. It follows
+-- the "Rounded Frame" and "Window Glow" settings. Names show in a tooltip.
+--   local rail = UI.CreateRail(window, items, onSelect, top)
+--     items: { { key, text, icon, tip }, ... }; onSelect(key) on a click
+--   rail:Select(key, instant)   moves the highlight, doesn't call onSelect
+--   rail:Paint()                after a theme, rounding or glow change
+--   rail:PaintFill()            after the window's background changes
+--   rail.byKey[key]             an option's button (:Click() selects it)
+
+local RAIL_PAD, RAIL_BUTTON, RAIL_GAP, RAIL_ICON = 5, 34, 4, 24
+local RAIL_CORNER = 10
+local RAIL_RING = 7   -- as wide as the window's border ring (core: f.borderTex)
+local ROUND_MASK = "Interface\\CharacterFrame\\TempPortraitAlphaMask"
+local JOINED = { LEFT = true }   -- the side on the window
+local SQUARE = { LEFT = true, TOP = true, RIGHT = true, BOTTOM = true }
+local rails = {}   -- for theme changes
+
+-- Places the highlight y down from the rail's top. An icon gets its color
+-- back as the highlight reaches it and fades to gray as it leaves.
+local function PlaceRailThumb(rail, y)
+    rail.thumbFrame:ClearAllPoints()
+    rail.thumbFrame:SetPoint("TOP", rail, "TOP", 0, -y)
+    for i, b in ipairs(rail.buttons) do
+        local t = math.max(0, 1 - math.abs(y - rail.SlotY(i)) / (RAIL_BUTTON + RAIL_GAP))
+        if b.hover then t = math.max(t, 0.7) end
+        b.icon:SetAlpha(Mix(0.5, 1, t))
+        b.icon:SetDesaturated(t < 0.5)
+    end
+end
+
+-- The fill is the window's background over the rail's height, at the
+-- alpha core last gave the window (window.bgAlpha; it changes with the
+-- opacity setting and while the window fades in). A theme with
+-- WINDOW_BG_TOP fades the window from WINDOW_BG at its top to
+-- WINDOW_BG_TOP at its bottom: core's ApplyWindowBGColor hands that color
+-- to SetGradient as the minimum, which a vertical gradient draws at the
+-- bottom (despite the name). The rail copies what's on screen.
+local function PaintRailFill(rail)
+    local window = rail:GetParent()
+    local colors = PVPHUB.currentColors or {}
+    local bg = colors.WINDOW_BG or { 0.08, 0.05, 0.05, 0.95 }
+    local low = colors.WINDOW_BG_TOP or bg
+    local alpha = window.bgAlpha or bg[4]
+    local lowAlpha = (low[4] or bg[4]) * (bg[4] > 0 and alpha / bg[4] or 0)
+    local height = window:GetHeight()
+    local function At(d)
+        local p = height > 0 and math.max(0, math.min(1, d / height)) or 1
+        return CreateColor(Mix(bg[1], low[1], p), Mix(bg[2], low[2], p), Mix(bg[3], low[3], p),
+            Mix(alpha, lowAlpha, p))
+    end
+    rail.fill:SetGradient("VERTICAL", At(rail.top + rail:GetHeight()), At(rail.top))
+end
+
+-- The ring takes the window's border color and hides with its glow, the
+-- place and corners follow its rounding, the highlight the theme color.
+local function PaintRail(rail)
+    local colors = PVPHUB.currentColors or {}
+    local style = PVPHUB_SETTINGS and PVPHUB_SETTINGS.mainWindow or {}
+    local rounded = style.roundedFrame ~= false
+    rail.top = rounded and rail.roundedTop or 0
+    rail:ClearAllPoints()
+    rail:SetPoint("TOPLEFT", rail:GetParent(), "TOPRIGHT", 0, -rail.top)
+    local border = colors.WINDOW_BORDER or { 0.3, 0.3, 0.38, 1 }
+    rail.ring:SetVertexColor(border[1], border[2], border[3], (border[4] or 1) * 0.3)
+    rail.ring:SetShown(style.showGlow ~= false)
+    local sides = rounded and JOINED or SQUARE
+    rail.fill:SetFlat(sides)
+    rail.ring:SetFlat(sides)
+    PaintRailFill(rail)
+    local ac = ThemeColor()
+    rail.thumb:SetGradient("VERTICAL",
+        CreateColor(ac[1] * 0.55, ac[2] * 0.55, ac[3] * 0.55, 0.95),
+        CreateColor(math.min(1, ac[1] * 0.9 + 0.1), math.min(1, ac[2] * 0.9 + 0.1), math.min(1, ac[3] * 0.9 + 0.1), 0.95))
+end
+
+function UI.CreateRail(window, items, onSelect, top)
+    local rail = CreateFrame("Frame", nil, window)
+    rail:SetSize(RAIL_BUTTON + RAIL_PAD * 2, RAIL_PAD * 2 + #items * RAIL_BUTTON + (#items - 1) * RAIL_GAP)
+    rail.roundedTop, rail.top = top, top   -- placed by PaintRail
+    rail.fill = UI.CreatePanel(rail, "fill", "BACKGROUND", 0, RAIL_CORNER)
+    -- The ring is a larger shape behind the fill, like the window's. The
+    -- window's own ring already covers the first RAIL_RING units beside the
+    -- window, so this one starts after it (two rings on top of each other
+    -- would show as a brighter patch).
+    rail.ring = UI.CreatePanel(rail, "fill", "BACKGROUND", -1, RAIL_CORNER + RAIL_RING,
+        { RAIL_RING, -RAIL_RING, -RAIL_RING, -RAIL_RING })
+    rail.thumbFrame = CreateFrame("Frame", nil, rail)
+    rail.thumbFrame:SetSize(RAIL_BUTTON, RAIL_BUTTON)
+    rail.thumb = UI.CreatePill(rail.thumbFrame, "ARTWORK", 0)   -- as wide as tall: a circle
+
+    function rail.SlotY(i) return RAIL_PAD + (i - 1) * (RAIL_BUTTON + RAIL_GAP) end
+    local function Place(y) PlaceRailThumb(rail, y) end
+    local function Repaint() Place(rail.pvpSlide and rail.pvpSlide.value or RAIL_PAD) end
+
+    rail.buttons, rail.byKey = {}, {}
+    for i, item in ipairs(items) do
+        local b = CreateFrame("Button", nil, rail)
+        b:SetSize(RAIL_BUTTON, RAIL_BUTTON)
+        b:SetPoint("TOP", rail, "TOP", 0, -rail.SlotY(i))
+        b:SetFrameLevel(rail.thumbFrame:GetFrameLevel() + 1)
+        b.key = item.key
+
+        b.icon = b:CreateTexture(nil, "ARTWORK")
+        b.icon:SetSize(RAIL_ICON, RAIL_ICON)
+        b.icon:SetPoint("CENTER")
+        b.icon:SetTexture(item.icon)
+        b.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+        local mask = b:CreateMaskTexture()
+        mask:SetTexture(ROUND_MASK, "CLAMPTOBLACKADDITIVE", "CLAMPTOBLACKADDITIVE")
+        mask:SetAllPoints(b.icon)
+        b.icon:AddMaskTexture(mask)
+
+        b:SetScript("OnClick", function(self)
+            rail:Select(self.key)
+            if onSelect then onSelect(self.key) end
+        end)
+        b:SetScript("OnEnter", function(self)
+            self.hover = true
+            Repaint()
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:SetText(item.text, 1, 1, 1)
+            if item.tip then GameTooltip:AddLine(item.tip, 0.7, 0.7, 0.7, true) end
+            GameTooltip:Show()
+        end)
+        b:SetScript("OnLeave", function(self)
+            self.hover = nil
+            Repaint()
+            GameTooltip:Hide()
+        end)
+        rail.buttons[i] = b
+        rail.byKey[item.key] = b
+    end
+
+    function rail:Select(key, instant)
+        for i, b in ipairs(self.buttons) do
+            if b.key == key then
+                UI.Slide(self, self.SlotY(i), Place, instant)
+                return
+            end
+        end
+    end
+    function rail:Paint()
+        PaintRail(self)
+        Repaint()
+    end
+    function rail:PaintFill() PaintRailFill(self) end
+    -- A themed gradient changes along the window's height
+    window:HookScript("OnSizeChanged", function() PaintRailFill(rail) end)
+
+    rails[#rails + 1] = rail
+    PaintRail(rail)
+    rail:Select(items[1] and items[1].key, true)
+    return rail
 end
 
 -- --------------------------------------------------------------------------
@@ -407,7 +626,7 @@ local function PaintButton(btn)
 end
 
 function UI.SkinButton(btn, variant)
-    if not btn or btn.pvpRim then return end
+    if not btn or btn.pvpRim or btn.pvpTool then return end
     btn.pvpVariant = variant
 
     -- Hide the Blizzard art: every texture the button has so far (its
@@ -445,6 +664,89 @@ function UI.SkinButton(btn, variant)
 
     buttons[#buttons + 1] = btn
     PaintButton(btn)
+end
+
+-- --------------------------------------------------------------------------
+-- Toolbar frames
+-- --------------------------------------------------------------------------
+-- The thin rounded frame around each control in the main window's toolbar
+-- (search, Groups, "+", Columns, Sort): a faint fill and outline that
+-- brighten while the mouse is over the control, and an outline in the theme
+-- color while its text box has focus.
+--   UI.AddToolFrame(frame, insets, hoverFrame)  insets as in CreatePanel;
+--                                               hoverFrame defaults to frame
+--   UI.SkinToolButton(button)                   a Blizzard button as one
+--   UI.SkinToolSearch(searchBox)                SearchBoxTemplate as one
+
+local toolFrames = {}
+local TOOL_CORNER = 6
+
+local function PaintToolFrame(t)
+    local lit = t.hover or t.focus
+    t.fill:SetVertexColor(1, 1, 1, lit and 0.07 or 0.035)
+    if t.focus then
+        local ac = ThemeColor()
+        t.ring:SetVertexColor(ac[1], ac[2], ac[3], 0.85)
+    else
+        t.ring:SetVertexColor(1, 1, 1, lit and 0.3 or 0.14)
+    end
+end
+
+function UI.AddToolFrame(frame, insets, hoverFrame)
+    local t = {
+        fill = UI.CreatePanel(frame, "fill", "BACKGROUND", 1, TOOL_CORNER, insets),
+        ring = UI.CreatePanel(frame, "ring", "BORDER", 1, TOOL_CORNER, insets),
+    }
+    hoverFrame = hoverFrame or frame
+    KeepHook(hoverFrame, "OnEnter", function() t.hover = true; PaintToolFrame(t) end)
+    KeepHook(hoverFrame, "OnLeave", function() t.hover = false; PaintToolFrame(t) end)
+    if frame:GetObjectType() == "EditBox" then
+        KeepHook(frame, "OnEditFocusGained", function() t.focus = true; PaintToolFrame(t) end)
+        KeepHook(frame, "OnEditFocusLost", function() t.focus = false; PaintToolFrame(t) end)
+    end
+    toolFrames[#toolFrames + 1] = t
+    PaintToolFrame(t)
+    return t
+end
+
+function UI.SkinToolButton(btn)
+    if not btn or btn.pvpTool or btn.pvpRim then return end
+    -- The template's art goes, as in SkinButton
+    for _, region in ipairs({ btn:GetRegions() }) do
+        if region:GetObjectType() == "Texture" then
+            region:SetAlpha(0)
+        end
+    end
+    local f = ButtonFonts(true)
+    btn:SetNormalFontObject(f.normal)
+    btn:SetHighlightFontObject(f.normal)
+    btn:SetDisabledFontObject(f.disabled)
+    btn.pvpTool = UI.AddToolFrame(btn)
+end
+
+-- The template's box art goes (its magnifier and clear button stay); the
+-- frame reaches 6 left of the box, where the art had the magnifier's room,
+-- and 2 above and below, so a 20 high box matches 24 high controls.
+function UI.SkinToolSearch(box)
+    if not box or box.pvpTool then return end
+    for _, region in ipairs({ box:GetRegions() }) do
+        if region:GetObjectType() == "Texture" and region ~= box.searchIcon then
+            region:SetAlpha(0)
+        end
+    end
+    box.pvpTool = UI.AddToolFrame(box, { -6, -2, 0, -2 })
+end
+
+-- A dropdown styled by core's ApplyModernDropdownStyling: its square
+-- background and 1 px border lines go, the frame takes their place. Its
+-- box sits 22 in from the frame's left, 2 from its right and 5 from top
+-- and bottom; the frame reaches 1 further up and down (24 high).
+function UI.SkinToolDropdown(dd)
+    if not dd or dd.pvpTool or ElvUI then return end
+    if dd._pvpBg then dd._pvpBg:SetAlpha(0) end
+    for _, line in ipairs(dd._pvpBorders or {}) do line:SetAlpha(0) end
+    local btn = dd.Button or _G[(dd:GetName() or "") .. "Button"]
+    dd.pvpTool = UI.AddToolFrame(dd, { 22, 4, 2, 4 }, btn)
 end
 
 -- --------------------------------------------------------------------------
@@ -568,6 +870,8 @@ end
 
 function UI.RefreshTheme()
     for _, cb in ipairs(switches) do PaintSwitch(cb, true) end
+    for _, rail in ipairs(rails) do rail:Paint() end
+    for _, t in ipairs(toolFrames) do PaintToolFrame(t) end
     for _, sl in ipairs(sliders) do PaintSlider(sl) end
     for _, btn in ipairs(closeButtons) do PaintClose(btn) end
     for _, win in ipairs(windows) do PaintWindow(win) end

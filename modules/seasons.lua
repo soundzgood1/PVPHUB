@@ -68,6 +68,13 @@ local function ExpansionLevel()
         or (GetExpansionLevel and GetExpansionLevel()) or nil
 end
 
+-- The expansion (GetExpansionLevel) an archived season was played in, nil
+-- if it's not archived
+function Seasons.Expansion(season)
+    local s = Store()[season]
+    return s and s.expansion
+end
+
 -- An archived season's name, e.g. "Midnight Season 1"
 function Seasons.Name(season)
     local s = Store()[season]

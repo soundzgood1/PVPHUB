@@ -796,6 +796,51 @@ local COLOR_THEMES = {
         TAB_INACTIVE_BORDER = {0.25, 0.24, 0.4, 0.8},
         TAB_HOVER_BG = {0.2, 0.19, 0.38, 0.8}
     },
+    GRAPHITE = {
+        -- Opaque anthracite with a silver accent (7.0): quiet, so class and
+        -- rating colors stand out. CARDS restyles the card view to match
+        -- (neutral cards, silver instead of gold; see CardStyle in
+        -- modules/cards.lua for the fields).
+        WINDOW_BG = {0.085, 0.09, 0.1, 0.95},
+        WINDOW_BORDER = {0.36, 0.37, 0.41, 1},
+        WINDOW_GLOW = {0.25, 0.26, 0.3, 0.3},
+        TITLE_COLOR = {0.95, 0.95, 0.96, 1},
+        SCALE_BUTTON_BG = {0.2, 0.21, 0.23, 0.8},
+        SCALE_BUTTON_SELECTED = {0.85, 0.86, 0.88, 1},
+        SCALE_BUTTON_HOVER = {0.32, 0.33, 0.36, 1},
+        HEADER_COLOR = {0.82, 0.83, 0.85, 1},
+        SUMMARY_TEXT = {0.75, 0.76, 0.79, 0.9},
+        CURRENT_CHAR_BG = {0.5, 0.51, 0.55, 0.14},
+        CURRENT_CHAR_BORDER = {0.7, 0.71, 0.75, 0.6},
+        SELECTED_CHAR_BG = {0.6, 0.61, 0.65, 0.16},
+        ALTERNATING_ROW_BG = {0.13, 0.135, 0.15, 0.4},
+        HOVER_BG = {1, 1, 1, 0.08},
+        COMPACT_BG = {0.085, 0.09, 0.1, 0.3},
+        COMPACT_BORDER = {0.36, 0.37, 0.41, 0.4},
+        SETTINGS_BG = {0.1, 0.105, 0.115, 0.95},
+        SETTINGS_BORDER = {0.26, 0.27, 0.3, 1},
+        ACCENT_LINE = {0.78, 0.79, 0.82, 0.5},
+        HEADER_LINE = {0.5, 0.51, 0.55, 0.45},
+        SUMMARY_LINE = {0.4, 0.41, 0.45, 0.4},
+        TAB_ACTIVE_BG = {0.2, 0.21, 0.23, 0.9},
+        TAB_ACTIVE_BORDER = {0.85, 0.86, 0.88, 1},
+        TAB_INACTIVE_BG = {0.11, 0.115, 0.125, 0.85},
+        TAB_INACTIVE_BORDER = {0.24, 0.25, 0.28, 0.8},
+        TAB_HOVER_BG = {0.16, 0.17, 0.19, 0.8},
+        CARDS = {
+            cardFill  = {0.115, 0.12, 0.13, 0.9},
+            cardRing  = {0.25, 0.26, 0.29, 0.8},
+            selBottom = {0.19, 0.2, 0.22, 0.95},
+            selTop    = {0.27, 0.28, 0.31, 0.95},
+            selRing   = {0.8, 0.81, 0.85, 1},
+            groupFill = {0.13, 0.135, 0.15, 0.92},
+            groupRing = {0.27, 0.28, 0.31, 0.8},
+            heading   = {0.92, 0.93, 0.95},
+            name      = "ffffff",
+            tileSel   = {0.5, 0.52, 0.57, 0.22, 0.3},
+            tileDrop  = {0.6, 0.62, 0.68, 0.4},
+        },
+    },
 }
 
 
@@ -2860,6 +2905,9 @@ local function ApplyWindowBGColor(frame, alpha)
     else
         frame.bgTex:SetVertexColor(bg[1], bg[2], bg[3], alpha)
     end
+    -- The main window's tab rail continues its background (modules/ui_kit.lua)
+    frame.bgAlpha = alpha
+    if frame.tabRail then frame.tabRail:PaintFill() end
 end
 PVPHUB._ApplyWindowBGColor = ApplyWindowBGColor   -- small windows (modules/ui_kit.lua)
 
@@ -2987,6 +3035,7 @@ local function ApplyWindowGlowVisibility(frame)
     if frame.borderTex then
         if show then frame.borderTex:Show() else frame.borderTex:Hide() end
     end
+    if frame.tabRail then frame.tabRail:Paint() end   -- the tab rail's ring too
 end
 
 local function ApplyTheme()
@@ -3645,7 +3694,7 @@ local function RefreshAllWindows()
         
         -- Update theme dropdown text
         if PVPHUB.window.themeDropdown then
-            local themeNames = { BLUE = "Blue", RED = "Red", DARK = "Dark", MIDNIGHT = "Midnight", AURORA = "Aurora", CLASS = "Class" }
+            local themeNames = { BLUE = "Blue", RED = "Red", DARK = "Dark", MIDNIGHT = "Midnight", AURORA = "Aurora", GRAPHITE = "Graphite", CLASS = "Class" }
             local currentTheme = PVPHUB_SETTINGS.colorTheme or "RED"
             UIDropDownMenu_SetText(PVPHUB.window.themeDropdown, themeNames[currentTheme] or "Theme")
         end
@@ -8153,6 +8202,7 @@ SlashCmdList["PVPHUB"] = function(msg)
             for _, layer in ipairs(self.glowLayers or {}) do
                 layer:SetRounded(rounded)
             end
+            if self.tabRail then self.tabRail:Paint() end   -- the tab rail's corners
         end
 
         -- Ensure theme is applied to match current theme colors
@@ -8308,7 +8358,7 @@ SlashCmdList["PVPHUB"] = function(msg)
         -- Create scroll frame with modern TWW styling
         local scrollFrame = CreateFrame("ScrollFrame", "PVPHUBScrollFrame", f, "ScrollFrameTemplate")
         PVPHUB.EnableSmoothScroll(scrollFrame, 40)
-        scrollFrame:SetPoint("TOPLEFT", f, "TOPLEFT", 20, -120) -- Align better with headers at -92 + header height (~28px)
+        scrollFrame:SetPoint("TOPLEFT", f, "TOPLEFT", 20, -90) -- Below the headers at -62 (~28px tall); the title row has the toolbar, the tabs are a rail outside
         scrollFrame:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -45, 60) -- Reduced bottom margin from 85 to 60 to close gap
         
         -- Apply modern TWW scrollbar styling immediately after creation.
@@ -8399,40 +8449,17 @@ SlashCmdList["PVPHUB"] = function(msg)
         -- Initialize current tab (always default to "characters" when opening PVPHUB)
         f.currentTab = "characters"
         
-        -- Create tab system similar to World Map
+        -- The tabs (built below, after SwitchTab). f.tabs[id].button is the
+        -- tab's button, which the minimap menu's "Open Settings" clicks.
         f.tabs = {}
         local tabData = {
-            {
-                id = "characters",
-                name = "Characters",
-                tooltip = "Character PvP Data",
-                icon = "Interface\\Icons\\INV_Scroll_11"  -- Better icon for character data/stats
-            },
-            {
-                id = "stats",
-                name = "Season",
-                tooltip = "Season PvP Statistics",
-                icon = "Interface\\Icons\\INV_Misc_Book_09"
-            },
-            {
-                id = "settings",
-                name = "Settings",
-                tooltip = "Addon Settings & Configuration",
-                icon = "Interface\\Icons\\trade_engineering"
-            }
+            { key = "characters", text = "Characters", tip = "Character PvP Data",
+              icon = "Interface\\Icons\\INV_Scroll_11" },
+            { key = "stats", text = "Season", tip = "Season PvP Statistics",
+              icon = "Interface\\Icons\\INV_Misc_Book_09" },
+            { key = "settings", text = "Settings", tip = "Addon Settings & Configuration",
+              icon = "Interface\\Icons\\trade_engineering" },
         }
-        
-        -- Real Blizzard tab art (TabSystemTemplate/PanelTabButtonTemplate),
-        -- recolored the same way f.closeButton is above: SetDesaturated(true)
-        -- to strip the baked-in tan/stone hue, THEN SetVertexColor to tint —
-        -- not vertex-color alone, which just muddies with the existing color
-        -- (that's why an earlier attempt at this looked like an unrelated
-        -- brown/blue smear instead of a clean theme color). Flush against
-        -- the window's bottom edge (0 vertical offset — no gap).
-        local tabSystem = CreateFrame("Frame", nil, f, "TabSystemTemplate")
-        tabSystem:SetPoint("TOPLEFT", f, "BOTTOMLEFT", 28, 0)
-        tabSystem:SetTabSelectedCallback(function() end) -- Required callback
-        f.tabSystem = tabSystem
 
         -- Short fade-in for the tab that was just switched to, instead of a
         -- hard cut. One shared driver frame fades everything passed in, so
@@ -8617,151 +8644,25 @@ SlashCmdList["PVPHUB"] = function(msg)
             end
         end
 
-        -- Add tabs to the system
-        for i, data in ipairs(tabData) do
-            tabSystem:AddTab(data.name)
-            local tab = tabSystem:GetTabButton(i)
-
-            -- Set a wide fixed width up front. The active tab renders at a larger
-            -- visual size than the inactive one, so the inactive tab's Text gets
-            -- less room — use 130px to ensure both states fit "Settings" fully.
-            tab:SetWidth(130)
-            if tab.Text then
-                tab.Text:SetWidth(0)
-            end
-
-            -- Desaturate every texture region ONCE here (persists across the
-            -- repeated SetVertexColor calls in RefreshTabBar below) — the
-            -- same technique f.closeButton uses above. Doing this strips the
-            -- tan/stone hue baked into the art BEFORE tinting, which is what
-            -- an earlier attempt skipped — vertex-coloring alone just mixes
-            -- with the existing color instead of replacing it.
-            for _, regionName in ipairs({ "Left", "Middle", "Right", "LeftActive", "MiddleActive", "RightActive" }) do
-                local region = tab[regionName]
-                if region then region:SetDesaturated(true) end
-            end
-
-            -- Soft blend from the window body into the tab: the tab's top
-            -- takes the body's color and fades into the tab's own, instead of
-            -- a hard edge. Above the tab art, below its text; colored and
-            -- sized in RefreshTabBar.
-            tab._pvpBlend = tab:CreateTexture(nil, "BORDER")
-            tab._pvpBlend:SetTexture("Interface\\Buttons\\WHITE8x8")
-            tab._pvpBlend:SetPoint("TOPLEFT",  tab, "TOPLEFT",   1, 0)
-            tab._pvpBlend:SetPoint("TOPRIGHT", tab, "TOPRIGHT", -1, 0)
-
-            -- Store tab data for our use
-            f.tabs[data.id] = {
-                id = data.id,
-                button = tab,
-                icon = nil
-            }
-
-            -- Hook the tab click to our switch function
-            tab:HookScript("OnClick", function()
-                SwitchTab(data.id)
-            end)
-
-            -- Add tooltips
-            tab:SetScript("OnEnter", function(self)
-                GameTooltip:SetOwner(self, "ANCHOR_TOP")
-                GameTooltip:SetText(data.name, 1, 1, 1)
-                GameTooltip:AddLine(data.tooltip, 0.7, 0.7, 0.7, true)
-                GameTooltip:Show()
-            end)
-
-            tab:SetScript("OnLeave", function(self)
-                GameTooltip:Hide()
-            end)
+        -- The tabs: an icon rail joined to the outside of the window's right
+        -- edge, just below the rounded top corner (modules/ui_kit.lua), its
+        -- highlight sliding to the active tab, so the title row has room for
+        -- the Characters tab's toolbar. The screen clamp counts the rail as
+        -- part of the window.
+        local nav = PVPHUB.UI.CreateRail(f, tabData, SwitchTab, PVPHUB.WINDOW_CORNER_RADIUS + 8)
+        f.tabRail = nav   -- not "nav": small windows use that for their sidebars
+        f:SetClampRectInsets(0, nav:GetWidth(), 0, 0)
+        for _, data in ipairs(tabData) do
+            f.tabs[data.key] = { id = data.key, button = nav.byKey[data.key] }
         end
 
-        -- Re-apply after one render pass to lock in sizes after the template
-        -- has had a chance to run its own sizing logic.
-        C_Timer.After(0, function()
-            for i, data in ipairs(tabData) do
-                local tab = tabSystem:GetTabButton(i)
-                if tab then
-                    tab:SetWidth(130)
-                    if tab.Text then tab.Text:SetWidth(0) end
-                end
-            end
-        end)
-
-        -- Set initial tab
-        tabSystem:SetTab(1)
-        tabSystem:SetFrameStrata("DIALOG")
-
-        -- Recolors every tab's (already-desaturated, see creation loop above)
-        -- texture regions from the current theme + window opacity. Since
-        -- desaturating strips the baked-in stone hue, SetVertexColor here
-        -- applies a clean tint instead of muddying with the original color.
-        --
-        -- Left/Middle/Right (the base, always-visible tab shape) get a
-        -- muted tone derived from WINDOW_BORDER — this is effectively how
-        -- every UNSELECTED tab looks, since Blizzard's own SetTab()/
-        -- PanelTemplates internals are what show/hide the LeftActive/
-        -- MiddleActive/RightActive overlay on top of it for whichever tab is
-        -- actually selected, so there's no need to branch per-tab here for
-        -- the textures — only the tab Text color needs an explicit active
-        -- check. Colors are read fresh from UI_CONSTANTS.COLORS every call
-        -- rather than cached, since ApplyTheme() replaces that whole table
-        -- on a theme change. Called from: SwitchTab, the theme dropdown's
-        -- OnThemeSelect, and the transparency slider's OnValueChanged.
-        local function RefreshTabBar()
-            local colors  = UI_CONSTANTS.COLORS
-            local opacity = PVPHUB_SETTINGS.windowOpacity or 0.95
-            local border  = colors.WINDOW_BORDER
-            local accent  = colors.TITLE_COLOR
-            local baseR, baseG, baseB = border[1] * 0.55, border[2] * 0.55, border[3] * 0.55
-            -- The body's color along the window's bottom edge, where the tabs
-            -- hang: a vertical gradient's minColor is its bottom, and
-            -- ApplyWindowBGColor passes WINDOW_BG_TOP as that.
-            local bodyBg = colors.WINDOW_BG
-            local edge   = colors.WINDOW_BG_TOP or bodyBg
-            local edgeA  = opacity * ((edge[4] or bodyBg[4]) / bodyBg[4])
-
-            for tabId, tabInfo in pairs(f.tabs) do
-                local tab = tabInfo.button
-                if tab then
-                    -- The active tab blends in deep, so it reads as part of
-                    -- the window; inactive ones only lightly, so they sit behind.
-                    local blend = tab._pvpBlend
-                    if blend then
-                        local active = (f.currentTab == tabId)
-                        blend:SetHeight(active and 20 or 10)
-                        blend:SetGradient("VERTICAL",
-                            CreateColor(edge[1], edge[2], edge[3], 0),
-                            CreateColor(edge[1], edge[2], edge[3], active and edgeA or edgeA * 0.6))
-                    end
-                    for _, regionName in ipairs({ "Left", "Middle", "Right" }) do
-                        local region = tab[regionName]
-                        if region then region:SetVertexColor(baseR, baseG, baseB, opacity) end
-                    end
-                    for _, regionName in ipairs({ "LeftActive", "MiddleActive", "RightActive" }) do
-                        local region = tab[regionName]
-                        if region then region:SetVertexColor(accent[1], accent[2], accent[3], opacity) end
-                    end
-
-                    if tab.Text then
-                        local isActive = (f.currentTab == tabId)
-                        local c = isActive and 1 or 0.75
-                        tab.Text:SetTextColor(c, c, c, 1)
-                    end
-                end
-            end
+        -- Moves the highlight to the active tab and takes the theme's color.
+        -- Kept under its old name for its callers (SwitchTab, both theme
+        -- dropdowns, both transparency sliders).
+        f.ApplyTabThemeColors = function()
+            nav:Paint()
+            nav:Select(f.currentTab)
         end
-
-        -- Kept under its historical name so every existing call site
-        -- (SwitchTab, both theme dropdowns, both transparency sliders) keeps
-        -- working unchanged.
-        f.ApplyTabThemeColors = RefreshTabBar
-
-        -- Paint initial tab state after a brief delay, same timing the old
-        -- code used, so this runs after the rest of the window body (and any
-        -- other init logic touching f.tabs) has finished.
-        C_Timer.After(0.1, function()
-            RefreshTabBar()
-        end)
         
         -- Function to create settings frame (will be called when settings tab is first accessed)
         function f:CreateSettingsFrame()
@@ -8912,18 +8813,52 @@ SlashCmdList["PVPHUB"] = function(msg)
                 return sectionData
             end
 
-            -- Restack all sections vertically after a toggle
+            -- 7.0: the sections sit in two columns when each gets at least
+            -- SECTION_MIN_W, each section then in one inner column (its
+            -- right column stacked under the left, sec.SetStacked); in one
+            -- full-width column otherwise, each with its two inner columns.
+            -- The widest section in one column is ~300 (Queue Timer's sound
+            -- dropdown and Show Preview button). Columns are fixed, so a
+            -- section doesn't jump sides when another one opens.
+            local SECTION_MIN_W, SECTION_GAP = 320, 10
+            local RIGHT_COLUMN = { queueTimer = true, display = true }
+            local twoUp
+            local MeasureSections   -- set once every section is built (LAYOUT below)
+
+            -- Restack all sections after a toggle or a width change
             RecalcPositions = function()
-                local yPos = -8
+                local colW = (settingsFrame:GetWidth() - 16 - SECTION_GAP) / 2
+                if (colW >= SECTION_MIN_W) ~= twoUp then
+                    twoUp = colW >= SECTION_MIN_W
+                    for _, sec in ipairs(allSections) do
+                        if sec.SetStacked then sec.SetStacked(twoUp) end
+                    end
+                    -- Their inner layout changed, so did their heights
+                    if MeasureSections then
+                        C_Timer.After(0, function()
+                            MeasureSections()
+                            RecalcPositions()
+                        end)
+                    end
+                end
+                local columnY = { -8, -8 }
                 for _, sec in ipairs(allSections) do
+                    local col = (twoUp and RIGHT_COLUMN[sec.key]) and 2 or 1
+                    local x = col == 2 and (8 + colW + SECTION_GAP) or 8
+                    local yPos = columnY[col]
                     sec.header:ClearAllPoints()
-                    sec.header:SetPoint("TOPLEFT",  settingsFrame, "TOPLEFT",  8, yPos)
-                    sec.header:SetPoint("TOPRIGHT", settingsFrame, "TOPRIGHT", -8, yPos)
+                    sec.header:SetPoint("TOPLEFT", settingsFrame, "TOPLEFT", x, yPos)
                     yPos = yPos - 28
 
                     sec.content:ClearAllPoints()
-                    sec.content:SetPoint("TOPLEFT",  settingsFrame, "TOPLEFT",  8, yPos)
-                    sec.content:SetPoint("TOPRIGHT", settingsFrame, "TOPRIGHT", -8, yPos)
+                    sec.content:SetPoint("TOPLEFT", settingsFrame, "TOPLEFT", x, yPos)
+                    if twoUp then
+                        sec.header:SetWidth(colW)
+                        sec.content:SetWidth(colW)
+                    else
+                        sec.header:SetPoint("TOPRIGHT", settingsFrame, "TOPRIGHT", -8, yPos + 28)
+                        sec.content:SetPoint("TOPRIGHT", settingsFrame, "TOPRIGHT", -8, yPos)
+                    end
 
                     if sec.expanded then
                         sec.content:SetHeight(sec.contentHeight)
@@ -8937,14 +8872,19 @@ SlashCmdList["PVPHUB"] = function(msg)
                         sec.arrowText:SetText(sec.expanded and CreateAtlasMarkup("auctionhouse-ui-sortarrow", 10, 10) or CreateAtlasMarkup("common-icon-forwardarrow", 8, 13))
                     end
                     yPos = yPos - 5  -- gap between sections
+                    columnY[col] = yPos
                 end
-                -- Footer credit always visible below all sections
+                -- Footer credit always visible below all sections (the
+                -- longer column)
+                local yPos = math.min(columnY[1], columnY[2])
                 if f.developerCredit then
                     f.developerCredit:ClearAllPoints()
                     f.developerCredit:SetPoint("TOPLEFT", settingsFrame, "TOPLEFT", 18, yPos - 10)
                 end
                 settingsFrame:SetHeight(math.max(math.abs(yPos) + 40, 400))
             end
+            -- The window's width decides between one and two columns
+            scrollFrame:HookScript("OnSizeChanged", function() RecalcPositions() end)
 
             -- ============================================================
             -- SECTION: DISPLAY
@@ -9617,7 +9557,7 @@ SlashCmdList["PVPHUB"] = function(msg)
             themeDropdown:SetPoint("TOPLEFT", themeSubtitle, "BOTTOMLEFT", -15, -4)
             UIDropDownMenu_SetWidth(themeDropdown, 120)
             ApplyModernDropdownStyling(themeDropdown)
-            local themeNames    = {BLUE="Blue", RED="Red", DARK="Dark", MIDNIGHT="Midnight", AURORA="Aurora", CLASS="Class"}
+            local themeNames    = {BLUE="Blue", RED="Red", DARK="Dark", MIDNIGHT="Midnight", AURORA="Aurora", GRAPHITE="Graphite", CLASS="Class"}
             local currentTheme  = PVPHUB_SETTINGS.colorTheme or "RED"
             UIDropDownMenu_SetText(themeDropdown, themeNames[currentTheme] or "Theme")
             f.themeDropdown = themeDropdown
@@ -9693,6 +9633,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                 {text="Dark",     value="DARK"},
                 {text="Midnight", value="MIDNIGHT"},
                 {text="Aurora",   value="AURORA"},
+                {text="Graphite", value="GRAPHITE"},
                 {text="Class",    value="CLASS"},
             }
             PVPHUB.AttachModernMenu(themeDropdown, function(_, root)
@@ -9727,10 +9668,9 @@ SlashCmdList["PVPHUB"] = function(msg)
             transparencyValueLabel:SetTextColor(unpack(UI_CONSTANTS.COLORS.HEADER_COLOR))
 
             local function ApplyTabTransparency(opacity)
-                -- opacity is ignored here — PVPHUB_SETTINGS.windowOpacity is
-                -- already updated by the caller (ApplyTransparency) before
-                -- this runs, and RefreshTabBar (f.ApplyTabThemeColors) reads
-                -- that live rather than needing it passed in.
+                -- opacity is ignored here: the tab rail takes the window's
+                -- opacity with its background (ApplyWindowBGColor repaints
+                -- it); this only refreshes its highlight.
                 if f.ApplyTabThemeColors then f.ApplyTabThemeColors() end
             end
 
@@ -10053,12 +9993,31 @@ SlashCmdList["PVPHUB"] = function(msg)
             sNotif.contentHeight = 45
             sQT.contentHeight    = 170
             sAdv.contentHeight   = 140
-            RecalcPositions()
 
-            -- Remeasure after one frame when GetBottom() is valid. Each
-            -- section passes the last widget of each column; the lower one
-            -- sets the height.
-            C_Timer.After(0, function()
+            -- Where each section's right column goes when the sections sit
+            -- side by side: under the left column's last widget (dx lines
+            -- it up with the left column), or back at the section's middle.
+            local function Stackable(sec, head, under, dx, dy)
+                local beside = { head:GetPoint(1) }
+                sec.SetStacked = function(stacked)
+                    head:ClearAllPoints()
+                    if stacked then
+                        head:SetPoint("TOPLEFT", under, "BOTTOMLEFT", dx, dy)
+                    else
+                        head:SetPoint(unpack(beside))
+                    end
+                end
+            end
+            Stackable(sApp,   dateFormatLabel,         historyLabel,                 0,   -16)
+            Stackable(sQT,    hideInInstancesCheckbox, qtOpacityLabel,               -22, -12)
+            Stackable(sDisp,  honorLabel,              enableGroupsCheckbox,         6,   -12)
+            Stackable(sNotif, disablePrintCheckbox,    disableHonorWarningsCheckbox, 0,   -2)
+            Stackable(sAdv,   hiddenCharsButton,       disableStreamerModeCheckbox,  0,   -8)
+
+            -- Measured one frame after a layout, when GetBottom() is valid.
+            -- Each section passes the last widget of each column; the lower
+            -- one sets the height.
+            MeasureSections = function()
                 local function MeasureHeight(content, ...)
                     local ct = content:GetTop()
                     local lowest
@@ -10074,8 +10033,10 @@ SlashCmdList["PVPHUB"] = function(msg)
                 sNotif.contentHeight = MeasureHeight(notifContent, disableHonorWarningsCheckbox, disablePrintCheckbox)
                 sQT.contentHeight    = MeasureHeight(qtContent,    qtOpacityLabel, qtOpacitySlider, qtPlaySoundBtn)
                 sAdv.contentHeight   = MeasureHeight(advContent,   disableStreamerModeCheckbox, resetButton)
-                RecalcPositions()
-            end)
+            end
+            -- The first pass picks the columns and measures a frame later
+            twoUp = nil
+            RecalcPositions()
 
             -- Auto-dismiss queue timer preview when settings panel closes
             settingsFrame:HookScript("OnHide", function()
@@ -11011,8 +10972,6 @@ SlashCmdList["PVPHUB"] = function(msg)
 
         -- Function to update greeting layout to prevent collision with top buttons and headers
         function f:UpdateGreetingLayout()
-            local windowWidth = self:GetWidth()
-            
             -- Count visible columns to determine header density and window width
             local visibleColumnCount = 0
             for _, header in ipairs(COLUMN_HEADERS) do
@@ -11020,28 +10979,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                     visibleColumnCount = visibleColumnCount + 1
                 end
             end
-            
-            -- Headers are at Y=-92, greeting needs to stay ABOVE them
-            -- More columns = move greeting HIGHER UP to avoid collision
-            local greetingYOffset = -45  -- Base position
-            
-            -- CORRECTED LOGIC: More columns = move greeting UP (higher Y values)
-            if visibleColumnCount <= 3 then
-                greetingYOffset = -65 -- Few columns = lower position (more space available)
-            elseif visibleColumnCount <= 5 then
-                greetingYOffset = -55 -- Moderate columns = medium position
-            elseif visibleColumnCount == 6 then
-                greetingYOffset = -50 -- 6 columns = better spacing from dropdowns
-            elseif visibleColumnCount == 7 then
-                greetingYOffset = -45 -- 7 columns = improved clearance
-            elseif visibleColumnCount == 8 then
-                greetingYOffset = -40 -- 8 columns = higher position
-            elseif visibleColumnCount == 9 then
-                greetingYOffset = -35 -- 9 columns = very high position
-            else
-                greetingYOffset = -30 -- All columns (10+) = highest position
-            end
-            
+
             -- Dynamic font size: scale with user's data font size setting
             local baseFontSize = 12
             local fontSize = baseFontSize + 4  -- Slightly larger than data rows, not a huge headline
@@ -11060,24 +10998,12 @@ SlashCmdList["PVPHUB"] = function(msg)
             self.greeting:SetShadowColor(0, 0, 0, 1) -- Strong shadow
             self.greeting:SetShadowOffset(2, -2) -- Prominent shadow offset
             
-            -- Additional window width adjustments
-            if windowWidth < 700 then
-                greetingYOffset = greetingYOffset - 5 -- Move up more for narrow windows
-            elseif windowWidth > 1500 then
-                greetingYOffset = greetingYOffset + 5 -- Can move down slightly for very wide windows
+            -- Placed in the toolbar row, between List/Cards and the search
+            -- (modules/cards.lua, Cards.LayoutToolbar)
+            if PVPHUB.Cards and PVPHUB.Cards.LayoutToolbar then
+                PVPHUB.Cards.LayoutToolbar(self)
             end
-            
-            -- Safety check - never go below Y=-70 to ensure clearance from headers at Y=-92
-            if greetingYOffset < -70 then
-                greetingYOffset = -70
-            end
-            
-            self.greeting:ClearAllPoints()
-            self.greeting:SetPoint("TOP", self, "TOP", 0, greetingYOffset)
-            
-            -- Calculate greeting text width and adjust titleLine width to match (with enhanced thickness)
-            local greetingWidth = self.greeting:GetStringWidth()
-            self.titleLine:SetSize(greetingWidth, 3) -- Increased from 2 to 3 for headline prominence
+            self.titleLine:SetSize(1, 3)   -- not shown in the toolbar row
             
             self.titleLine:ClearAllPoints()
             self.titleLine:SetPoint("TOP", self.greeting, "BOTTOM", 0, -2)
@@ -11091,8 +11017,9 @@ SlashCmdList["PVPHUB"] = function(msg)
         end
 
         local dropdown = CreateFrame("Frame", "PVPHUBSortDropdown", f, "UIDropDownMenuTemplate")
-        -- Positioned to the left of the close button (close btn: TOPRIGHT -6, width 22 → left edge at -28; gap 8 → -36)
-        dropdown:SetPoint("TOPRIGHT", f, "TOPRIGHT", -48, -10)
+        -- At the right end of the toolbar row under the tabs; placed by
+        -- Cards.LayoutToolbar (modules/cards.lua)
+        dropdown:SetPoint("TOPRIGHT", f, "TOPRIGHT", -43, -50)
         UIDropDownMenu_SetWidth(dropdown, 120)
         ApplyModernDropdownStyling(dropdown)
         -- Set dropdown text to the current sort option, always prefixed with 'Sort: '
@@ -11151,12 +11078,13 @@ SlashCmdList["PVPHUB"] = function(msg)
             end
         end)
 
-        -- Manage Groups Button (positioned above Character header)
+        -- New group: a "+" in the toolbar row next to the Groups switch,
+        -- while groups are on; placed by Cards.LayoutToolbar
         local manageGroupsBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-        manageGroupsBtn:SetSize(105, 20)
-        manageGroupsBtn:SetPoint("TOPLEFT", f, "TOPLEFT", 20, -62)
-        manageGroupsBtn:SetText("+ New Group")
-        if PVPHUB.UI then PVPHUB.UI.SkinButton(manageGroupsBtn) end
+        manageGroupsBtn:SetSize(24, 24)
+        manageGroupsBtn:SetPoint("TOPLEFT", f, "TOPLEFT", 20, -54)
+        manageGroupsBtn:SetText("+")
+        if PVPHUB.UI then PVPHUB.UI.SkinToolButton(manageGroupsBtn) end
         f.manageGroupsBtn = manageGroupsBtn
         
         -- Initially hide the button if grouping is not enabled
@@ -11382,12 +11310,11 @@ SlashCmdList["PVPHUB"] = function(msg)
 
         -- Column Visibility Dropdown
         local columnDropdown = CreateFrame("Frame", "PVPHUBColumnDropdown", f, "UIDropDownMenuTemplate")
-        -- Sort is at TOPRIGHT -36 with frame 190px; sort left edge at -226; gap 12px → column at -238
-        -- Sort frame is 170px wide at TOPRIGHT -36; visible left edge at 184px from right.
-        -- 4px gap → column visible right at -188 → frame right at -186.
-        columnDropdown:SetPoint("TOPRIGHT", f, "TOPRIGHT", -198, -10)
-        UIDropDownMenu_SetWidth(columnDropdown, 80)
-        UIDropDownMenu_SetText(columnDropdown, "Show/Hide")
+        -- In the toolbar row left of Sort, list view only; placed by
+        -- Cards.LayoutToolbar (modules/cards.lua)
+        columnDropdown:SetPoint("TOPRIGHT", f, "TOPRIGHT", -333, -50)
+        UIDropDownMenu_SetWidth(columnDropdown, 70)
+        UIDropDownMenu_SetText(columnDropdown, "Columns")
         ApplyModernDropdownStyling(columnDropdown)
 
         local COLUMN_OPTIONS = {
@@ -11440,7 +11367,7 @@ SlashCmdList["PVPHUB"] = function(msg)
         f.contentFrame:SetWidth(minContentWidth)
         
         -- Calculate and set dynamic window width (add padding for UI elements, allow expanding)
-        local dynamicWindowWidth = math.max(minContentWidth + 80, 800) -- Minimum 800px width
+        local dynamicWindowWidth = math.max(minContentWidth + 80, 820) -- At least 820: room for the toolbar in the title row (modules/cards.lua)
         f:SetWidth(dynamicWindowWidth)
         
         -- Update greeting layout after initial width is set
@@ -11622,7 +11549,7 @@ SlashCmdList["PVPHUB"] = function(msg)
             -- Update content frame and window width dynamically with expandable right space
             local minContentWidth = dynamicContentWidth + 25  -- Add minimum right padding
             f.contentFrame:SetWidth(minContentWidth)
-            local dynamicWindowWidth = math.max(minContentWidth + 65, 700) -- Minimum 700px width
+            local dynamicWindowWidth = math.max(minContentWidth + 65, 820) -- At least 820: room for the toolbar in the title row (modules/cards.lua)
             -- The card view has its own fixed size (modules/cards.lua)
             if PVPHUB.Cards and PVPHUB.Cards.IsActive() then
                 dynamicWindowWidth = PVPHUB.Cards.WindowWidth(f)
@@ -11653,7 +11580,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                     SafeSetFont(h, currentFont, 12, "OUTLINE")
                     table.insert(f.fontStrings, h)
                     local hXOffset = f.xOffsets[i]
-                    h:SetPoint("TOPLEFT", f, "TOPLEFT", hXOffset, -92)
+                    h:SetPoint("TOPLEFT", f, "TOPLEFT", hXOffset, -62)
                     if header.key == activeSortKey then
                         h:SetTextColor(0.2, 0.85, 1, 1)
                     else
@@ -11704,7 +11631,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                     local colHL = f:CreateTexture(nil, "BACKGROUND", nil, 2)
                     colHL:SetTexture("Interface\\Buttons\\WHITE8x8")
                     colHL:SetVertexColor(hb[1], hb[2], hb[3], 0.10)
-                    colHL:SetPoint("TOPLEFT",     f, "TOPLEFT",   hXOffset - 20, -82)
+                    colHL:SetPoint("TOPLEFT",     f, "TOPLEFT",   hXOffset - 20, -52)
                     colHL:SetPoint("BOTTOMRIGHT", f, "BOTTOMLEFT", hXOffset - 20 + colWidth, 60)
                     colHL:Hide()
                     colHL._pvpHeaderWidget = true
@@ -11713,7 +11640,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                     -- Invisible button overlay to capture mouse hover on the header
                     local isSort = (header.key == activeSortKey)
                     local hoverBtn = CreateFrame("Button", nil, f)
-                    hoverBtn:SetPoint("TOPLEFT", f, "TOPLEFT", hXOffset - 20, -82)
+                    hoverBtn:SetPoint("TOPLEFT", f, "TOPLEFT", hXOffset - 20, -52)
                     hoverBtn:SetSize(colWidth, 32)
                     hoverBtn:SetFrameLevel(f:GetFrameLevel() + 10)
                     hoverBtn:SetScript("OnEnter", function(self)
@@ -12110,6 +12037,8 @@ SlashCmdList["PVPHUB"] = function(msg)
                 displayList = {}
             elseif PVPHUB.Cards then
                 PVPHUB.Cards.Hide(f)
+                -- The toolbar's search filters the list too
+                displayList = PVPHUB.Cards.FilterForSearch(displayList, sorted)
             end
 
             -- Check if there are any characters at all (not just visible ones)
@@ -13868,7 +13797,7 @@ StaticPopupDialogs["PVPHUB_RESTORE_LAST_WIPE"] = {
 
 -- StaticPopup for confirming reset all data
 StaticPopupDialogs["PVPHUB_RESET_ALL_DATA"] = {
-    text = "RESET ALL CHARACTER DATA\n\nThis will permanently delete ALL character PvP data including ratings, honor, conquest, and currencies.\n\n|cffFF0000This action cannot be undone!|r\n\nAre you sure you want to continue?",
+    text = "RESET ALL CHARACTER DATA\n\nThis will permanently delete ALL character PvP data including ratings, honor, conquest, and currencies, and reset PVPHUB's settings (window size, position, theme and columns are kept).\n\n|cffFF0000This action cannot be undone!|r\n\nYour interface reloads afterwards. Are you sure you want to continue?",
     button1 = "Yes, Reset Everything",
     button2 = "Cancel",
     OnAccept = function()
@@ -13910,20 +13839,14 @@ StaticPopupDialogs["PVPHUB_RESET_ALL_DATA"] = {
             mainWindow = mainWindow or {},
             disableHonorWarnings = disableHonorWarnings or false
         }
-        
-        -- Refresh the UI if main window is open
-        if PVPHUB.window and PVPHUB.window.UpdateContent then
-            PVPHUB.window:UpdateContent()
-        end
-        
-        -- Refresh compact window if it's open
-        if PVPHUB.compactWindow and PVPHUB.compactWindow.UpdateContent then
-            PVPHUB.compactWindow:UpdateContent()
-        end
-        
-        -- Show confirmation message
-        PVPHubPrint("|cffff0000[PVPHUB]|r All character data has been reset!")
-        PlaySound(8959) -- Attention sound
+
+        -- Reload, so every part of PVPHUB starts over with its defaults: the
+        -- table above only has the window's, the rest (queue timer, Streamer
+        -- Mode, ...) is filled in as the addon loads. Without the reload
+        -- their settings broke ("attempt to index field 'queueTimer'") and
+        -- their menus stayed empty until the next /reload.
+        PVPHubPrint("|cffff0000[PVPHUB]|r All character data has been reset. Reloading...")
+        ReloadUI()
     end,
     OnCancel = function()
         -- Do nothing - user cancelled
