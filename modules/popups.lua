@@ -293,10 +293,11 @@ function PVPHUB:ShowWelcomePopup()
     f:Show()
 end
 
--- The "What's new" popup for 7.0: the card view as the headline feature,
--- with a small preview built from the player's own characters (character
--- select style cards beside rating tiles), the other new things below it,
--- and "Show me" (opens PVPHUB on the card view) or "Close".
+-- The "What's new" popup for 7.0, kept short and bold: one line on the
+-- overhaul, the card view as the headline feature with a small preview
+-- built from the player's own characters (character select style cards
+-- beside a rating tile), Streamer Mode and the new design as two tiles,
+-- then "Try Cards" (opens PVPHUB on the card view) or "Close".
 -- Shown once when a character first logs in on 7.0 (see the
 -- "welcome/update popup" step in core); /pvphub update shows it any time.
 local POPUP_W = 520
@@ -405,7 +406,7 @@ local function BuildPreview(parent, width)
     rating:SetText(best > 0 and (PVPHUB._GetRatingColor(best) .. best .. "|r") or "|cff888888—|r")
     local sub = PopupText(tile, 11)
     sub:SetPoint("TOPLEFT", 12, -74)
-    sub:SetText("|cff9a97a6Ratings, MMR, titles, gear and\nthe rating history, side by side|r")
+    sub:SetText("|cff9a97a6Ratings, MMR, history,\ntitles and gear|r")
     return holder
 end
 
@@ -448,6 +449,15 @@ function PVPHUB:ShowUpdatePopup(version)
     ver:SetText("|cff8f8c99What's new  ·  " .. (version or "?") .. "|r")
     y = y + 44
 
+    -- The big line: 7.0 rebuilds the whole addon
+    local tagline = PopupText(f, 18, "OUTLINE")
+    tagline:SetPoint("TOPLEFT", POPUP_PAD, -y)
+    tagline:SetText("|cffffffffRebuilt from the ground up.|r")
+    local tagSub = PopupText(f, 12)
+    tagSub:SetPoint("TOPLEFT", tagline, "BOTTOMLEFT", 0, -6)
+    tagSub:SetText("|cff9a97a6New look. New views. Your data stays.|r")
+    y = y + tagline:GetStringHeight() + 6 + tagSub:GetStringHeight() + 18
+
     -- Headline feature: the card view
     local hero = CreateFrame("Frame", nil, f)
     hero:SetPoint("TOPLEFT", POPUP_PAD, -y)
@@ -455,57 +465,53 @@ function PVPHUB:ShowUpdatePopup(version)
     Box(hero, 12, 1, 0.82, 0, 0.07)
 
     local badge = PVPHUB.CreateNewBadge and PVPHUB.CreateNewBadge(hero, {}, "7.0")
-    if badge then badge:SetPoint("TOPLEFT", 16, -16) end
-    local heroTitle = PopupText(hero, 18, "OUTLINE")
+    if badge then badge:SetPoint("TOPLEFT", 16, -18) end
+    local heroTitle = PopupText(hero, 20, "OUTLINE")
     heroTitle:SetPoint("TOPLEFT", badge and 54 or 16, -14)
-    heroTitle:SetText("|cffffd100The Card View|r")
-    local heroText = PopupText(hero, 12)
-    heroText:SetPoint("TOPLEFT", 16, -42)
-    heroText:SetWidth(inner - 32)
-    heroText:SetWordWrap(true)
-    heroText:SetSpacing(2)
-    heroText:SetText("|cffd8d6deSwitch the Characters tab to |cffffffffCards|r: your characters as cards like the character select screen, and everything about the one you pick on the left — rating tiles (drag to choose which three), MMR, a rating history graph, season titles, gear and currencies. Group and order your characters by dragging, and search them.|r")
+    heroTitle:SetText("|cffffd100Cards|r")
+    local heroText = PopupText(hero, 13)
+    heroText:SetPoint("TOPLEFT", 16, -44)
+    heroText:SetText("|cffd8d6deYour characters as cards. Click one, see everything.|r")
     local preview = BuildPreview(hero, inner - 32)
-    preview:SetPoint("TOPLEFT", 16, -(42 + heroText:GetStringHeight() + 14))
-    local heroH = 42 + heroText:GetStringHeight() + 14 + preview:GetHeight() + 16
+    preview:SetPoint("TOPLEFT", 16, -(44 + heroText:GetStringHeight() + 14))
+    local heroH = 44 + heroText:GetStringHeight() + 14 + preview:GetHeight() + 16
     hero:SetHeight(heroH)
-    y = y + heroH + 16
+    y = y + heroH + 10
 
-    -- Also new
-    local also = PopupText(f, 12, "OUTLINE")
-    also:SetPoint("TOPLEFT", POPUP_PAD + 2, -y)
-    also:SetText("|cffffd100Also new|r")
-    y = y + 22
-
-    local items = {
-        { icon = "Interface\\Icons\\achievement_pvp_a_15", title = "A new Season tab",
-          text = "Key numbers, every bracket side by side, season titles, your MVP and every class at a glance." },
-        { icon = "Interface\\Icons\\INV_Misc_Book_09", title = "Season archive",
-          text = "Each season is kept per character. Look back at any past season in the card view or Season tab." },
-        { icon = "Interface\\Icons\\INV_Misc_GroupLooking", title = "Manage Characters",
-          text = "Spots characters that moved realm and merges them; clean up old ones in Settings > Advanced." },
-        { icon = "Interface\\Icons\\INV_Misc_Gear_02", title = "A fresh look",
-          text = "Switches, sliders and rounded buttons in your theme's colour, with smoother windows throughout." },
+    -- Two tiles side by side: Streamer Mode and the new design
+    local tiles = {
+        { icon = "Interface\\Icons\\Ability_Hunter_EagleEye", title = "Streamer Mode",
+          text = "5 skins. Live preview. Easy setup." },
+        { icon = "Interface\\Icons\\INV_Misc_Gear_02", title = "All-new design",
+          text = "New tabs, toolbar and Season tab." },
     }
-    for _, item in ipairs(items) do
-        local icon = f:CreateTexture(nil, "ARTWORK")
-        icon:SetSize(24, 24)
-        icon:SetPoint("TOPLEFT", POPUP_PAD + 2, -y)
-        icon:SetTexture(item.icon)
+    local tileW = (inner - 10) / 2
+    local tileH = 0
+    for i, t in ipairs(tiles) do
+        local tile = CreateFrame("Frame", nil, f)
+        tile:SetPoint("TOPLEFT", POPUP_PAD + (i - 1) * (tileW + 10), -y)
+        tile:SetWidth(tileW)
+        Box(tile, 10, 1, 1, 1, 0.05)
+        local icon = tile:CreateTexture(nil, "ARTWORK")
+        icon:SetSize(30, 30)
+        icon:SetPoint("TOPLEFT", 14, -14)
+        icon:SetTexture(t.icon)
         icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-        local head = PopupText(f, 12, "OUTLINE")
-        head:SetPoint("TOPLEFT", POPUP_PAD + 36, -y)
-        head:SetText("|cffffffff" .. item.title .. "|r")
-        local text = PopupText(f, 11)
-        text:SetPoint("TOPLEFT", head, "BOTTOMLEFT", 0, -3)
-        text:SetWidth(inner - 40)
+        local head = PopupText(tile, 14, "OUTLINE")
+        head:SetPoint("TOPLEFT", icon, "TOPRIGHT", 10, 0)
+        head:SetText("|cffffffff" .. t.title .. "|r")
+        local text = PopupText(tile, 11)
+        text:SetPoint("TOPLEFT", head, "BOTTOMLEFT", 0, -4)
+        text:SetWidth(tileW - 68)
         text:SetWordWrap(true)
-        text:SetText("|cff9a97a6" .. item.text .. "|r")
-        y = y + math.max(26, head:GetStringHeight() + 3 + text:GetStringHeight()) + 12
+        text:SetText("|cff9a97a6" .. t.text .. "|r")
+        t.frame = tile
+        tileH = math.max(tileH, 14 + math.max(30, head:GetStringHeight() + 4 + text:GetStringHeight()) + 14)
     end
-    y = y + 6
+    for _, t in ipairs(tiles) do t.frame:SetHeight(tileH) end
+    y = y + tileH + 18
 
-    -- Buttons: "Show me" opens the card view, "Close" just closes
+    -- Buttons: "Try Cards" opens the card view, "Close" just closes
     local close = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
     close:SetSize(110, 28)
     close:SetPoint("TOPRIGHT", -POPUP_PAD, -y)
@@ -515,7 +521,7 @@ function PVPHUB:ShowUpdatePopup(version)
     local show = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
     show:SetSize(150, 28)
     show:SetPoint("RIGHT", close, "LEFT", -10, 0)
-    show:SetText("Show me")
+    show:SetText("Try Cards")
     show:SetScript("OnClick", function()
         f:Hide()
         ShowCardView()

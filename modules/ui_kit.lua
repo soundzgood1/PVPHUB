@@ -8,7 +8,7 @@
 --   UI.SkinButton(button, "danger")  Blizzard red button -> rounded button
 --   UI.SkinDescendants(frame)        the three above, for everything inside a frame
 --   UI.SkinCloseButton(button)       red "X" -> thin "×" with a hover circle
---   UI.CreateRail(...)               tabs: icons with a sliding highlight
+--   UI.CreateRail(...)               tabs: Blizzard tab art on the window's side
 --   UI.AddToolFrame(frame, ...)      the main window toolbar's control frames
 --   UI.Slide(frame, to, apply)       the eased slide the switches use
 --   UI.SkinWindow(frame)             square backdrop -> rounded window shell
@@ -305,120 +305,186 @@ function UI.SkinSwitch(cb)
 end
 
 -- --------------------------------------------------------------------------
--- Icon rail
+-- Tab rail
 -- --------------------------------------------------------------------------
--- A column of round icon buttons with a round highlight in the theme color
--- behind the selected one that slides over when it changes: the main
--- window's tabs. The rail is joined to the outside of the window's right
--- edge, `top` units below a rounded window's top (clear of its corner) or
--- flush with a square one's, and reads as part of the window: its
--- side toward the window is square and open, its fill continues the
--- window's background (gradient and opacity too; core's ApplyWindowBGColor
--- repaints it) and the window's border ring runs on round it. It follows
--- the "Rounded Frame" and "Window Glow" settings. Names show in a tooltip.
+-- The main window's tabs, in the look its tabs under the window had before
+-- 7.0: Blizzard's tab art, desaturated and tinted (a light border color;
+-- the theme color and Blizzard's larger "active" art on the selected tab),
+-- with the window's background fading into each tab at its open side. Here
+-- the tabs are mirrored onto their side and stacked on the outside of the
+-- window's right edge, `top` units below a rounded window's top (clear of
+-- its corner) or flush with a square one's. Each shows an icon; its name
+-- shows in a tooltip.
 --   local rail = UI.CreateRail(window, items, onSelect, top)
 --     items: { { key, text, icon, tip }, ... }; onSelect(key) on a click
---   rail:Select(key, instant)   moves the highlight, doesn't call onSelect
---   rail:Paint()                after a theme, rounding or glow change
---   rail:PaintFill()            after the window's background changes
---   rail.byKey[key]             an option's button (:Click() selects it)
+--   rail:Select(key)     marks a tab active, doesn't call onSelect
+--   rail:Paint()         after a theme, rounding or opacity change
+--   rail:PaintFill()     after the window's background changes
+--   rail.byKey[key]      a tab's button (:Click() selects it)
 
-local RAIL_PAD, RAIL_BUTTON, RAIL_GAP, RAIL_ICON = 5, 34, 4, 24
-local RAIL_CORNER = 10
-local RAIL_RING = 7   -- as wide as the window's border ring (core: f.borderTex)
+local TAB_LEN, TAB_GAP, TAB_ICON = 54, 6, 28
+local TAB_END = 8    -- pixels of each end piece's tab in use; the center stretches between
+local TAB_EDGE = 10  -- pixels of the tab before its outer border that keep their size
+-- A horizontal tab's pieces and where its art is, measured on its texture
+-- (Interface/FrameGeneral/UIFrameTabs, 2026-11): the tab is `body` pixels
+-- deep (a drop shadow follows), and the left piece's first `lead` and the
+-- right piece's last `tail` pixels are margin and shadow. `depth` is how
+-- deep it's drawn: only the fill stretches, so the 1 px lines and the
+-- corners stay as thin as Blizzard's (they blur when scaled).
+local TAB_ART = {
+    base = { left = "uiframe-tab-left", center = "_uiframe-tab-center",
+        right = "uiframe-tab-right", body = 29, lead = 3, tail = 8, depth = 40 },
+    active = { left = "uiframe-activetab-left", center = "_uiframe-activetab-center",
+        right = "uiframe-activetab-right", body = 35, lead = 2, tail = 8, depth = 46 },
+}
 local ROUND_MASK = "Interface\\CharacterFrame\\TempPortraitAlphaMask"
-local JOINED = { LEFT = true }   -- the side on the window
-local SQUARE = { LEFT = true, TOP = true, RIGHT = true, BOTTOM = true }
 local rails = {}   -- for theme changes
 
--- Places the highlight y down from the rail's top. An icon gets its color
--- back as the highlight reaches it and fades to gray as it leaves.
-local function PlaceRailThumb(rail, y)
-    rail.thumbFrame:ClearAllPoints()
-    rail.thumbFrame:SetPoint("TOP", rail, "TOP", 0, -y)
-    for i, b in ipairs(rail.buttons) do
-        local t = math.max(0, 1 - math.abs(y - rail.SlotY(i)) / (RAIL_BUTTON + RAIL_GAP))
-        if b.hover then t = math.max(t, 0.7) end
-        b.icon:SetAlpha(Mix(0.5, 1, t))
-        b.icon:SetDesaturated(t < 0.5)
-    end
+-- Shows the pixels x0 to x1, y0 to y1 of an atlas piece on tex, mirrored
+-- along its diagonal: the piece's top edge on the left, its left edge on
+-- top (a quarter turn would put the drop shadow above the tab).
+local function SetTabPiece(tex, info, x0, x1, y0, y1)
+    local l, r, t, b = info.leftTexCoord, info.rightTexCoord, info.topTexCoord, info.bottomTexCoord
+    local u0, u1 = l + (r - l) * x0 / info.width, l + (r - l) * x1 / info.width
+    local v0, v1 = t + (b - t) * y0 / info.height, t + (b - t) * y1 / info.height
+    tex:SetTexture(info.file or info.filename)
+    tex:SetTexCoord(u0, v0, u1, v0, u0, v1, u1, v1)   -- corners UL, LL, UR, LR
+    tex:SetDesaturated(true)
 end
 
--- The fill is the window's background over the rail's height, at the
--- alpha core last gave the window (window.bgAlpha; it changes with the
--- opacity setting and while the window fades in). A theme with
--- WINDOW_BG_TOP fades the window from WINDOW_BG at its top to
--- WINDOW_BG_TOP at its bottom: core's ApplyWindowBGColor hands that color
+-- Builds a tab shape on b, art.depth deep, whose art covers b's height
+-- exactly (margin and shadow hang over its ends): the open side on b's
+-- left edge, the left piece's end at the top, the right piece's at the
+-- bottom. Each piece is two textures: the fill on the window side, which
+-- stretches, and the rest from TAB_EDGE before the border out.
+local function BuildTab(b, art, sublevel)
+    local left, center, right = C_Texture.GetAtlasInfo(art.left),
+        C_Texture.GetAtlasInfo(art.center), C_Texture.GetAtlasInfo(art.right)
+    local pieces = {}
+    if not (left and center and right) then
+        local plain = b:CreateTexture(nil, "BACKGROUND", nil, sublevel)
+        plain:SetColorTexture(1, 1, 1)   -- art renamed in a later patch: a plain tab
+        plain:SetPoint("TOPLEFT")
+        plain:SetSize(art.depth, TAB_LEN)
+        return { plain }
+    end
+    local split = art.body - TAB_EDGE
+    local function Piece(info, x0, x1)
+        local fill = b:CreateTexture(nil, "BACKGROUND", nil, sublevel)
+        local edge = b:CreateTexture(nil, "BACKGROUND", nil, sublevel)
+        SetTabPiece(fill, info, x0, x1, 0, split)
+        SetTabPiece(edge, info, x0, x1, split, info.height)
+        fill:SetWidth(art.depth - TAB_EDGE)
+        edge:SetWidth(info.height - split)
+        edge:SetPoint("TOPLEFT", fill, "TOPRIGHT")
+        edge:SetPoint("BOTTOMLEFT", fill, "BOTTOMRIGHT")
+        pieces[#pieces + 1] = fill
+        pieces[#pieces + 1] = edge
+        return fill
+    end
+    local topLen, bottomLen = art.lead + TAB_END, art.tail + TAB_END
+    local top = Piece(left, 0, topLen)
+    top:SetHeight(topLen)
+    top:SetPoint("TOPLEFT", b, "TOPLEFT", 0, art.lead)
+    local bottom = Piece(right, right.width - bottomLen, right.width)
+    bottom:SetHeight(bottomLen)
+    bottom:SetPoint("BOTTOMLEFT", b, "BOTTOMLEFT", 0, -art.tail)
+    local middle = Piece(center, 0, center.width)
+    middle:SetPoint("TOPLEFT", top, "BOTTOMLEFT")
+    middle:SetPoint("BOTTOMLEFT", bottom, "TOPLEFT")
+    return pieces
+end
+
+-- The window's background `d` units down from its top, as on screen: a
+-- theme with WINDOW_BG_TOP fades the window from WINDOW_BG at its top to
+-- WINDOW_BG_TOP at its bottom (core's ApplyWindowBGColor hands that color
 -- to SetGradient as the minimum, which a vertical gradient draws at the
--- bottom (despite the name). The rail copies what's on screen.
-local function PaintRailFill(rail)
-    local window = rail:GetParent()
+-- bottom, despite the name), at the alpha core last gave the window
+-- (window.bgAlpha; it changes with the opacity setting).
+local function WindowBGAt(window, d)
     local colors = PVPHUB.currentColors or {}
     local bg = colors.WINDOW_BG or { 0.08, 0.05, 0.05, 0.95 }
     local low = colors.WINDOW_BG_TOP or bg
     local alpha = window.bgAlpha or bg[4]
     local lowAlpha = (low[4] or bg[4]) * (bg[4] > 0 and alpha / bg[4] or 0)
     local height = window:GetHeight()
-    local function At(d)
-        local p = height > 0 and math.max(0, math.min(1, d / height)) or 1
-        return CreateColor(Mix(bg[1], low[1], p), Mix(bg[2], low[2], p), Mix(bg[3], low[3], p),
-            Mix(alpha, lowAlpha, p))
-    end
-    rail.fill:SetGradient("VERTICAL", At(rail.top + rail:GetHeight()), At(rail.top))
+    local p = height > 0 and math.max(0, math.min(1, d / height)) or 1
+    return Mix(bg[1], low[1], p), Mix(bg[2], low[2], p), Mix(bg[3], low[3], p), Mix(alpha, lowAlpha, p)
 end
 
--- The ring takes the window's border color and hides with its glow, the
--- place and corners follow its rounding, the highlight the theme color.
+-- The fade from the window into each tab: deeper into the active one, so
+-- it reads as part of the window, and only lightly into the others.
+local function PaintRailFill(rail)
+    local window = rail:GetParent()
+    for i, b in ipairs(rail.buttons) do
+        local active = b.key == rail.selected
+        local r, g, bl, a = WindowBGAt(window, rail.top + rail.SlotY(i) + TAB_LEN / 2)
+        b.blend:SetWidth(active and 20 or 10)
+        b.blend:SetGradient("HORIZONTAL",
+            CreateColor(r, g, bl, active and a or a * 0.6), CreateColor(r, g, bl, 0))
+    end
+end
+
+-- The place follows the window's rounding, the tint the theme: the border
+-- color lifted toward white, the theme color on the active tab (and a
+-- little of it on the one under the mouse), at the window's opacity. The
+-- art is dark with a thin light border; a dark tint (6.x used the border
+-- color at 55 %) leaves black boxes without a visible border.
 local function PaintRail(rail)
-    local colors = PVPHUB.currentColors or {}
+    local window = rail:GetParent()
     local style = PVPHUB_SETTINGS and PVPHUB_SETTINGS.mainWindow or {}
-    local rounded = style.roundedFrame ~= false
-    rail.top = rounded and rail.roundedTop or 0
+    rail.top = style.roundedFrame ~= false and rail.roundedTop or 0
     rail:ClearAllPoints()
-    rail:SetPoint("TOPLEFT", rail:GetParent(), "TOPRIGHT", 0, -rail.top)
+    rail:SetPoint("TOPLEFT", window, "TOPRIGHT", 0, -rail.top)
+    local colors = PVPHUB.currentColors or {}
     local border = colors.WINDOW_BORDER or { 0.3, 0.3, 0.38, 1 }
-    rail.ring:SetVertexColor(border[1], border[2], border[3], (border[4] or 1) * 0.3)
-    rail.ring:SetShown(style.showGlow ~= false)
-    local sides = rounded and JOINED or SQUARE
-    rail.fill:SetFlat(sides)
-    rail.ring:SetFlat(sides)
-    PaintRailFill(rail)
     local ac = ThemeColor()
-    rail.thumb:SetGradient("VERTICAL",
-        CreateColor(ac[1] * 0.55, ac[2] * 0.55, ac[3] * 0.55, 0.95),
-        CreateColor(math.min(1, ac[1] * 0.9 + 0.1), math.min(1, ac[2] * 0.9 + 0.1), math.min(1, ac[3] * 0.9 + 0.1), 0.95))
+    local opacity = PVPHUB_SETTINGS and PVPHUB_SETTINGS.windowOpacity or 0.95
+    for _, b in ipairs(rail.buttons) do
+        local active = b.key == rail.selected
+        local r, g, bl = Mix(border[1], 1, 0.55), Mix(border[2], 1, 0.55), Mix(border[3], 1, 0.55)
+        if active then
+            r, g, bl = ac[1], ac[2], ac[3]
+        elseif b.hover then
+            r, g, bl = Mix(r, ac[1], 0.35), Mix(g, ac[2], 0.35), Mix(bl, ac[3], 0.35)
+        end
+        for _, tex in ipairs(b.base) do
+            tex:SetShown(not active)
+            tex:SetVertexColor(r, g, bl, opacity)
+        end
+        for _, tex in ipairs(b.active) do
+            tex:SetShown(active)
+            tex:SetVertexColor(r, g, bl, opacity)
+        end
+        b.icon:ClearAllPoints()
+        b.icon:SetPoint("CENTER", b, "LEFT", (active and TAB_ART.active or TAB_ART.base).depth / 2, 0)
+        b.icon:SetAlpha(active and 1 or b.hover and 0.85 or 0.6)
+        b.icon:SetDesaturated(not active and not b.hover)
+    end
+    PaintRailFill(rail)
 end
 
 function UI.CreateRail(window, items, onSelect, top)
     local rail = CreateFrame("Frame", nil, window)
-    rail:SetSize(RAIL_BUTTON + RAIL_PAD * 2, RAIL_PAD * 2 + #items * RAIL_BUTTON + (#items - 1) * RAIL_GAP)
     rail.roundedTop, rail.top = top, top   -- placed by PaintRail
-    rail.fill = UI.CreatePanel(rail, "fill", "BACKGROUND", 0, RAIL_CORNER)
-    -- The ring is a larger shape behind the fill, like the window's. The
-    -- window's own ring already covers the first RAIL_RING units beside the
-    -- window, so this one starts after it (two rings on top of each other
-    -- would show as a brighter patch).
-    rail.ring = UI.CreatePanel(rail, "fill", "BACKGROUND", -1, RAIL_CORNER + RAIL_RING,
-        { RAIL_RING, -RAIL_RING, -RAIL_RING, -RAIL_RING })
-    rail.thumbFrame = CreateFrame("Frame", nil, rail)
-    rail.thumbFrame:SetSize(RAIL_BUTTON, RAIL_BUTTON)
-    rail.thumb = UI.CreatePill(rail.thumbFrame, "ARTWORK", 0)   -- as wide as tall: a circle
-
-    function rail.SlotY(i) return RAIL_PAD + (i - 1) * (RAIL_BUTTON + RAIL_GAP) end
-    local function Place(y) PlaceRailThumb(rail, y) end
-    local function Repaint() Place(rail.pvpSlide and rail.pvpSlide.value or RAIL_PAD) end
+    function rail.SlotY(i) return (i - 1) * (TAB_LEN + TAB_GAP) end
 
     rail.buttons, rail.byKey = {}, {}
     for i, item in ipairs(items) do
         local b = CreateFrame("Button", nil, rail)
-        b:SetSize(RAIL_BUTTON, RAIL_BUTTON)
-        b:SetPoint("TOP", rail, "TOP", 0, -rail.SlotY(i))
-        b:SetFrameLevel(rail.thumbFrame:GetFrameLevel() + 1)
+        b:SetPoint("TOPLEFT", rail, "TOPLEFT", 0, -rail.SlotY(i))
+        b:SetSize(TAB_ART.active.depth, TAB_LEN)
         b.key = item.key
+        b.base = BuildTab(b, TAB_ART.base, 0)
+        b.active = BuildTab(b, TAB_ART.active, 1)
+
+        b.blend = b:CreateTexture(nil, "BORDER")
+        b.blend:SetTexture("Interface\\Buttons\\WHITE8x8")
+        b.blend:SetPoint("TOPLEFT", 0, -1)
+        b.blend:SetPoint("BOTTOMLEFT", 0, 1)
 
         b.icon = b:CreateTexture(nil, "ARTWORK")
-        b.icon:SetSize(RAIL_ICON, RAIL_ICON)
-        b.icon:SetPoint("CENTER")
+        b.icon:SetSize(TAB_ICON, TAB_ICON)
         b.icon:SetTexture(item.icon)
         b.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
         local mask = b:CreateMaskTexture()
@@ -432,7 +498,7 @@ function UI.CreateRail(window, items, onSelect, top)
         end)
         b:SetScript("OnEnter", function(self)
             self.hover = true
-            Repaint()
+            PaintRail(rail)
             GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
             GameTooltip:SetText(item.text, 1, 1, 1)
             if item.tip then GameTooltip:AddLine(item.tip, 0.7, 0.7, 0.7, true) end
@@ -440,32 +506,25 @@ function UI.CreateRail(window, items, onSelect, top)
         end)
         b:SetScript("OnLeave", function(self)
             self.hover = nil
-            Repaint()
+            PaintRail(rail)
             GameTooltip:Hide()
         end)
         rail.buttons[i] = b
         rail.byKey[item.key] = b
     end
+    rail:SetSize(TAB_ART.active.depth, #items * TAB_LEN + (#items - 1) * TAB_GAP)
 
-    function rail:Select(key, instant)
-        for i, b in ipairs(self.buttons) do
-            if b.key == key then
-                UI.Slide(self, self.SlotY(i), Place, instant)
-                return
-            end
-        end
-    end
-    function rail:Paint()
+    function rail:Select(key)
+        self.selected = key
         PaintRail(self)
-        Repaint()
     end
-    function rail:PaintFill() PaintRailFill(self) end
+    rail.Paint = PaintRail
+    rail.PaintFill = PaintRailFill
     -- A themed gradient changes along the window's height
     window:HookScript("OnSizeChanged", function() PaintRailFill(rail) end)
 
     rails[#rails + 1] = rail
-    PaintRail(rail)
-    rail:Select(items[1] and items[1].key, true)
+    rail:Select(items[1] and items[1].key)
     return rail
 end
 

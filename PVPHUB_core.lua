@@ -2905,7 +2905,7 @@ local function ApplyWindowBGColor(frame, alpha)
     else
         frame.bgTex:SetVertexColor(bg[1], bg[2], bg[3], alpha)
     end
-    -- The main window's tab rail continues its background (modules/ui_kit.lua)
+    -- The main window's background fades into its tabs (modules/ui_kit.lua)
     frame.bgAlpha = alpha
     if frame.tabRail then frame.tabRail:PaintFill() end
 end
@@ -3035,7 +3035,7 @@ local function ApplyWindowGlowVisibility(frame)
     if frame.borderTex then
         if show then frame.borderTex:Show() else frame.borderTex:Hide() end
     end
-    if frame.tabRail then frame.tabRail:Paint() end   -- the tab rail's ring too
+    if frame.tabRail then frame.tabRail:Paint() end
 end
 
 local function ApplyTheme()
@@ -8202,7 +8202,7 @@ SlashCmdList["PVPHUB"] = function(msg)
             for _, layer in ipairs(self.glowLayers or {}) do
                 layer:SetRounded(rounded)
             end
-            if self.tabRail then self.tabRail:Paint() end   -- the tab rail's corners
+            if self.tabRail then self.tabRail:Paint() end   -- the tabs' place
         end
 
         -- Ensure theme is applied to match current theme colors
@@ -8644,11 +8644,11 @@ SlashCmdList["PVPHUB"] = function(msg)
             end
         end
 
-        -- The tabs: an icon rail joined to the outside of the window's right
-        -- edge, just below the rounded top corner (modules/ui_kit.lua), its
-        -- highlight sliding to the active tab, so the title row has room for
-        -- the Characters tab's toolbar. The screen clamp counts the rail as
-        -- part of the window.
+        -- The tabs: Blizzard's tab art as before, turned on its side and
+        -- stacked on the outside of the window's right edge, just below the
+        -- rounded top corner (modules/ui_kit.lua), so the title row has room
+        -- for the Characters tab's toolbar. The screen clamp counts the tabs
+        -- as part of the window.
         local nav = PVPHUB.UI.CreateRail(f, tabData, SwitchTab, PVPHUB.WINDOW_CORNER_RADIUS + 8)
         f.tabRail = nav   -- not "nav": small windows use that for their sidebars
         f:SetClampRectInsets(0, nav:GetWidth(), 0, 0)
@@ -8656,7 +8656,7 @@ SlashCmdList["PVPHUB"] = function(msg)
             f.tabs[data.key] = { id = data.key, button = nav.byKey[data.key] }
         end
 
-        -- Moves the highlight to the active tab and takes the theme's color.
+        -- Marks the active tab and takes the theme's color and opacity.
         -- Kept under its old name for its callers (SwitchTab, both theme
         -- dropdowns, both transparency sliders).
         f.ApplyTabThemeColors = function()
@@ -9668,9 +9668,7 @@ SlashCmdList["PVPHUB"] = function(msg)
             transparencyValueLabel:SetTextColor(unpack(UI_CONSTANTS.COLORS.HEADER_COLOR))
 
             local function ApplyTabTransparency(opacity)
-                -- opacity is ignored here: the tab rail takes the window's
-                -- opacity with its background (ApplyWindowBGColor repaints
-                -- it); this only refreshes its highlight.
+                -- opacity is ignored here: the tabs read the saved setting.
                 if f.ApplyTabThemeColors then f.ApplyTabThemeColors() end
             end
 
@@ -10071,7 +10069,7 @@ SlashCmdList["PVPHUB"] = function(msg)
         
         -- Always initialize with CHARACTERS tab (prevents header generation bugs when reopening from settings tab)
         SwitchTab("characters")
-        f.SwitchTab = SwitchTab   -- 7.0: the update popup's "Show me" opens the card view
+        f.SwitchTab = SwitchTab   -- 7.0: the update popup's "Try Cards" opens the card view
         
         -- However it closes (X, Escape, /pvphub toggle)
         f:HookScript("OnHide", function(self) self:SaveWindowPos() end)
