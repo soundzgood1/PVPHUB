@@ -772,7 +772,11 @@ function PVPHUB.QueueTimer:CreateFrame()
     body:SetPoint("BOTTOMRIGHT", frame,  "BOTTOMRIGHT", -3, 3)
     frame.body = body
 
-    local maxRows = PVPHUB.Compat.GetMaxBattlefieldQueues()
+    -- GetMaxBattlefieldID (behind GetMaxBattlefieldQueues) can report only the
+    -- queues in use right now: built while in one queue, the timer had a
+    -- single row and broke when a second one started. Build the most the
+    -- game allows, plus one for the pop preview (slot 0).
+    local maxRows = math.max(PVPHUB.Compat.GetMaxBattlefieldQueues(), MAX_BATTLEFIELD_QUEUES or 3) + 1
     frame.slotRows = {}
     for i = 1, maxRows do
         local ROW_H = 56
@@ -1218,7 +1222,8 @@ function PVPHUB.QueueTimer:Update()
     self.frame._tickCount = ((self.frame._tickCount or 0) + 1) % 3
     local dots = ShowsDots() and TICK_DOTS[self.frame._tickCount + 1] or ""
 
-    -- Populate slot rows
+    -- Populate slot rows (only as many as there are rows)
+    local rowCount = math.min(#activeSlots, #self.frame.slotRows)
     local anyReady = false
     for i, slot in ipairs(activeSlots) do
         local row = self.frame.slotRows[i]
@@ -1339,12 +1344,12 @@ function PVPHUB.QueueTimer:Update()
             row.avgValue:SetTextColor(1, 0.3, 0.3, 1)
         end
         -- Show divider only between rows, not after the last active one
-        row.divider:SetShown(i < #activeSlots)
+        row.divider:SetShown(i < rowCount)
         row:Show()
     end
 
     -- Hide unused rows
-    for i = #activeSlots + 1, #self.frame.slotRows do
+    for i = rowCount + 1, #self.frame.slotRows do
         self.frame.slotRows[i]:Hide()
     end
 
@@ -1356,7 +1361,7 @@ function PVPHUB.QueueTimer:Update()
     C_Timer.After(0, function()
         if not self.frame or not self.frame:IsShown() then return end
 
-        for i = 1, #activeSlots do
+        for i = 1, rowCount do
             local row = self.frame.slotRows[i]
             if row then row:SetHeight(ComputeRowHeight(row)) end
         end
@@ -1364,10 +1369,10 @@ function PVPHUB.QueueTimer:Update()
         -- Auto-size frame height to the actual (snug) row heights, not a flat
         -- per-row constant — avoids leaving dead space below the last row.
         local totalRowHeight = 0
-        for i = 1, #activeSlots do
+        for i = 1, rowCount do
             totalRowHeight = totalRowHeight + self.frame.slotRows[i]:GetHeight()
         end
-        self.frame:SetHeight(totalRowHeight + math.max(0, #activeSlots - 1) * 1 + 6)
+        self.frame:SetHeight(totalRowHeight + math.max(0, rowCount - 1) * 1 + 6)
 
         self:ApplyOpacity()
         ResizeToContent(self.frame)
