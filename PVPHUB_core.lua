@@ -10078,7 +10078,8 @@ SlashCmdList["PVPHUB"] = function(msg)
         f.author = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
         f.author:SetPoint("TOPRIGHT", f.title, "BOTTOMRIGHT", 0, -2)
         local addonVersion = C_AddOns.GetAddOnMetadata("PVPHUB", "Version")
-        local versionTag = addonVersion and ("  |cff808080v" .. addonVersion .. "|r") or ""
+        -- Shown without a "-dev" suffix (the TOC keeps it until the release)
+        local versionTag = addonVersion and ("  |cff808080v" .. addonVersion:gsub("%-dev$", "") .. "|r") or ""
         f.author:SetText("|cffBBBBBBby soundz|r" .. versionTag)
         -- Try to use Prototyp font first, fallback to Friz Quadrata TT - this font is locked and won't change
         local authorFont = "Fonts\\FRIZQT__.TTF" -- Default fallback
@@ -13143,7 +13144,7 @@ SlashCmdList["PVPHUB"] = function(msg)
             f.updateNote:SetShadowOffset(1, -1)
             
             -- Set the content for the single note line
-            f.updateNote:SetText("|TInterface\\Icons\\achievement_pvp_a_01:16|t Season 2 is finally here! Make sure you enjoy it!")
+            f.updateNote:SetText("|TInterface\\Icons\\achievement_pvp_a_01:16|t Many new features with PVP HUB 7.0 - take your time and look around!")
             
             -- Dynamic height adjustment based on content
             if not PVPHUB_SETTINGS.windowSize or not PVPHUB_SETTINGS.windowSize.userResized then

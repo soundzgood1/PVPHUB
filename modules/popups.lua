@@ -446,7 +446,8 @@ function PVPHUB:ShowUpdatePopup(version)
     local ver = PopupText(f, 11)
     ver:SetPoint("TOPRIGHT", -POPUP_PAD - 24, -y - 8)
     ver:SetJustifyH("RIGHT")
-    ver:SetText("|cff8f8c99What's new  ·  " .. (version or "?") .. "|r")
+    -- Without a "-dev" suffix, like the title's byline
+    ver:SetText("|cff8f8c99What's new  ·  " .. (version or "?"):gsub("%-dev$", "") .. "|r")
     y = y + 44
 
     -- The big line: 7.0 rebuilds the whole addon
