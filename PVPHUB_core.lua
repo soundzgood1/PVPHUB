@@ -3175,7 +3175,8 @@ end
 -- installed version's major.minor is NEW_BADGE_VERSION, and only until the
 -- user has opened the setting it marks (MarkNewBadgeSeen). A tag standing
 -- for several keys (a section header) hides once all of them are seen.
-PVPHUB.NEW_BADGE_VERSION = "6.7"
+-- 7.0: 6.7 never reached CurseForge, so its Queue Timer tags show in 7.0.
+PVPHUB.NEW_BADGE_VERSION = "7.0"
 do
     local badges = {} -- every tag created, so seeing one updates the others
 
