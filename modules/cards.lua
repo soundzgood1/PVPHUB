@@ -452,12 +452,12 @@ local function CreateGroupHeader(container)
                 root:CreateTitle(name)
                 root:CreateButton("Rename Group", function()
                     PVPHUB._renameGroupCtx = { groupIndex = index, groupName = name }
-                    StaticPopup_Show("PVPHUB_RENAME_GROUP")
+                    PVPHUB.ShowDialog("PVPHUB_RENAME_GROUP")
                 end)
                 root:CreateButton("|cffff4040Delete Group|r", function()
                     PVPHUB._deleteGroupCtx = { groupIndex = index }
-                    StaticPopupDialogs["PVPHUB_DELETE_GROUP"].text = "Delete group '" .. name .. "'?\n\nCharacters will move to No Group."
-                    StaticPopup_Show("PVPHUB_DELETE_GROUP")
+                    PVPHUB.Dialogs["PVPHUB_DELETE_GROUP"].text = "Delete group '" .. name .. "'?\n\nCharacters will move to No Group."
+                    PVPHUB.ShowDialog("PVPHUB_DELETE_GROUP")
                 end)
             end)
         end

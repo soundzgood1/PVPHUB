@@ -2294,7 +2294,7 @@ function PVPHUB:ShowGroupManagementWindow()
     addGroupBtn:SetPoint("BOTTOMLEFT", 20, 45)
     addGroupBtn:SetText(CreateAtlasMarkup("editmode-new-layout-plus", 12, 12) .. " Add Group")
     addGroupBtn:SetScript("OnClick", function()
-        StaticPopup_Show("PVPHUB_ADD_GROUP")
+        PVPHUB.ShowDialog("PVPHUB_ADD_GROUP")
     end)
 
     -- Close button at bottom
@@ -2358,7 +2358,7 @@ function PVPHUB:ShowGroupManagementWindow()
                 renameBtn:SetText("Rename")
                 renameBtn:SetScript("OnClick", function()
                     PVPHUB._renameGroupCtx = { groupIndex = i, groupName = group.name }
-                    StaticPopup_Show("PVPHUB_RENAME_GROUP")
+                    PVPHUB.ShowDialog("PVPHUB_RENAME_GROUP")
                 end)
                 -- Delete button
                 local deleteBtn = CreateFrame("Button", nil, groupFrame, "UIPanelButtonTemplate")
@@ -2368,8 +2368,8 @@ function PVPHUB:ShowGroupManagementWindow()
                 deleteBtn.pvpDanger = true   -- red in the modern button style
                 deleteBtn:SetScript("OnClick", function()
                     PVPHUB._deleteGroupCtx = { groupIndex = i }
-                    StaticPopupDialogs["PVPHUB_DELETE_GROUP"].text = "Delete group '" .. group.name .. "'?\n\nCharacters will be moved to Ungrouped."
-                    StaticPopup_Show("PVPHUB_DELETE_GROUP")
+                    PVPHUB.Dialogs["PVPHUB_DELETE_GROUP"].text = "Delete group '" .. group.name .. "'?\n\nCharacters will be moved to Ungrouped."
+                    PVPHUB.ShowDialog("PVPHUB_DELETE_GROUP")
                 end)
             end
             
@@ -2575,7 +2575,7 @@ local function ShowBackupsWindow()
                         table.insert(what, string.format("fill in missing season data for %d character(s)", plan.fillCount))
                     end
                     PVPHUB._pendingWipeRestorePlan = plan
-                    StaticPopup_Show("PVPHUB_RESTORE_LAST_WIPE", string.format(
+                    PVPHUB.ShowDialog("PVPHUB_RESTORE_LAST_WIPE", string.format(
                         "Restore from the backup taken %s (%s)?\n\nThis will %s.\n\nNothing you currently have is overwritten.",
                         absolute, snap.reason or "snapshot", table.concat(what, ", and ")))
                 end)
@@ -5808,9 +5808,9 @@ local function GetTotalsPopupRow(n)
         if not charKey then return end
         if _totalsPopup then _totalsPopup:Hide() end
         PVPHUB._deleteCharCtx = charKey
-        StaticPopupDialogs["PVPHUB_DELETE_CHARACTER"].text =
+        PVPHUB.Dialogs["PVPHUB_DELETE_CHARACTER"].text =
             "Are you sure you want to permanently delete all data for |cff4da6ff" .. charKey .. "|r?\n\nThis action cannot be undone!"
-        StaticPopup_Show("PVPHUB_DELETE_CHARACTER")
+        PVPHUB.ShowDialog("PVPHUB_DELETE_CHARACTER")
     end)
 
     -- Moving onto the delete button counts as still on the row
@@ -7747,7 +7747,7 @@ SlashCmdList["PVPHUB"] = function(msg)
             table.insert(what, string.format("fill in missing season data (ratings, win/loss, match history) for %d character(s)", plan.fillCount))
         end
         PVPHUB._pendingWipeRestorePlan = plan
-        StaticPopup_Show("PVPHUB_RESTORE_LAST_WIPE", string.format(
+        PVPHUB.ShowDialog("PVPHUB_RESTORE_LAST_WIPE", string.format(
             "Restore from the backup taken %s (%s)?\n\nThis will %s.\n\nNothing you currently have is overwritten.",
             whenText, snapshot.reason or "snapshot", table.concat(what, ", and ")))
         return
@@ -9754,7 +9754,7 @@ SlashCmdList["PVPHUB"] = function(msg)
             end)
             historySlider:SetScript("OnMouseDown", function() isDragging = true end)
             historySlider:SetScript("OnMouseUp", function(self)
-                if isDragging then isDragging = false; StaticPopup_Show("PVPHUB_RELOAD_UI") end
+                if isDragging then isDragging = false; PVPHUB.ShowDialog("PVPHUB_RELOAD_UI") end
             end)
             historySlider:SetScript("OnEnter", function(self)
                 GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
@@ -9794,7 +9794,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                 PVPHUB_SETTINGS.dateFormat = self.value
                 UIDropDownMenu_SetText(dateFormatDropdown, dateFormatOptions[self.value])
                 PVPHubPrint("|cffff0000[PVPHUB]|r Date format: " .. dateFormatOptions[self.value])
-                StaticPopup_Show("PVPHUB_RELOAD_UI")
+                PVPHUB.ShowDialog("PVPHUB_RELOAD_UI")
             end
             PVPHUB.AttachModernMenu(dateFormatDropdown, function(_, root)
                 for _, opt in ipairs({ { text = "DD.MM.YY (EU)", value = "EU" }, { text = "MM.DD.YY (US)", value = "US" } }) do
@@ -9961,7 +9961,7 @@ SlashCmdList["PVPHUB"] = function(msg)
             resetButton:SetText("Reset All Data")
             resetButton.pvpDanger = true   -- red in the modern button style (modules/ui_kit.lua)
             resetButton:GetFontString():SetTextColor(1, 1, 1)
-            resetButton:SetScript("OnClick", function() StaticPopup_Show("PVPHUB_RESET_ALL_DATA") end)
+            resetButton:SetScript("OnClick", function() PVPHUB.ShowDialog("PVPHUB_RESET_ALL_DATA") end)
             resetButton:SetScript("OnEnter", function(self)
                 GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
                 GameTooltip:SetText("Reset All Character Data", 1, 0.2, 0.2)
@@ -11093,7 +11093,7 @@ SlashCmdList["PVPHUB"] = function(msg)
         end
         
         manageGroupsBtn:SetScript("OnClick", function()
-            StaticPopup_Show("PVPHUB_CREATE_GROUP")
+            PVPHUB.ShowDialog("PVPHUB_CREATE_GROUP")
         end)
         manageGroupsBtn:SetScript("OnEnter", function(self)
             GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
@@ -11435,7 +11435,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                 root:CreateButton(PVPHUB.MenuText(hasNote and "Edit Note" or "Add Note", "Interface\\Icons\\INV_Inscription_Parchment"), function()
                     -- Character goes in as the data argument so
                     -- the dialog's OnShow already has it.
-                    StaticPopup_Show("PVPHUB_EDIT_NOTE", nil, nil, charKey)
+                    PVPHUB.ShowDialog("PVPHUB_EDIT_NOTE", nil, nil, charKey)
                 end)
 
                 root:CreateDivider()
@@ -11444,8 +11444,8 @@ SlashCmdList["PVPHUB"] = function(msg)
                 end)
                 root:CreateButton(PVPHUB.MenuText("|cffff4040Delete Character|r", "Interface\\Buttons\\UI-GroupLoot-Pass-Down"), function()
                     PVPHUB._deleteCharCtx = charKey
-                    StaticPopupDialogs["PVPHUB_DELETE_CHARACTER"].text = "Are you sure you want to permanently delete all data for |cff4da6ff" .. charKey .. "|r?\n\nThis action cannot be undone!"
-                    StaticPopup_Show("PVPHUB_DELETE_CHARACTER")
+                    PVPHUB.Dialogs["PVPHUB_DELETE_CHARACTER"].text = "Are you sure you want to permanently delete all data for |cff4da6ff" .. charKey .. "|r?\n\nThis action cannot be undone!"
+                    PVPHUB.ShowDialog("PVPHUB_DELETE_CHARACTER")
                 end)
                 root:CreateButton(PVPHUB.MenuText("Manage Hidden Characters", "Interface\\Buttons\\UI-GuildButton-PublicNote-Up"), function()
                     ShowHiddenCharactersWindow()
@@ -12117,12 +12117,12 @@ SlashCmdList["PVPHUB"] = function(msg)
                                     root:CreateTitle(entry.groupName)
                                     root:CreateButton("Rename Group", function()
                                         PVPHUB._renameGroupCtx = { groupIndex = entry.groupIndex, groupName = entry.groupName }
-                                        StaticPopup_Show("PVPHUB_RENAME_GROUP")
+                                        PVPHUB.ShowDialog("PVPHUB_RENAME_GROUP")
                                     end)
                                     root:CreateButton("|cffff4040Delete Group|r", function()
                                         PVPHUB._deleteGroupCtx = { groupIndex = entry.groupIndex }
-                                        StaticPopupDialogs["PVPHUB_DELETE_GROUP"].text = "Delete group '" .. entry.groupName .. "'?\n\nCharacters will move to No Group."
-                                        StaticPopup_Show("PVPHUB_DELETE_GROUP")
+                                        PVPHUB.Dialogs["PVPHUB_DELETE_GROUP"].text = "Delete group '" .. entry.groupName .. "'?\n\nCharacters will move to No Group."
+                                        PVPHUB.ShowDialog("PVPHUB_DELETE_GROUP")
                                     end)
                                 end)
                             end
@@ -13318,10 +13318,10 @@ ShowHonorWarning = function(charName, honorAmount)
     -- Create a popup warning dialog with classic WoW styling.
     -- Fixed name (not GetTime()-suffixed): honor can drop below the warning
     -- threshold and re-trigger this multiple times per session, and a
-    -- unique key per call would grow StaticPopupDialogs (a global table)
-    -- without bound for the rest of the session.
+    -- unique key per call would grow PVPHUB.Dialogs without bound for the
+    -- rest of the session.
     local dialogName = "PVPHUB_HONOR_WARNING"
-    StaticPopupDialogs[dialogName] = {
+    PVPHUB.Dialogs[dialogName] = {
         text = string.format("|T1455894:16|t HONOR CAP WARNING\n\n|c%s%s|r has reached |cffFFD700%s Honor|r!",
             classColor, cleanName, FormatNumber(honorAmount)),
         button1 = "I got it bro",
@@ -13338,7 +13338,7 @@ ShowHonorWarning = function(charName, honorAmount)
         hideOnEscape = true,
         preferredIndex = 3,
     }
-    StaticPopup_Show(dialogName)
+    PVPHUB.ShowDialog(dialogName)
     
     -- Also show a brief chat message (cleaned up)
     PVPHubPrint(string.format("|T1455894:14|t |cffff0000[PVPHUB]|r WARNING: %s has |cffFFD700%s Honor|r - Close to cap!",
@@ -13761,11 +13761,17 @@ compartmentFrame:SetScript("OnEvent", function(self, event, addonName)
 end)
 
 
+-- PVPHUB's dialogs, shown by PVPHUB.ShowDialog (modules/ui_kit.lua) in its
+-- own frame. Not Blizzard's StaticPopupDialogs: StaticPopup_Show from an
+-- addon taints the shared popup frames, and the guild window then got
+-- blocked ("PVPHUB tried to call IsUserOAuthed()").
+PVPHUB.Dialogs = PVPHUB.Dialogs or {}
+
 -- Confirms /pvphub restore <n>. text is a plain "%s" since the actual
 -- message (character count, reset reason, age) is built once in the
 -- command handler and passed as a single arg, rather than relying on
--- StaticPopup's 2-argument %s substitution for 3 values.
-StaticPopupDialogs["PVPHUB_RESTORE_LAST_WIPE"] = {
+-- the dialog's 2-argument %s substitution for 3 values.
+PVPHUB.Dialogs["PVPHUB_RESTORE_LAST_WIPE"] = {
     text = "%s",
     button1 = "Yes, Restore It",
     button2 = "Cancel",
@@ -13795,8 +13801,8 @@ StaticPopupDialogs["PVPHUB_RESTORE_LAST_WIPE"] = {
     preferredIndex = 3,
 }
 
--- StaticPopup for confirming reset all data
-StaticPopupDialogs["PVPHUB_RESET_ALL_DATA"] = {
+-- Dialog for confirming reset all data
+PVPHUB.Dialogs["PVPHUB_RESET_ALL_DATA"] = {
     text = "RESET ALL CHARACTER DATA\n\nThis will permanently delete ALL character PvP data including ratings, honor, conquest, and currencies, and reset PVPHUB's settings (window size, position, theme and columns are kept).\n\n|cffFF0000This action cannot be undone!|r\n\nYour interface reloads afterwards. Are you sure you want to continue?",
     button1 = "Yes, Reset Everything",
     button2 = "Cancel",
@@ -13857,8 +13863,8 @@ StaticPopupDialogs["PVPHUB_RESET_ALL_DATA"] = {
     preferredIndex = 3,
 }
 
--- StaticPopup for reload UI prompt
-StaticPopupDialogs["PVPHUB_RELOAD_UI"] = {
+-- Dialog for reload UI prompt
+PVPHUB.Dialogs["PVPHUB_RELOAD_UI"] = {
     text = "Match history setting changed.\n\nReload UI to apply changes?",
     button1 = "Reload UI",
     button2 = "Later",
@@ -13871,17 +13877,17 @@ StaticPopupDialogs["PVPHUB_RELOAD_UI"] = {
     preferredIndex = 3,
 }
 
--- StaticPopup for editing character notes
-StaticPopupDialogs["PVPHUB_EDIT_NOTE"] = {
+-- Dialog for editing character notes
+PVPHUB.Dialogs["PVPHUB_EDIT_NOTE"] = {
     text = "Character Note:",
     button1 = "Save",
     button2 = "Cancel",
     button3 = "Clear Note",
     hasEditBox = true,
     maxLetters = 50,
-    -- The character arrives as StaticPopup_Show's data argument, which the
+    -- The character arrives as ShowDialog's data argument, which the
     -- dialog already has when OnShow runs. It used to be assigned to the
-    -- dialog after StaticPopup_Show returned, too late for OnShow, so the box
+    -- dialog after the show call returned, too late for OnShow, so the box
     -- was prefilled with the note of whichever character the shared dialog
     -- frame had last been opened for, and saving wrote that note to the new one.
     OnShow = function(self, data)
@@ -13939,21 +13945,14 @@ StaticPopupDialogs["PVPHUB_EDIT_NOTE"] = {
         
         PVPHubPrint("|cffff0000[PVPHUB]|r Note cleared")
     end,
-    EditBoxOnEnterPressed = function(self)
-        local parent = self:GetParent()
-        StaticPopup_OnClick(parent, 1)
-    end,
-    EditBoxOnEscapePressed = function(self)
-        self:GetParent():Hide()
-    end,
     timeout = 0,
     whileDead = true,
     hideOnEscape = true,
     preferredIndex = 3,
 }
 
--- StaticPopup: add/create a new character group
-StaticPopupDialogs["PVPHUB_ADD_GROUP"] = {
+-- Dialog: add/create a new character group
+PVPHUB.Dialogs["PVPHUB_ADD_GROUP"] = {
     text = "Enter group name:",
     button1 = "Create",
     button2 = "Cancel",
@@ -13964,7 +13963,6 @@ StaticPopupDialogs["PVPHUB_ADD_GROUP"] = {
         if not eb then return end
         eb:SetText("")
         eb:SetFocus()
-        eb:SetScript("OnEnterPressed", function() StaticPopup_OnClick(self, 1) end)
     end,
     OnAccept = function(self)
         local eb = self.editBox or self.EditBox
@@ -13993,10 +13991,10 @@ StaticPopupDialogs["PVPHUB_ADD_GROUP"] = {
     hideOnEscape = true,
     preferredIndex = 3,
 }
-StaticPopupDialogs["PVPHUB_CREATE_GROUP"] = StaticPopupDialogs["PVPHUB_ADD_GROUP"]
+PVPHUB.Dialogs["PVPHUB_CREATE_GROUP"] = PVPHUB.Dialogs["PVPHUB_ADD_GROUP"]
 
--- StaticPopup: rename a group — caller sets PVPHUB._renameGroupCtx = { groupIndex, groupName }
-StaticPopupDialogs["PVPHUB_RENAME_GROUP"] = {
+-- Dialog: rename a group — caller sets PVPHUB._renameGroupCtx = { groupIndex, groupName }
+PVPHUB.Dialogs["PVPHUB_RENAME_GROUP"] = {
     text = "Rename group:",
     button1 = "Rename",
     button2 = "Cancel",
@@ -14009,7 +14007,6 @@ StaticPopupDialogs["PVPHUB_RENAME_GROUP"] = {
         eb:SetText(ctx and ctx.groupName or "")
         eb:SetFocus()
         eb:HighlightText()
-        eb:SetScript("OnEnterPressed", function() StaticPopup_OnClick(self, 1) end)
     end,
     OnAccept = function(self)
         local ctx = PVPHUB._renameGroupCtx
@@ -14034,8 +14031,8 @@ StaticPopupDialogs["PVPHUB_RENAME_GROUP"] = {
     preferredIndex = 3,
 }
 
--- StaticPopup: delete a group — caller sets PVPHUB._deleteGroupCtx = { groupIndex } and updates .text
-StaticPopupDialogs["PVPHUB_DELETE_GROUP"] = {
+-- Dialog: delete a group — caller sets PVPHUB._deleteGroupCtx = { groupIndex } and updates .text
+PVPHUB.Dialogs["PVPHUB_DELETE_GROUP"] = {
     text = "Delete this group?\n\nCharacters will be moved to No Group.",
     button1 = "Delete",
     button2 = "Cancel",
@@ -14058,8 +14055,8 @@ StaticPopupDialogs["PVPHUB_DELETE_GROUP"] = {
     preferredIndex = 3,
 }
 
--- StaticPopup: delete a character — caller sets PVPHUB._deleteCharCtx = charName and updates .text
-StaticPopupDialogs["PVPHUB_DELETE_CHARACTER"] = {
+-- Dialog: delete a character — caller sets PVPHUB._deleteCharCtx = charName and updates .text
+PVPHUB.Dialogs["PVPHUB_DELETE_CHARACTER"] = {
     text = "Delete this character? This action cannot be undone!",
     button1 = "Delete",
     button2 = "Cancel",

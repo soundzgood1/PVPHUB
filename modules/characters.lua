@@ -6,7 +6,7 @@
 --     behind. When a character logs in, entries with the same name and class
 --     on another realm that haven't been played since it first appeared are
 --     likely its old self: PVPHUB asks once whether to merge them
---     (StaticPopup "PVPHUB_TRANSFER_MERGE"; "Not the same" is remembered).
+--     (dialog "PVPHUB_TRANSFER_MERGE"; "Not the same" is remembered).
 --   * The Manage Characters window (Settings > Advanced): every stored
 --     character, hidden ones too, with last seen and hints ("probably moved
 --     to ...", "not seen in 60+ days"); merge, hide or delete, one at a time
@@ -257,7 +257,7 @@ function Chars.Delete(keys)
     Refresh()
 end
 
-StaticPopupDialogs["PVPHUB_TRANSFER_MERGE"] = {
+PVPHUB.Dialogs["PVPHUB_TRANSFER_MERGE"] = {
     text = "%s looks like it moved to %s.\n\nMove its match history, note and group over and remove the old entry? A backup is taken first.",
     button1 = "Merge",
     button2 = "Later",
@@ -273,7 +273,7 @@ StaticPopupDialogs["PVPHUB_TRANSFER_MERGE"] = {
     preferredIndex = 3,
 }
 
-StaticPopupDialogs["PVPHUB_CHARS_MERGE"] = {
+PVPHUB.Dialogs["PVPHUB_CHARS_MERGE"] = {
     text = "Merge %s into %s?\n\nIts match history, note and group move over (nothing the second one already has is replaced), then the old entry is removed. A backup is taken first.",
     button1 = "Merge",
     button2 = "Cancel",
@@ -284,7 +284,7 @@ StaticPopupDialogs["PVPHUB_CHARS_MERGE"] = {
     preferredIndex = 3,
 }
 
-StaticPopupDialogs["PVPHUB_CHARS_DELETE"] = {
+PVPHUB.Dialogs["PVPHUB_CHARS_DELETE"] = {
     text = "Permanently delete %s?\n\nA backup is taken first, so Settings > Advanced > Manage Backups can bring it back.",
     button1 = "Delete",
     button2 = "Cancel",
@@ -300,13 +300,13 @@ StaticPopupDialogs["PVPHUB_CHARS_DELETE"] = {
 }
 
 function Chars.AskMerge(fromKey, toKey)
-    StaticPopup_Show("PVPHUB_CHARS_MERGE", ClassColored(fromKey), ClassColored(toKey), { from = fromKey, to = toKey })
+    PVPHUB.ShowDialog("PVPHUB_CHARS_MERGE", ClassColored(fromKey), ClassColored(toKey), { from = fromKey, to = toKey })
 end
 
 function Chars.AskDelete(keys)
     if #keys == 0 then return end
     local what = #keys == 1 and ClassColored(keys[1]) or (#keys .. " characters")
-    StaticPopup_Show("PVPHUB_CHARS_DELETE", what, nil, { keys = keys })
+    PVPHUB.ShowDialog("PVPHUB_CHARS_DELETE", what, nil, { keys = keys })
 end
 
 -- At login: note when this character was first seen, then (outside combat
@@ -324,7 +324,7 @@ events:SetScript("OnEvent", function(self, _, isInitialLogin, isReload)
         if InCombatLockdown() or IsInInstance() then return end
         local old = Chars.EarlierSelves(me)[1]
         if old then
-            StaticPopup_Show("PVPHUB_TRANSFER_MERGE", ClassColored(old), ClassColored(me), { from = old, to = me })
+            PVPHUB.ShowDialog("PVPHUB_TRANSFER_MERGE", ClassColored(old), ClassColored(me), { from = old, to = me })
         end
     end)
 end)

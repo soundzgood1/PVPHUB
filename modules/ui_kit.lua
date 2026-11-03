@@ -906,6 +906,148 @@ function UI.SkinWindow(win)
 end
 
 -- --------------------------------------------------------------------------
+-- Dialogs
+-- --------------------------------------------------------------------------
+-- PVPHUB's own confirm and input dialogs, in place of Blizzard's StaticPopup.
+-- Those frames are shared: StaticPopup_Show from an addon leaves its values
+-- in them (the list of shown dialogs, each one's .which), and Blizzard code
+-- that later calls StaticPopup_Hide reads them and is blocked from protected
+-- functions, e.g. "PVPHUB tried to call IsUserOAuthed()" from the guild
+-- window. Definitions go in PVPHUB.Dialogs (created in core) with
+-- StaticPopupDialogs' fields: text (%s filled from text1 and text2),
+-- button1-3, hasEditBox, maxLetters, and OnShow, OnAccept (button 1),
+-- OnCancel (button 2) and OnAlt (button 3), each called with (dialog, data);
+-- OnAccept etc. may return true to keep the dialog open. dialog.EditBox,
+-- dialog.Text and dialog.data are named as on a StaticPopup. Enter in the
+-- box clicks button 1; Escape closes the dialog without calling anything.
+--   PVPHUB.ShowDialog(which, text1, text2, data)   -> the dialog
+--   PVPHUB.ClickDialog(dialog, index)               as if that button was clicked
+
+local DIALOG_W, DIALOG_PAD, DIALOG_GAP = 400, 18, 14
+local dialog   -- one frame, built on first use
+
+local function DialogText(parent, size)
+    local fs = parent:CreateFontString(nil, "OVERLAY")
+    if PVPHUB._RegisterTrackedFont then
+        PVPHUB._RegisterTrackedFont(fs, size, "OUTLINE")
+    else
+        fs:SetFontObject("GameFontHighlight")
+    end
+    fs:SetShadowColor(0, 0, 0, 0.8)
+    fs:SetShadowOffset(1, -1)
+    return fs
+end
+
+local function BuildDialog()
+    local f = CreateFrame("Frame", "PVPHUBDialog", UIParent)
+    f:SetWidth(DIALOG_W)
+    f:SetPoint("TOP", UIParent, "TOP", 0, -135)   -- where Blizzard's first popup sits
+    f:SetFrameStrata("FULLSCREEN_DIALOG")
+    f:SetToplevel(true)
+    f:EnableMouse(true)
+    f:SetMovable(true)
+    f:RegisterForDrag("LeftButton")
+    f:SetScript("OnDragStart", f.StartMoving)
+    f:SetScript("OnDragStop", f.StopMovingOrSizing)
+    f:SetClampedToScreen(true)
+    f:Hide()
+    tinsert(UISpecialFrames, "PVPHUBDialog")
+    UI.SkinWindow(f)
+
+    f.Text = DialogText(f, 13)
+    f.Text:SetPoint("TOP", 0, -DIALOG_PAD)
+    f.Text:SetWidth(DIALOG_W - 2 * DIALOG_PAD)
+    f.Text:SetJustifyH("CENTER")
+    f.Text:SetWordWrap(true)
+    f.text = f.Text
+
+    local box = CreateFrame("EditBox", nil, f, "InputBoxTemplate")
+    box:SetSize(260, 22)
+    box:SetAutoFocus(false)
+    box:SetScript("OnEnterPressed", function() PVPHUB.ClickDialog(f, 1) end)
+    box:SetScript("OnEscapePressed", function() f:Hide() end)
+    f.EditBox, f.editBox = box, box
+
+    f.buttons = {}
+    for i = 1, 3 do
+        local b = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+        b:SetHeight(22)
+        b:SetScript("OnClick", function() PVPHUB.ClickDialog(f, i) end)
+        UI.SkinButton(b)
+        f.buttons[i] = b
+    end
+    f:SetScript("OnHide", function(self) self.EditBox:ClearFocus() end)
+    return f
+end
+
+-- Text, then the box, then the buttons centered in one row
+local function LayoutDialog(f, def)
+    local y = DIALOG_PAD + f.Text:GetStringHeight() + DIALOG_GAP
+    if def.hasEditBox then
+        f.EditBox:ClearAllPoints()
+        f.EditBox:SetPoint("TOP", 0, -y)
+        y = y + f.EditBox:GetHeight() + DIALOG_GAP
+    end
+    local shown, total = {}, 0
+    for i, b in ipairs(f.buttons) do
+        local label = def["button" .. i]
+        b:SetShown(label ~= nil)
+        if label then
+            b:SetText(label)
+            b:SetWidth(math.max(110, b:GetFontString():GetStringWidth() + 28))
+            shown[#shown + 1] = b
+            total = total + b:GetWidth()
+        end
+    end
+    local x = -(total + (#shown - 1) * 8) / 2
+    for _, b in ipairs(shown) do
+        b:ClearAllPoints()
+        b:SetPoint("TOPLEFT", f, "TOP", x, -y)
+        x = x + b:GetWidth() + 8
+    end
+    f:SetHeight(y + 22 + DIALOG_PAD)
+end
+
+function PVPHUB.ShowDialog(which, text1, text2, data)
+    local def = PVPHUB.Dialogs and PVPHUB.Dialogs[which]
+    if not def then return end
+    dialog = dialog or BuildDialog()
+    local f = dialog
+    f.which, f.data = which, data
+    f.showCount = (f.showCount or 0) + 1
+    local text = def.text or ""
+    if text1 ~= nil or text2 ~= nil then
+        text = text:format(text1 or "", text2 or "")
+    end
+    f.Text:SetText(text)
+    f.EditBox:SetShown(def.hasEditBox == true)
+    f.EditBox:SetMaxLetters(def.maxLetters or 0)
+    f.EditBox:SetText("")
+    f:Show()
+    f:Raise()
+    if def.OnShow then def.OnShow(f, data) end
+    if def.hasEditBox and not f.EditBox:HasFocus() then f.EditBox:SetFocus() end
+    LayoutDialog(f, def)
+    -- Text metrics can lag a frame behind SetText: lay out again then
+    local shownAs = f.showCount
+    C_Timer.After(0, function()
+        if f:IsShown() and f.showCount == shownAs then LayoutDialog(f, def) end
+    end)
+    return f
+end
+
+function PVPHUB.ClickDialog(f, index)
+    if not (f and f:IsShown()) then return end
+    local def = PVPHUB.Dialogs[f.which]
+    local handler = def and (index == 1 and def.OnAccept or index == 2 and def.OnCancel
+        or index == 3 and def.OnAlt)
+    local shownAs = f.showCount
+    local keepOpen = handler and handler(f, f.data)
+    -- A handler that opened another dialog keeps that one on screen
+    if not keepOpen and f.showCount == shownAs then f:Hide() end
+end
+
+-- --------------------------------------------------------------------------
 -- Bulk and theme
 -- --------------------------------------------------------------------------
 
