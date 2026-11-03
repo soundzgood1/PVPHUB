@@ -3175,8 +3175,9 @@ end
 -- installed version's major.minor is NEW_BADGE_VERSION, and only until the
 -- user has opened the setting it marks (MarkNewBadgeSeen). A tag standing
 -- for several keys (a section header) hides once all of them are seen.
--- 7.0: 6.7 never reached CurseForge, so its Queue Timer tags show in 7.0.
-PVPHUB.NEW_BADGE_VERSION = "7.0"
+-- 7.0: 6.7 never reached CurseForge, so its Queue Timer tags show in 7.0;
+-- 7.1 is 7.0's hotfix release and keeps them.
+PVPHUB.NEW_BADGE_VERSION = "7.1"
 do
     local badges = {} -- every tag created, so seeing one updates the others
 
@@ -7158,13 +7159,20 @@ PVPHUB.frame:HookScript("OnEvent", function(self, event, ...)
                 -- features as new. Bump this string when `changes` is next
                 -- rewritten for an actual feature announcement. (6.7.0
                 -- deliberately ships without a popup.)
-                -- 7.0: the popup announces 7.0 (the card view), so it's
-                -- matched by major.minor and shown once for that release
-                -- (updatePopupShownFor), not again for 7.0.1, 7.0.2, ...
+                -- 7.0: the popup announces 7.0 (the card view). It's shown
+                -- once (updatePopupShownFor) on any version from 7.0 on, so
+                -- a player updating from 6.x straight to 7.1 still gets it
+                -- and one who already saw it on 7.0 doesn't again.
                 local UPDATE_POPUP_CONTENT_VERSION = "7.0"
 
                 SafeInitStep("welcome/update popup", function()
                     local currentVersion = C_AddOns.GetAddOnMetadata("PVPHUB", "Version") or "Unknown"
+                    local function AtLeast(version, minimum)
+                        local a, b = version:match("^(%d+)%.(%d+)")
+                        local c, d = minimum:match("^(%d+)%.(%d+)")
+                        a, b, c, d = tonumber(a) or 0, tonumber(b) or 0, tonumber(c) or 0, tonumber(d) or 0
+                        return a > c or (a == c and b >= d)
+                    end
                     if not PVPHUB_SETTINGS.welcomeShown then
                         -- Fresh install: show welcome, record version, skip update popup
                         PVPHUB_SETTINGS.lastSeenVersion = currentVersion
@@ -7174,7 +7182,7 @@ PVPHUB.frame:HookScript("OnEvent", function(self, event, ...)
                         end)
                     elseif PVPHUB_SETTINGS.lastSeenVersion ~= currentVersion then
                         PVPHUB_SETTINGS.lastSeenVersion = currentVersion
-                        if currentVersion:match("^(%d+%.%d+)") == UPDATE_POPUP_CONTENT_VERSION
+                        if AtLeast(currentVersion, UPDATE_POPUP_CONTENT_VERSION)
                            and PVPHUB_SETTINGS.updatePopupShownFor ~= UPDATE_POPUP_CONTENT_VERSION then
                             PVPHUB_SETTINGS.updatePopupShownFor = UPDATE_POPUP_CONTENT_VERSION
                             C_Timer.After(2, function()

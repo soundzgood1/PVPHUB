@@ -465,7 +465,7 @@ function PVPHUB:ShowUpdatePopup(version)
     hero:SetWidth(inner)
     Box(hero, 12, 1, 0.82, 0, 0.07)
 
-    local badge = PVPHUB.CreateNewBadge and PVPHUB.CreateNewBadge(hero, {}, "7.0")
+    local badge = PVPHUB.CreateNewBadge and PVPHUB.CreateNewBadge(hero, {}, PVPHUB.NEW_BADGE_VERSION)
     if badge then badge:SetPoint("TOPLEFT", 16, -18) end
     local heroTitle = PopupText(hero, 20, "OUTLINE")
     heroTitle:SetPoint("TOPLEFT", badge and 54 or 16, -14)

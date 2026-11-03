@@ -1,3 +1,7 @@
+## v7.1.0 Hotfix - Guild Window Error
+- Fixed: After one of PVPHUB's dialogs had been open (for example the honor cap warning or a note), the guild window could fail with "PVPHUB tried to call the protected function IsUserOAuthed()". PVPHUB's dialogs no longer use Blizzard's shared popups
+- Changed: PVPHUB's dialogs (notes, groups, honor cap warning, Manage Characters, backups) now have PVPHUB's own look, like its other windows
+
 ## v7.0.0 - The Big Overhaul
 Also includes everything from v6.7.0, which never went out on CurseForge: column sorting, the rating change (e.g. +18) after each match, a glowing queue pop with an accept countdown, the queue timer's Fade style and indicators, and smoother scrolling and dragging.
 - NEW: Cards, a second view for the Characters tab: your characters as cards, like WoW's character select. Click one to see everything: ratings per bracket and spec with season best, MMR and win rate, a rating/MMR graph (last 20, 50 or the whole season), season titles, gear with enchants and gems, currencies and your note

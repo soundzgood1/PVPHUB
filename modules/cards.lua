@@ -2991,7 +2991,7 @@ function Cards.CreateToggle(f)
     -- between the title row and the content, out of the toolbar's way (its
     -- blink animation sets its alpha, so it can't be faded out for room).
     if PVPHUB.CreateNewBadge then
-        local badge = PVPHUB.CreateNewBadge(bar, {}, "7.0")
+        local badge = PVPHUB.CreateNewBadge(bar, {}, "7.1")   -- 7.1 is 7.0's hotfix
         badge:SetPoint("TOP", bar.buttons[2], "BOTTOM", 0, -3)
         badge:SetFrameLevel(bar.buttons[2]:GetFrameLevel() + 2)
         bar.newBadge = badge
