@@ -872,10 +872,17 @@ function PVPHUB.QueueTimer:CreateFrame()
         divider:SetColorTexture(1, 1, 1, 0.08)
         row.divider = divider
 
-        -- Match history tooltip on hover (rated brackets only)
+        -- Match history tooltip on hover (rated brackets only, beside the
+        -- row), and under the row why there's no average wait
         row:SetScript("OnEnter", function(self)
             if self.currentDisplayName and PVPHUB.ShowQueueBracketTooltip then
                 PVPHUB:ShowQueueBracketTooltip(self, self.currentDisplayName)
+            end
+            if self.noEstimate then
+                GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
+                GameTooltip:SetText("No estimate", 1, 0.3, 0.3)
+                GameTooltip:AddLine("Blizzard has no average wait for your rating right now.", 1, 1, 1, true)
+                GameTooltip:Show()
             end
         end)
         row:SetScript("OnLeave", function()
@@ -1235,6 +1242,7 @@ function PVPHUB.QueueTimer:Update()
 
         local isReady = (slot.status == "confirm")
         if isReady then anyReady = true end
+        row.noEstimate = nil   -- set below for a queue that's still waiting
         local inQSec = math.floor(slot.elapsed / 1000)
 
         row.avgLabel:ClearAllPoints()
@@ -1264,7 +1272,9 @@ function PVPHUB.QueueTimer:Update()
             else
                 self.confirmTimes[slot.index] = nil
                 local estMs  = GetBattlefieldEstimatedWaitTime(slot.index) or 0
-                local avgShort = estMs > 0 and FormatMinutesShort(math.floor(estMs / 1000)) or "<1m"
+                -- 0 means Blizzard has no average for this rating, not a short queue
+                row.noEstimate = estMs <= 0
+                local avgShort = estMs > 0 and FormatMinutesShort(math.floor(estMs / 1000)) or "|cffff4d4d–|r"
                 local mmr = GetStoredMMR(displayName)
                 local mmrPart = mmr and string.format(" |cffaaaaaa(%d)|r", mmr) or ""
                 row.compactLine:SetText(string.format("|cffffd100%s|r%s   Avg %s   Q %s", displayName, mmrPart, avgShort, FormatElapsedExact(inQSec)))
@@ -1322,14 +1332,17 @@ function PVPHUB.QueueTimer:Update()
                 self.confirmTimes[slot.index] = nil
                 row.acceptSecondsLeft = nil
                 local estMs  = GetBattlefieldEstimatedWaitTime(slot.index) or 0
+                -- 0 means Blizzard has no average for this rating, not a
+                -- short queue (shown in red below, explained on hover)
+                row.noEstimate = estMs <= 0
                 if style == "simple" then
                     row.avgLabel:SetText("Avg:")
-                    row.avgValue:SetText(estMs > 0 and FormatDurationLong(math.floor(estMs / 1000)) or "< 1 min")
+                    row.avgValue:SetText(estMs > 0 and FormatDurationLong(math.floor(estMs / 1000)) or "No estimate")
                     row.inQLabel:SetText("Q:")
                     row.inQValue:SetText(FormatDurationLong(inQSec))
                 else
                     row.avgLabel:SetText("Avg Wait:")
-                    row.avgValue:SetText(estMs > 0 and FormatQueueDuration(math.floor(estMs / 1000)) or "< 1 min")
+                    row.avgValue:SetText(estMs > 0 and FormatQueueDuration(math.floor(estMs / 1000)) or "No estimate")
                     row.inQLabel:SetText("In Queue:")
                     row.inQValue:SetText(FormatElapsedExact(inQSec) .. dots)
                 end
@@ -1341,6 +1354,10 @@ function PVPHUB.QueueTimer:Update()
         -- colors it inline above).
         if isReady and style ~= "compact" and row.acceptSecondsLeft
            and row.acceptSecondsLeft <= ACCEPT_URGENT_SECONDS then
+            row.avgValue:SetTextColor(1, 0.3, 0.3, 1)
+        end
+        -- No average wait: "No estimate" in red too
+        if not isReady and style ~= "compact" and row.noEstimate then
             row.avgValue:SetTextColor(1, 0.3, 0.3, 1)
         end
         -- Show divider only between rows, not after the last active one
@@ -1599,6 +1616,7 @@ function PVPHUB.QueueTimer:_ShowPlaceholder()
         row:SetPoint("TOPLEFT",  f.body, "TOPLEFT",  0, 0)
         row:SetPoint("TOPRIGHT", f.body, "TOPRIGHT", 0, 0)
         row.currentDisplayName = nil
+        row.noEstimate = nil
         ApplyRowPadding(row)
         row.mmrLine:Hide()
         row.nameLabel:Hide()

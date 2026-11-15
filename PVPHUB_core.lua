@@ -3176,8 +3176,8 @@ end
 -- user has opened the setting it marks (MarkNewBadgeSeen). A tag standing
 -- for several keys (a section header) hides once all of them are seen.
 -- 7.0: 6.7 never reached CurseForge, so its Queue Timer tags show in 7.0;
--- 7.1 is 7.0's hotfix release and keeps them.
-PVPHUB.NEW_BADGE_VERSION = "7.1"
+-- 7.1 (hotfix) and 7.2 (no new options) keep 7.0's tags.
+PVPHUB.NEW_BADGE_VERSION = "7.2"
 do
     local badges = {} -- every tag created, so seeing one updates the others
 
@@ -8915,7 +8915,7 @@ SlashCmdList["PVPHUB"] = function(msg)
             local hideNoRatingsCheckbox = CreateFrame("CheckButton", nil, dispContent, "InterfaceOptionsCheckButtonTemplate")
             hideNoRatingsCheckbox:SetPoint("TOPLEFT", hideRealmCheckbox, "BOTTOMLEFT", 0, -2)
             hideNoRatingsCheckbox.Text:SetText("Hide Characters with No Ratings")
-            hideNoRatingsCheckbox.tooltipText = "Hide characters that have no rating in any PvP bracket"
+            hideNoRatingsCheckbox.tooltipText = "Hide characters that have no rating in any PvP bracket (the character you're logged in with always shows)"
             hideNoRatingsCheckbox:SetChecked(PVPHUB_SETTINGS.mainWindow.hideNoRatings or false)
             hideNoRatingsCheckbox:SetScript("OnClick", function(self)
                 PVPHUB_SETTINGS.mainWindow.hideNoRatings = self:GetChecked()
@@ -11834,9 +11834,11 @@ SlashCmdList["PVPHUB"] = function(msg)
                         totalConquest = totalConquest + (data.conquest or 0)
                     end
 
-                    -- Filter out characters with no ratings if setting is enabled
+                    -- Filter out characters with no ratings if setting is enabled,
+                    -- except the logged-in one: it's always listed (first, and
+                    -- a green dot on its card), so you see who you're on
                     if PVPHUB_SETTINGS.mainWindow and PVPHUB_SETTINGS.mainWindow.hideNoRatings then
-                        if hasAnyRating(data) then
+                        if hasAnyRating(data) or char == GetFullName() then
                             table.insert(sorted, { char = char, data = data })
                         end
                     else
@@ -11909,6 +11911,8 @@ SlashCmdList["PVPHUB"] = function(msg)
             -- header was clicked again to reverse it (see f:ApplySort).
             local ascending = PVPHUB_SETTINGS.sortAscending and true or false
             local pinnedChar = PVPHUB_SETTINGS.mainWindow and PVPHUB_SETTINGS.mainWindow.pinnedCharacter
+            local groupsOn = PVPHUB_SETTINGS.characterGroups and PVPHUB_SETTINGS.characterGroups.enabled
+                and PVPHUB_SETTINGS.characterGroups.groups
             table.sort(sorted, function(a, b)
                 -- Custom Order is exactly what the user arranged: no
                 -- logged-in or pinned character jumps to the top
@@ -11916,14 +11920,19 @@ SlashCmdList["PVPHUB"] = function(msg)
                     if a.sortValue ~= b.sortValue then return a.sortValue < b.sortValue end
                     return a.sortName < b.sortName
                 end
-                -- Always put current character first, then the pinned one
-                if currentChar then
-                    if a.char == currentChar then return true end
-                    if b.char == currentChar then return false end
-                end
-                if pinnedChar then
-                    if a.char == pinnedChar then return true end
-                    if b.char == pinnedChar then return false end
+                -- Without groups: the current character first, then the
+                -- pinned one. Groups are the user's own arrangement, so
+                -- inside them nothing jumps (the logged-in character has a
+                -- green dot, and so does its group bar).
+                if not groupsOn then
+                    if currentChar then
+                        if a.char == currentChar then return true end
+                        if b.char == currentChar then return false end
+                    end
+                    if pinnedChar then
+                        if a.char == pinnedChar then return true end
+                        if b.char == pinnedChar then return false end
+                    end
                 end
 
                 if sortKey == "character" then
@@ -11966,6 +11975,15 @@ SlashCmdList["PVPHUB"] = function(msg)
                     local groupIndex = GetCharacterGroup(entry.char)
                     table.insert(groupedChars[groupIndex].characters, entry)
                 end
+
+                -- The group bar of the logged-in character gets a green dot,
+                -- so it's found even with the group collapsed
+                local function HasCurrentChar(groupData)
+                    for _, entry in ipairs(groupData.characters) do
+                        if entry.char == currentChar then return true end
+                    end
+                    return false
+                end
                 
                 -- Separate "No Group" (default) from other groups
                 local defaultGroup = nil
@@ -11989,6 +12007,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                         groupCollapsed = groupData.group.collapsed or false,
                         groupIsDefault = groupData.group.isDefault or false,
                         characterCount = #groupData.characters,
+                        hasCurrentChar = HasCurrentChar(groupData),
                         groupData = groupData.group  -- Store reference for index lookup
                     })
                     
@@ -12009,6 +12028,7 @@ SlashCmdList["PVPHUB"] = function(msg)
                         groupCollapsed = defaultGroup.group.collapsed or false,
                         groupIsDefault = true,
                         characterCount = #defaultGroup.characters,
+                        hasCurrentChar = HasCurrentChar(defaultGroup),
                         groupData = defaultGroup.group
                     })
                     
@@ -12112,7 +12132,9 @@ SlashCmdList["PVPHUB"] = function(msg)
                     -- Group name with better positioning
                     local groupText = groupHeader:CreateFontString(nil, "OVERLAY", "GameFontNormal")
                     groupText:SetPoint("LEFT", collapseBtn, "RIGHT", 6, 0)
-                    groupText:SetText(string.format("|cffffffff%s|r |cff888888(%d)|r", entry.groupName, entry.characterCount))
+                    -- Green dot: the logged-in character is in this group
+                    groupText:SetText(string.format("|cffffffff%s|r |cff888888(%d)|r%s", entry.groupName, entry.characterCount,
+                        entry.hasCurrentChar and "  |TInterface\\Common\\Indicator-Green:12|t" or ""))
                     SafeSetFont(groupText, currentFont, 13, "OUTLINE")
                     table.insert(f.fontStrings, groupText)
                     

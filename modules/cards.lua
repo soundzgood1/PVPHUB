@@ -63,6 +63,7 @@ local CIRCLE_MASK = "Interface\\CHARACTERFRAME\\TempPortraitAlphaMask"
 
 Cards.pool    = {}   -- card frames, reused in display order
 Cards.headers = {}   -- group header frames, likewise
+Cards.topLines = {}  -- lines under the logged-in/pinned cards, likewise
 
 -- --------------------------------------------------------------------------
 -- View setting
@@ -320,6 +321,20 @@ local function SetFactionEmblem(tex, faction)
     tex:Show()
 end
 
+-- The logged-in and the pinned character head the list in every sort but
+-- Custom Order, and only without groups (core's sort comparator), so they
+-- don't move with the sort: "current", "pinned" or nil. A line sets them
+-- apart, a pinned card says "Pinned" and hovering explains it.
+local function TopReason(charKey)
+    if PVPHUB_SETTINGS.sortKey == "custom" then return nil end
+    local groups = PVPHUB_SETTINGS.characterGroups
+    if groups and groups.enabled and groups.groups then return nil end
+    if charKey == PVPHUB._GetFullName() then return "current" end
+    local pinned = PVPHUB_SETTINGS.mainWindow and PVPHUB_SETTINGS.mainWindow.pinnedCharacter
+    if charKey == pinned then return "pinned" end
+    return nil
+end
+
 local function CreateCharCard(container)
     local card = CreateFrame("Button", nil, container)
     card:SetHeight(CARD_HEIGHT)
@@ -352,8 +367,23 @@ local function CreateCharCard(container)
     card.noteIcon:SetPoint("TOPRIGHT", -6, -6)
     card.noteIcon:SetTexture("Interface\\Buttons\\UI-GuildButton-PublicNote-Up")
 
-    card:SetScript("OnEnter", function(self) self.glow:Show() end)
-    card:SetScript("OnLeave", function(self) self.glow:Hide() end)
+    card:SetScript("OnEnter", function(self)
+        self.glow:Show()
+        local reason = self.charKey and TopReason(self.charKey)
+        if reason then
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:SetText(reason == "current" and "Logged in" or "Pinned", 1, 0.82, 0)
+            GameTooltip:AddLine(reason == "current"
+                and "The character you're logged in with is always listed first."
+                or "A pinned character is listed right after the logged-in one.", 1, 1, 1, true)
+            GameTooltip:AddLine("Sort by Custom Order to place it yourself.", 0.7, 0.7, 0.7, true)
+            GameTooltip:Show()
+        end
+    end)
+    card:SetScript("OnLeave", function(self)
+        self.glow:Hide()
+        if GameTooltip:IsOwned(self) then GameTooltip:Hide() end
+    end)
     card:SetScript("OnClick", function(self, button)
         if not self.charKey or Cards.JustDragged() then return end
         if button == "RightButton" then
@@ -366,7 +396,10 @@ local function CreateCharCard(container)
 
     -- Drag to reorder, or into another group (see the drag section below)
     card:RegisterForDrag("LeftButton")
-    card:SetScript("OnDragStart", function(self) Cards.BeginDrag(self, "card") end)
+    card:SetScript("OnDragStart", function(self)
+        if GameTooltip:IsOwned(self) then GameTooltip:Hide() end
+        Cards.BeginDrag(self, "card")
+    end)
     card:SetScript("OnDragStop", function() Cards.EndDrag() end)
 
     return card
@@ -395,7 +428,10 @@ local function PaintCharCard(card, entry, width, selected)
     card.who:SetWidth(textW)
     card.realm:SetWidth(textW)
 
-    card.name:SetText("|cff" .. (selected and "ffffff" or style.name) .. (data.displayName or charKey:match("^([^%-]+)") or charKey) .. "|r")
+    -- The logged-in character gets the list's green dot in every sort
+    local current = charKey == PVPHUB._GetFullName()
+    local dot = current and "|TInterface\\Common\\Indicator-Green:12|t " or ""
+    card.name:SetText(dot .. "|cff" .. (selected and "ffffff" or style.name) .. (data.displayName or charKey:match("^([^%-]+)") or charKey) .. "|r")
 
     local className = (LOCALIZED_CLASS_NAMES_MALE and LOCALIZED_CLASS_NAMES_MALE[token]) or token
     local spec = PVPHUB._GetCachedSpecInfo(data.specID)
@@ -403,7 +439,12 @@ local function PaintCharCard(card, entry, width, selected)
     if spec and spec.icon then who = who .. IconMarkup(spec.icon, 12) .. " " end
     card.who:SetText(who .. cc:WrapTextInColorCode(className))
 
-    card.realm:SetText("|cff999999" .. (charKey:match("%-(.+)$") or "") .. "|r")
+    -- A pinned character has no dot, so its card says why it's on top
+    local realm = "|cff999999" .. (charKey:match("%-(.+)$") or "") .. "|r"
+    if not current and TopReason(charKey) == "pinned" then
+        realm = realm .. "  |cff666666·|r  |cffffd100Pinned|r"
+    end
+    card.realm:SetText(realm)
 
     card.noteIcon:SetShown(data.note ~= nil and data.note ~= "")
     card:SetAlpha(PVPHUB._IsCharacterStaleThisSeason(charKey) and 0.7 or 1)
@@ -482,7 +523,9 @@ local function PaintGroupHeader(h, entry)
     h.ring:SetVertexColor(unpack(style.groupRing))
     h.fill:SetVertexColor(unpack(style.groupFill))
     h.toggle:SetText(ToggleText(not entry.groupCollapsed))
-    h.text:SetText(string.format("|cffffffff%s|r  |cff777777%d|r", entry.groupName or "", entry.characterCount or 0))
+    -- Green dot: the logged-in character is in this group (core's hasCurrentChar)
+    h.text:SetText(string.format("|cffffffff%s|r  |cff777777%d|r%s", entry.groupName or "", entry.characterCount or 0,
+        entry.hasCurrentChar and "  |TInterface\\Common\\Indicator-Green:12|t" or ""))
 end
 
 -- --------------------------------------------------------------------------
@@ -1971,20 +2014,72 @@ local function CreateGearRow(parent)
     return row
 end
 
+-- Gear recorded before the client had loaded an item has no name (its link
+-- reads "[]") and item level 0. Both are filled in from the link, in the
+-- saved entry itself, once the item is loaded; the info panel then repaints.
+-- Tried once per entry and session (waiting), so an item that never loads
+-- can't start a loop.
+local waitingGear = setmetatable({}, { __mode = "k" })
+local refreshPending = false
+
+local function RefreshDetailSoon()
+    if refreshPending then return end
+    refreshPending = true
+    C_Timer.After(0.1, function()
+        refreshPending = false
+        local f = PVPHUB.window
+        if f and f:IsShown() and f.currentTab == "characters" and Cards.IsActive() and Cards.selected then
+            Cards.Select(Cards.selected)
+        end
+    end)
+end
+
+local function GearEntryComplete(entry)
+    return entry.name and entry.name ~= "" and entry.ilvl and entry.ilvl > 0
+end
+
+local function FillGearFromLink(entry)
+    local name, _, quality = C_Item.GetItemInfo(entry.link)
+    if name and name ~= "" then entry.name = name end
+    entry.quality = entry.quality or quality
+    if not entry.ilvl or entry.ilvl <= 0 then
+        local ilvl = C_Item.GetDetailedItemLevelInfo(entry.link)
+        if ilvl and ilvl > 0 then entry.ilvl = ilvl end
+    end
+end
+
+local function CompleteGearEntry(entry)
+    if not entry.link or waitingGear[entry] or GearEntryComplete(entry) then return end
+    local item = Item:CreateFromItemLink(entry.link)
+    if item:IsItemEmpty() then return end
+    waitingGear[entry] = true
+    if item:IsItemDataCached() then
+        FillGearFromLink(entry)
+    else
+        item:ContinueOnItemLoad(function()
+            FillGearFromLink(entry)
+            RefreshDetailSoon()
+        end)
+    end
+end
+
 local function PaintGearRow(row, slot, item, width)
     row:SetWidth(width)
     row.name:SetWidth(width - GEAR_ICON - 12)
     row.detail:SetWidth(width - GEAR_ICON - 12)
 
     if item then
+        CompleteGearEntry(item)
         row.link = item.link
         local r, g, b, hex = QualityColor(item.quality)
         row.icon:SetTexture(item.icon or 134400)
         row.icon:SetDesaturated(false)
         row.icon:SetAlpha(1)
         row.border:SetColorTexture(r, g, b, 0.9)
-        local ilvl = item.ilvl and ("|cffffffff" .. item.ilvl .. "|r  ") or ""
-        row.name:SetText(ilvl .. "|c" .. hex .. (item.name or "?") .. "|r")
+        -- Until a missing name/item level has loaded: "…", never a 0
+        local ilvl = (item.ilvl and item.ilvl > 0) and ("|cffffffff" .. item.ilvl .. "|r  ") or ""
+        local name = (item.name and item.name ~= "") and item.name or "…"
+        row.name:SetText(ilvl .. "|c" .. hex .. name .. "|r")
 
         local parts = {}
         if item.enchant then parts[#parts + 1] = "|cff40ff40" .. item.enchant .. "|r" end
@@ -2743,6 +2838,7 @@ local function BuildSearchList(displayList, sorted, query)
                 groupIsDefault = header.groupIsDefault,
                 groupCollapsed = false,
                 characterCount = #matches,
+                hasCurrentChar = header.hasCurrentChar,
             }
             for _, entry in ipairs(matches) do out[#out + 1] = entry end
         end
@@ -2820,10 +2916,12 @@ function Cards.Render(f, displayList, sorted)
     Cards.layout = layout
 
     local cardW = listW - 2
-    local y, nCards, nHeaders = 0, 0, 0
+    local y, nCards, nHeaders, nLines = 0, 0, 0, 0
     local groupIndex   -- the group the following cards belong to
+    local afterTop = false   -- the card above is a logged-in/pinned one (TopReason)
     for _, entry in ipairs(shown) do
         if entry.isGroupHeader then
+            afterTop = false
             nHeaders = nHeaders + 1
             local h = Cards.headers[nHeaders] or CreateGroupHeader(container)
             Cards.headers[nHeaders] = h
@@ -2836,6 +2934,34 @@ function Cards.Render(f, displayList, sorted)
             layout[#layout + 1] = { kind = "header", frame = h, groupIndex = groupIndex, top = y, height = GROUP_HEIGHT }
             y = y + GROUP_HEIGHT + 4
         elseif entry.char and entry.data then
+            -- A line between the cards that stay on top and the sorted rest:
+            -- 2 px in the heading color, fading out at both ends
+            local top = TopReason(entry.char) ~= nil
+            if afterTop and not top then
+                nLines = nLines + 1
+                local line = Cards.topLines[nLines]
+                if not line then
+                    line = { left = container:CreateTexture(nil, "ARTWORK"), right = container:CreateTexture(nil, "ARTWORK") }
+                    line.left:SetTexture("Interface\\Buttons\\WHITE8x8")
+                    line.right:SetTexture("Interface\\Buttons\\WHITE8x8")
+                    Cards.topLines[nLines] = line
+                end
+                local h = CardStyle().heading
+                local solid, clear = CreateColor(h[1], h[2], h[3], 0.85), CreateColor(h[1], h[2], h[3], 0)
+                line.left:SetGradient("HORIZONTAL", clear, solid)
+                line.right:SetGradient("HORIZONTAL", solid, clear)
+                local half = (cardW - 8) / 2
+                line.left:ClearAllPoints()
+                line.left:SetPoint("TOPLEFT", container, "TOPLEFT", 4, -(y + 3))
+                line.left:SetSize(half, 2)
+                line.right:ClearAllPoints()
+                line.right:SetPoint("TOPLEFT", line.left, "TOPRIGHT")
+                line.right:SetSize(half, 2)
+                line.left:Show()
+                line.right:Show()
+                y = y + 14
+            end
+            afterTop = top
             nCards = nCards + 1
             local card = Cards.pool[nCards] or CreateCharCard(container)
             Cards.pool[nCards] = card
@@ -2854,6 +2980,10 @@ function Cards.Render(f, displayList, sorted)
         Cards.pool[i].charKey, Cards.pool[i].entry = nil, nil
     end
     for i = nHeaders + 1, #Cards.headers do Cards.headers[i]:Hide() end
+    for i = nLines + 1, #Cards.topLines do
+        Cards.topLines[i].left:Hide()
+        Cards.topLines[i].right:Hide()
+    end
 
     -- A search that matches nobody says so
     if not container.noResults then
@@ -3198,6 +3328,9 @@ local function RecordGear()
                 end
             end
             gear[slot] = entry
+            -- Right after login some items aren't loaded yet: name and
+            -- item level follow once they are
+            CompleteGearEntry(entry)
         end
     end
     data.gear = gear

@@ -1,3 +1,11 @@
+## v7.2.0 - Logged-in Character & Queue Estimates
+- NEW: Card view: a green dot marks the character you're logged in with, and a line separates it (and a pinned character) from the rest. Hover the card to see why it's at the top
+- NEW: Groups: the bar of the group your logged-in character is in shows a green dot, in both views, so you find it even when the group is collapsed
+- Changed: Queue timer: when Blizzard has no average wait for your rating, it now says "No estimate" in red instead of "< 1 min". Hover it for why
+- Changed: The character you're logged in with is always listed, even with "Hide Characters with No Ratings" on
+- Changed: With groups on, the logged-in and pinned characters stay in their group instead of jumping to the top
+- Fixed: Card view: right after logging in, some gear could show without its name or item level
+
 ## v7.1.0 Hotfix - Guild Window Error
 - Fixed: After one of PVPHUB's dialogs had been open (for example the honor cap warning or a note), the guild window could fail with "PVPHUB tried to call the protected function IsUserOAuthed()". PVPHUB's dialogs no longer use Blizzard's shared popups
 - Changed: PVPHUB's dialogs (notes, groups, honor cap warning, Manage Characters, backups) now have PVPHUB's own look, like its other windows
