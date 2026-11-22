@@ -2105,6 +2105,181 @@ local function PaintGearRow(row, slot, item, width)
     end
 end
 
+-- A slim scroll bar for a ScrollFrame: a faint track and a thumb in the
+-- theme's color, shown only while there's something to scroll and
+-- shouldShow() (if given) agrees; wider while hovered or dragged. It fades
+-- to 30 % a moment after the last scroll, hover or drag. Drag the thumb
+-- or click the track to jump there; the mouse wheel over it scrolls too.
+-- The caller anchors it level with the scroll frame's top and bottom (the
+-- track is as tall as the scroll frame). bar.Paint() recolors it,
+-- bar.Update() places the thumb.
+function Cards.CreateScrollBar(parent, scroll, shouldShow)
+    local bar = CreateFrame("Frame", nil, parent)
+    bar:SetWidth(10)   -- hit area; what's drawn is thinner
+    bar:SetFrameLevel(scroll:GetFrameLevel() + 5)
+    bar.track = bar:CreateTexture(nil, "BACKGROUND")
+    bar.track:SetTexture(WHITE)
+    bar.track:SetPoint("TOP")
+    bar.track:SetPoint("BOTTOM")
+    bar.track:SetWidth(2)
+    local thumb = CreateFrame("Button", nil, bar)
+    thumb:SetWidth(10)
+    thumb.tex = thumb:CreateTexture(nil, "ARTWORK")
+    thumb.tex:SetTexture(WHITE)
+    thumb.tex:SetPoint("TOP")
+    thumb.tex:SetPoint("BOTTOM")
+    bar.thumb = thumb
+
+    function bar.Paint()
+        -- The theme's color, like the switches and the active tab
+        local h = ThemeColor()
+        local active = thumb.dragging or bar:IsMouseOver()
+        thumb.tex:SetWidth(active and 6 or 4)
+        thumb.tex:SetVertexColor(h[1], h[2], h[3], 0.9)
+        bar.track:SetVertexColor(1, 1, 1, active and 0.12 or 0.08)
+    end
+
+    -- Fully visible while in use, then fades to IDLE_ALPHA. Runs only
+    -- until it has faded (hidden frames don't update anyway).
+    local IDLE_ALPHA, IDLE_DELAY = 0.3, 1.2
+    bar.lastUsed = 0
+    bar:SetAlpha(IDLE_ALPHA)
+    local function Fade(self, elapsed)
+        local busy = thumb.dragging or bar:IsMouseOver() or GetTime() - bar.lastUsed < IDLE_DELAY
+        local goal = busy and 1 or IDLE_ALPHA
+        local alpha = bar:GetAlpha()
+        if math.abs(goal - alpha) < 0.01 then
+            bar:SetAlpha(goal)
+            if not busy then self:SetScript("OnUpdate", nil) end
+            return
+        end
+        -- Quick to appear, slower to fade
+        bar:SetAlpha(alpha + (goal - alpha) * math.min(1, elapsed * (goal > alpha and 14 or 4)))
+    end
+    function bar.Wake()
+        bar.lastUsed = GetTime()
+        bar:SetScript("OnUpdate", Fade)
+    end
+
+    function bar.Update()
+        local range = scroll:GetVerticalScrollRange() or 0
+        local trackH = scroll:GetHeight() or 0
+        if range < 1 or trackH <= 0 or not scroll:IsVisible()
+           or (shouldShow and not shouldShow()) then
+            bar:Hide()
+            return
+        end
+        if not bar:IsShown() then
+            -- Appearing: shown fully for a moment, so it's noticed
+            bar:Show()
+            bar.Wake()
+        end
+        local thumbH = math.min(trackH, math.max(24, trackH * trackH / (trackH + range)))
+        local pos = math.max(0, math.min(1, scroll:GetVerticalScroll() / range))
+        thumb:SetHeight(thumbH)
+        thumb:ClearAllPoints()
+        thumb:SetPoint("TOP", bar, "TOP", 0, -(trackH - thumbH) * pos)
+        bar.thumbH = thumbH
+    end
+
+    for _, script in ipairs({ "OnScrollRangeChanged", "OnVerticalScroll", "OnSizeChanged", "OnShow", "OnHide" }) do
+        scroll:HookScript(script, bar.Update)
+    end
+    scroll:HookScript("OnVerticalScroll", bar.Wake)
+
+    -- Moves the content so the thumb's top sits at offset (from the
+    -- track's top); stops a running wheel glide first
+    local function ScrollToThumb(offset)
+        local range = scroll:GetVerticalScrollRange() or 0
+        local free = (scroll:GetHeight() or 0) - (bar.thumbH or 0)
+        if range <= 0 or free <= 0 then return end
+        if scroll._pvphubScrollDriver then scroll._pvphubScrollDriver:Hide() end
+        scroll:SetVerticalScroll(math.max(0, math.min(range, offset / free * range)))
+    end
+
+    local function CursorY(frame)
+        local _, y = GetCursorPosition()
+        return y / frame:GetEffectiveScale()
+    end
+
+    local function StopThumbDrag()
+        thumb.dragging = nil
+        thumb:SetScript("OnUpdate", nil)
+        bar.Paint()
+        bar.Wake()
+    end
+
+    thumb:SetScript("OnMouseDown", function(self, button)
+        if button ~= "LeftButton" then return end
+        local thumbTop = self:GetTop()
+        if not thumbTop then return end
+        -- Where on the thumb it was grabbed, so it doesn't jump
+        local grab = thumbTop - CursorY(self)
+        self.dragging = true
+        bar.Paint()
+        bar.Wake()
+        self:SetScript("OnUpdate", function()
+            local barTop = bar:GetTop()
+            if barTop then ScrollToThumb(barTop - CursorY(self) - grab) end
+        end)
+    end)
+    thumb:SetScript("OnMouseUp", StopThumbDrag)
+    thumb:SetScript("OnHide", function(self) if self.dragging then StopThumbDrag() end end)
+
+    bar:EnableMouse(true)
+    bar:SetScript("OnMouseDown", function(self, button)
+        local top = self:GetTop()
+        if button ~= "LeftButton" or not top then return end
+        -- Centers the thumb on the click
+        ScrollToThumb(top - CursorY(self) - (bar.thumbH or 0) / 2)
+    end)
+    bar:EnableMouseWheel(true)
+    bar:SetScript("OnMouseWheel", function(_, delta)
+        local onWheel = scroll:GetScript("OnMouseWheel")
+        if onWheel then onWheel(scroll, delta) end
+    end)
+    local function Hover()
+        bar.Paint()
+        bar.Wake()
+    end
+    for _, region in ipairs({ bar, thumb }) do
+        region:HookScript("OnEnter", Hover)
+        region:HookScript("OnLeave", Hover)
+    end
+    bar.Paint()
+    bar:Hide()
+    return bar
+end
+
+-- The card list uses a slim bar like the info panel's while the card view
+-- is shown; the main scroll frame's Blizzard bar is hidden meanwhile and
+-- back in the list view (Cards.Hide)
+function Cards.UseListBar(f, on)
+    local scroll = f.scrollFrame
+    if not scroll then return end
+    Cards.listBarOn = on
+    if on and not Cards.listBar then
+        local bar = Cards.CreateScrollBar(f, scroll, function() return Cards.listBarOn end)
+        bar:SetPoint("TOPLEFT", scroll, "TOPRIGHT", 5, 0)
+        bar:SetPoint("BOTTOMLEFT", scroll, "BOTTOMRIGHT", 5, 0)
+        Cards.listBar = bar
+    end
+    local blizzBar = scroll.ScrollBar
+    if blizzBar then
+        if not blizzBar._pvphubCardsHooked then
+            blizzBar._pvphubCardsHooked = true
+            blizzBar:HookScript("OnShow", function(self)
+                if Cards.listBarOn then self:Hide() end
+            end)
+        end
+        blizzBar:SetShown(not on)
+    end
+    if Cards.listBar then
+        Cards.listBar.Paint()
+        Cards.listBar.Update()
+    end
+end
+
 local function GetDetail(f)
     if f.cardDetail then return f.cardDetail end
 
@@ -2121,6 +2296,11 @@ local function GetDetail(f)
     scroll:SetScrollChild(content)
     PVPHUB.EnableSmoothScroll(scroll, 40)
     panel.scroll, panel.content = scroll, content
+
+    -- Slim scroll bar in the panel's right margin
+    panel.scrollBar = Cards.CreateScrollBar(panel, scroll, function() return content:IsShown() end)
+    panel.scrollBar:SetPoint("TOPLEFT", scroll, "TOPRIGHT", 1, 0)
+    panel.scrollBar:SetPoint("BOTTOMLEFT", scroll, "BOTTOMRIGHT", 1, 0)
 
     -- Header
     panel.portrait = CreatePortrait(content, BIG_PORTRAIT, 18)
@@ -2254,10 +2434,14 @@ local function PaintDetail(f, charKey, width)
     local hc = CardStyle().heading
     panel.sepLeft:SetGradient("HORIZONTAL", CreateColor(hc[1], hc[2], hc[3], 0), CreateColor(hc[1], hc[2], hc[3], 0.6))
     panel.sepRight:SetGradient("HORIZONTAL", CreateColor(hc[1], hc[2], hc[3], 0.6), CreateColor(hc[1], hc[2], hc[3], 0))
+    panel.scrollBar.Paint()
 
     panel.content:SetShown(data ~= nil)
     panel.empty:SetShown(data == nil)
-    if not data then return 0 end
+    if not data then
+        panel.scrollBar.Update()
+        return 0
+    end
 
     local contentW = width - DETAIL_PAD * 2
     panel.content:SetWidth(contentW)
@@ -2516,6 +2700,7 @@ local function PaintDetail(f, charKey, width)
     end
 
     panel.content:SetHeight(y)
+    panel.scrollBar.Update()
     return y
 end
 
@@ -2885,6 +3070,7 @@ function Cards.Render(f, displayList, sorted)
         return 0
     end
     local listW, detailW = SetCardArea(f)
+    Cards.UseListBar(f, true)
     Cards.detailWidth = detailW
     Cards.lastSorted = sorted
     local container = GetContainer(f)
@@ -3014,6 +3200,7 @@ function Cards.Hide(f)
         f.scrollFrame:ClearAllPoints()
         f.scrollFrame:SetPoint("TOPLEFT", f, "TOPLEFT", 20, LIST_TOP)
         f.scrollFrame:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -AREA_RIGHT, AREA_BOTTOM)
+        Cards.UseListBar(f, false)
     end
     if f.viewToggle then Cards.PaintToggle(f.viewToggle) end
     -- The toolbar with Columns again
